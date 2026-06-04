@@ -1,0 +1,52 @@
+-- schema_phase2.sql
+-- 积分签到、广告奖励与任务配置
+
+CREATE TABLE IF NOT EXISTS signin_records (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT UNSIGNED NOT NULL,
+  signin_date DATE NOT NULL,
+  streak_day TINYINT NOT NULL DEFAULT 1,
+  reward_points INT NOT NULL DEFAULT 0,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  UNIQUE INDEX uk_user_date (user_id, signin_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS ad_reward_logs (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT UNSIGNED NOT NULL,
+  ad_date DATE NOT NULL,
+  session_id VARCHAR(64) NOT NULL,
+  watch_order TINYINT NOT NULL DEFAULT 1,
+  is_completed TINYINT(1) NOT NULL DEFAULT 0,
+  reward_points INT NOT NULL DEFAULT 0,
+  reward_status VARCHAR(16) NOT NULL DEFAULT 'pending',
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  UNIQUE INDEX uk_session_id (session_id),
+  INDEX idx_user_date (user_id, ad_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS point_tasks (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  task_key VARCHAR(32) NOT NULL,
+  title VARCHAR(64) NOT NULL,
+  task_group VARCHAR(16) NOT NULL DEFAULT 'daily',
+  reward_points INT NOT NULL DEFAULT 0,
+  icon VARCHAR(32) NOT NULL DEFAULT '',
+  action_text VARCHAR(16) NOT NULL DEFAULT '去完成',
+  reset_cycle VARCHAR(16) NOT NULL DEFAULT 'daily',
+  status VARCHAR(16) NOT NULL DEFAULT 'active',
+  sort_order INT NOT NULL DEFAULT 0,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  UNIQUE INDEX uk_task_key (task_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS user_point_task_logs (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT UNSIGNED NOT NULL,
+  task_id BIGINT UNSIGNED NOT NULL,
+  claim_date DATE NOT NULL,
+  reward_points INT NOT NULL DEFAULT 0,
+  claimed_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  UNIQUE INDEX uk_user_task_date (user_id, task_id, claim_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

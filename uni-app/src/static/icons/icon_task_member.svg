@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none">
+  <title>会员任务</title>
+  <defs>
+    <linearGradient id="bg" x1="8" y1="8" x2="57" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7A5CFF"/>
+      <stop offset=".55" stop-color="#A76BFF"/>
+      <stop offset="1" stop-color="#FF7ACB"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="17" y1="12" x2="48" y2="48" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFF1A3"/>
+      <stop offset=".56" stop-color="#FFD15C"/>
+      <stop offset="1" stop-color="#FFB84D"/>
+    </linearGradient>
+  </defs>
+  <rect x="6" y="6" width="52" height="52" rx="18" fill="url(#bg)"/>
+  <path d="M16 27l8-9 8 12 8-12 8 9-4 19H20l-4-19Z" fill="url(#gold)"/>
+  <path d="M22 42h20" stroke="white" stroke-opacity=".86" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="32" cy="32" r="5" fill="white" fill-opacity=".78"/>
+</svg>

@@ -1,0 +1,26 @@
+{
+  "name": "ai-creator-uni-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:mp-weixin": "uni -p mp-weixin",
+    "build:mp-weixin": "uni build -p mp-weixin",
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "@dcloudio/uni-app": "3.0.0-alpha-5010120260522001",
+    "@dcloudio/uni-mp-weixin": "3.0.0-alpha-5010120260522001",
+    "pinia": "^2.3.1",
+    "vue": "^3.5.16"
+  },
+  "devDependencies": {
+    "@dcloudio/types": "^3.4.31",
+    "@dcloudio/vite-plugin-uni": "3.0.0-alpha-5010120260522001",
+    "@vue/tsconfig": "^0.7.0",
+    "sass": "^1.89.0",
+    "typescript": "^5.8.3",
+    "vite": "5.2.8",
+    "vue-tsc": "^2.2.10"
+  }
+}

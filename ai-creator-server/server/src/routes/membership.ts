@@ -1,0 +1,115 @@
+import { Router, Request, Response } from 'express';
+import { authMiddleware } from '../middleware/auth';
+import {
+  getMembershipPlans,
+  getPlanDetail,
+  getPlanFeatureDiscounts,
+  getUserMembership,
+  getMembershipRights,
+} from '../services/membership.service';
+import { success, error } from '../utils/response';
+import { ErrorCodes } from '../types';
+
+const router = Router();
+
+function parseHighlightFeatures(value: any): any {
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function serializePointRule(row: any): any {
+  if (!row?.point_rule_id && !row?.id) return null;
+  return {
+    totalPoints: Number(row.total_points || 0),
+    immediatePoints: Number(row.immediate_points || 0),
+    monthlyPoints: Number(row.monthly_points || 0),
+    giftPoints: Number(row.gift_points || 0),
+    grantMode: row.grant_mode || 'immediate',
+    pointsExpireType: row.points_expire_type || 'with_membership',
+    pointsDiscountRate: Number(row.points_discount_rate ?? 1),
+  };
+}
+
+router.get('/plans', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const version = (req.query as any).version;
+    const list = await getMembershipPlans(version || undefined);
+    const plans = [];
+    for (const plan of list) {
+      plans.push({
+        planId: plan.id,
+        name: plan.name,
+        planKey: plan.plan_key,
+        versionKey: plan.version_key,
+        versionName: plan.version_name,
+        durationType: plan.duration_type,
+        durationDays: plan.duration_days,
+        price: plan.price,
+        originalPrice: plan.original_price,
+        tag: plan.tag,
+        highlightFeatures: parseHighlightFeatures(plan.highlight_features),
+        pointRule: serializePointRule(plan),
+        featureDiscounts: await getPlanFeatureDiscounts(plan.id),
+      });
+    }
+    success(res, {
+      list: plans,
+    });
+  } catch {
+    error(res, ErrorCodes.SERVER_ERROR, 'Failed to get membership plans');
+  }
+});
+
+router.get('/plans/:id(\\d+)', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const detail = await getPlanDetail(parseInt(req.params.id, 10));
+    if (!detail) {
+      error(res, ErrorCodes.NOT_FOUND, 'Membership plan not found', 404);
+      return;
+    }
+
+    success(res, {
+      planId: detail.plan.id,
+      name: detail.plan.name,
+      planKey: detail.plan.plan_key,
+      versionName: detail.plan.version_name,
+      versionKey: detail.plan.version_key,
+      durationType: detail.plan.duration_type,
+      durationDays: detail.plan.duration_days,
+      price: detail.plan.price,
+      originalPrice: detail.plan.original_price,
+      tag: detail.plan.tag,
+      description: detail.plan.description,
+      rights: detail.rights,
+      pointRules: detail.pointRules,
+      pointRule: serializePointRule(detail.pointRules),
+      featureDiscounts: detail.featureDiscounts,
+    });
+  } catch {
+    error(res, ErrorCodes.SERVER_ERROR, 'Failed to get membership plan detail');
+  }
+});
+
+router.get('/me', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const membership = await getUserMembership(req.user!.userId);
+    success(res, membership);
+  } catch {
+    error(res, ErrorCodes.SERVER_ERROR, 'Failed to get membership status');
+  }
+});
+
+router.get('/rights', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const rights = await getMembershipRights(req.user!.userId);
+    success(res, { rights });
+  } catch {
+    error(res, ErrorCodes.SERVER_ERROR, 'Failed to get membership rights');
+  }
+});
+
+export default router;

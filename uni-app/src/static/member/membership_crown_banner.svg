@@ -1,0 +1,46 @@
+<svg width="720" height="420" viewBox="0 0 720 420" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="会员皇冠装饰">
+  <title>会员皇冠装饰</title>
+  <defs>
+    <linearGradient id="crownGold" x1="182" y1="66" x2="552" y2="340" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFF3A4"/>
+      <stop offset="0.42" stop-color="#FFD24C"/>
+      <stop offset="0.72" stop-color="#FF9D4A"/>
+      <stop offset="1" stop-color="#FF6FB4"/>
+    </linearGradient>
+    <linearGradient id="gem" x1="318" y1="120" x2="394" y2="206" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFE5FF"/>
+      <stop offset="0.45" stop-color="#FF6ED0"/>
+      <stop offset="1" stop-color="#8C5CFF"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="88" y1="156" x2="650" y2="332" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0"/>
+      <stop offset="0.3" stop-color="#FFE98A" stop-opacity="0.78"/>
+      <stop offset="0.72" stop-color="#FF70C8" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="shadow" x="80" y="20" width="560" height="360" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="28" stdDeviation="28" flood-color="#2E135F" flood-opacity="0.28"/>
+    </filter>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="0" stdDeviation="8" flood-color="#FFF6B8" flood-opacity="0.85"/>
+    </filter>
+  </defs>
+
+  <ellipse cx="362" cy="271" rx="250" ry="54" stroke="url(#ring)" stroke-width="10" opacity="0.85"/>
+  <path d="M118 272C224 230 379 224 600 260" stroke="white" stroke-opacity="0.18" stroke-width="7" stroke-linecap="round"/>
+
+  <g filter="url(#shadow)">
+    <path d="M157 123L270 225L346 77L424 226L565 115L527 302C523 323 504 338 482 338H230C209 338 190 323 186 302L157 123Z" fill="url(#crownGold)"/>
+    <path d="M184 281H535L527 321C523 332 512 340 500 340H220C208 340 197 332 194 321L184 281Z" fill="#FFB04D" opacity="0.85"/>
+    <path d="M187 146L272 224L346 78L424 224L536 137" stroke="#FFF5B8" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" opacity="0.62"/>
+    <path d="M326 129L364 107L402 129L402 173L364 196L326 173V129Z" fill="url(#gem)"/>
+    <path d="M340 137L364 123L388 137L364 151L340 137Z" fill="white" opacity="0.45"/>
+  </g>
+
+  <g filter="url(#glow)">
+    <path d="M610 90L621 118L651 122L628 140L635 169L610 153L585 169L592 140L569 122L599 118L610 90Z" fill="#FFF1A4"/>
+    <path d="M116 74L124 93L145 96L129 109L134 130L116 119L98 130L103 109L87 96L108 93L116 74Z" fill="#FFFFFF" opacity="0.9"/>
+    <circle cx="566" cy="197" r="13" fill="#FF82C9"/>
+    <circle cx="200" cy="72" r="9" fill="#FFE98A"/>
+  </g>
+</svg>

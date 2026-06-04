@@ -1,0 +1,22 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="AI视频">
+<defs>
+<linearGradient id="orbVideo" x1="88" y1="92" x2="416" y2="414" gradientUnits="userSpaceOnUse"><stop stop-color="#6C7BFF"/><stop offset="0.6" stop-color="#A76BFF"/><stop offset="1" stop-color="#FF70C8"/></linearGradient>
+<linearGradient id="panelVideo" x1="144" y1="146" x2="372" y2="344" gradientUnits="userSpaceOnUse"><stop stop-color="#FFFFFF"/><stop offset="1" stop-color="#FFE6F5"/></linearGradient>
+<filter id="shadowVideo" x="48" y="52" width="420" height="420" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feDropShadow dx="0" dy="24" stdDeviation="26" flood-color="#7B5CFF" flood-opacity="0.22"/></filter>
+</defs>
+<g filter="url(#shadowVideo)">
+<circle cx="252" cy="258" r="132" fill="url(#orbVideo)"/>
+<circle cx="318" cy="200" r="72" fill="#FFFFFF" opacity="0.12"/>
+<path d="M70 296C140 212 278 176 434 208" stroke="#C6A9FF" stroke-width="10" stroke-linecap="round" opacity="0.6"/>
+<path d="M90 336C188 390 330 378 430 280" stroke="#FFB4E2" stroke-width="8" stroke-linecap="round" opacity="0.5"/>
+<rect x="132" y="160" width="244" height="176" rx="34" fill="url(#panelVideo)"/>
+<rect x="160" y="188" width="188" height="112" rx="24" fill="#FFFFFF" opacity="0.64"/>
+<path d="M232 221C232 208 246 201 257 208L312 241C323 248 323 264 312 271L257 304C246 311 232 304 232 291V221Z" fill="#7B5CFF"/>
+<rect x="144" y="336" width="218" height="18" rx="9" fill="#FFD15C"/>
+<rect x="162" y="336" width="72" height="18" rx="9" fill="#FFFFFF" opacity="0.9"/>
+</g>
+<rect x="342" y="98" width="76" height="62" rx="28" fill="#7B5CFF"/>
+<text x="380" y="139" fill="white" font-family="Arial, sans-serif" font-size="34" font-weight="800" text-anchor="middle">AI</text>
+<circle cx="126" cy="126" r="15" stroke="#FFB4E2" stroke-width="8" opacity="0.78"/>
+<path d="M386 326L410 334L386 342L378 366L370 342L346 334L370 326L378 302L386 326Z" fill="#FFD15C"/>
+</svg>

@@ -1,0 +1,76 @@
+# Repository boundary
+# By default, keep the root repository focused on the mini-program frontend and
+# the backend/admin service. Root-level scratch files, local agent assets, raw
+# design materials, archives and secrets stay out of Git unless explicitly
+# allowed below.
+/*
+
+!.gitignore
+!README.md
+!PRODUCT.md
+!小程序自动编译说明.md
+!uni-app/
+!uni-app/**
+!ai-creator-server/
+!ai-creator-server/**
+
+# Non-runtime drafts inside allowed project folders
+ai-creator-server/admin-web/prototypes/
+ai-creator-server/image.codesonline.dev生图API调用说明*.md
+ai-creator-server/docs/CLAUDE.MD
+
+# Sensitive configuration
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.production.example
+**/.env.installed
+APIKEY.md
+
+# Dependencies
+**/node_modules/
+
+# Build outputs and generated packages
+**/dist/
+**/build/
+**/unpackage/
+**/.vite/
+**/.cache/
+**/*.tsbuildinfo
+*.zip
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+
+# Local IDE and platform-private files
+**/.DS_Store
+**/.hbuilderx/
+**/project.private.config.json
+**/.idea/
+**/.vscode/
+
+# Runtime data and local install state
+**/uploads/
+**/logs/
+**/backups/
+**/runtime/
+**/update-packages/
+**/.install-state.json
+**/.pm2/
+**/test-results/
+
+# Local automation, QA and temporary workspaces
+.agents/
+.claude/
+.codex-qa/
+tmp/
+**/.claude/
+**/.codex-qa/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.cache
+*.bak
+*.swp

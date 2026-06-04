@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none">
+  <title>签到任务</title>
+  <defs>
+    <linearGradient id="bg" x1="10" y1="7" x2="57" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8D6BFF"/>
+      <stop offset="1" stop-color="#FF7ACB"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="20" y1="14" x2="47" y2="49" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFF1A3"/>
+      <stop offset="1" stop-color="#FFC857"/>
+    </linearGradient>
+  </defs>
+  <rect x="6" y="6" width="52" height="52" rx="18" fill="url(#bg)"/>
+  <rect x="17" y="19" width="30" height="28" rx="7" fill="white" fill-opacity=".94"/>
+  <path d="M22 15v8M42 15v8" stroke="#FFD15C" stroke-width="5" stroke-linecap="round"/>
+  <path d="M17 28h30" stroke="#E9E2FF" stroke-width="4"/>
+  <path d="M32 31l3.1 6.2 6.9 1-5 4.9 1.2 6.9L32 46.7 25.8 50l1.2-6.9-5-4.9 6.9-1L32 31Z" fill="url(#gold)"/>
+</svg>

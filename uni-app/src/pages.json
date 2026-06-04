@@ -1,0 +1,32 @@
+{
+  "pages": [
+    { "path": "pages/home/index", "style": { "navigationBarTitleText": "AI创作工坊", "navigationStyle": "custom" } },
+    { "path": "pages/inspiration/index", "style": { "navigationBarTitleText": "灵感", "navigationStyle": "custom" } },
+    { "path": "pages/comic/index", "style": { "navigationBarTitleText": "AI漫剧", "navigationStyle": "custom" } },
+    { "path": "pages/history/index", "style": { "navigationBarTitleText": "记录", "navigationStyle": "custom" } },
+    { "path": "pages/profile/index", "style": { "navigationBarTitleText": "我的", "navigationStyle": "custom" } },
+    { "path": "pages/ai-image/index", "style": { "navigationBarTitleText": "AI生图" } },
+    { "path": "pages/ai-video/index", "style": { "navigationBarTitleText": "AI视频生成" } },
+    { "path": "pages/member/index", "style": { "navigationBarTitleText": "会员中心", "navigationStyle": "custom" } },
+    { "path": "pages/member-info/index", "style": { "navigationBarTitleText": "我的会员信息" } },
+    { "path": "pages/points/index", "style": { "navigationBarTitleText": "积分账户" } },
+    { "path": "pages/points-detail/index", "style": { "navigationBarTitleText": "积分明细", "enablePullDownRefresh": true, "onReachBottomDistance": 80 } },
+    { "path": "pages/points-ad/index", "style": { "navigationBarTitleText": "看广告得积分" } },
+    { "path": "pages/invite/index", "style": { "navigationBarTitleText": "邀请好友" } },
+    { "path": "pages/checkin/index", "style": { "navigationBarTitleText": "每日签到" } },
+    { "path": "pages/tasks/index", "style": { "navigationBarTitleText": "任务中心" } },
+    { "path": "pages/generating/index", "style": { "navigationBarTitleText": "生成中" } },
+    { "path": "pages/result/index", "style": { "navigationBarTitleText": "生成结果" } },
+    { "path": "pages/task-detail/index", "style": { "navigationBarTitleText": "任务详情" } },
+    { "path": "pages/login/index", "style": { "navigationBarTitleText": "登录" } },
+    { "path": "pages/announcements/index", "style": { "navigationBarTitleText": "公告消息", "enablePullDownRefresh": true } },
+    { "path": "pages/agreement/index", "style": { "navigationBarTitleText": "用户协议" } }
+  ],
+  "globalStyle": {
+    "navigationBarTextStyle": "black",
+    "navigationBarTitleText": "AI创作工坊",
+    "navigationBarBackgroundColor": "#ffffff",
+    "backgroundColor": "#f7f8ff",
+    "backgroundTextStyle": "dark"
+  }
+}

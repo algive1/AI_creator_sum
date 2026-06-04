@@ -1,0 +1,18 @@
+{
+  "name": "AI创作工坊",
+  "appid": "__UNI__AICREATOR",
+  "description": "AI创作工坊 uni-app 小程序",
+  "versionName": "0.1.0",
+  "versionCode": "1",
+  "transformPx": false,
+  "mp-weixin": {
+    "appid": "",
+    "setting": {
+      "urlCheck": false,
+      "es6": true,
+      "postcss": true,
+      "minified": true
+    },
+    "usingComponents": true
+  }
+}

@@ -1,0 +1,67 @@
+# Dependencies
+node_modules/
+server/node_modules/
+admin-web/node_modules/
+
+# Local environment and install lock
+.env
+.env.*
+!.env.example
+!.env.production.example
+server/.env
+server/.env.*
+!server/.env.example
+!server/.env.production.example
+admin-web/.env
+admin-web/.env.*
+!admin-web/.env.example
+!admin-web/.env.production.example
+.env.installed
+server/.env.installed
+admin-web/.env.installed
+
+# Runtime data
+uploads/
+server/uploads/
+logs/
+server/logs/
+backups/
+server/backups/
+update-packages/
+server/update-packages/
+
+# Build output and local caches
+dist/
+server/dist/
+admin-web/dist/
+.cache/
+.vite/
+server/.vite/
+admin-web/.vite/
+*.tsbuildinfo
+.claude/
+.codex-qa/
+server/.codex-qa/
+admin-web/.codex-qa/
+codex临时用/
+codex*/
+
+# Local installer/runtime state
+server/.install-state.json
+server/runtime/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.cache
+*.bak
+*.swp
+
+# Local release archives
+*.zip
+*.tar.gz
+ai-creator.zip
+ai-creator-server.zip
+ai-creator-server-*.zip
+ai-creator-release-*.tar.gz
+.release-staging/

@@ -1,0 +1,49 @@
+@font-face {
+  font-family: tdesign-icons;
+  src: url("./tdesign-icons.woff") format("woff");
+  font-weight: 400;
+  font-style: normal;
+}
+
+.t-icon {
+  font-family: tdesign-icons;
+}
+
+.t-icon-base {
+  display: block;
+  font-style: normal;
+  font-weight: 400;
+  font-variant: normal;
+  line-height: 1;
+  text-align: center;
+  text-transform: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+.t-icon-chevron-down::before {
+  content: "\E1C8";
+}
+
+.t-icon-chevron-right::before {
+  content: "\E1D8";
+}
+
+.t-icon-edit-1::before {
+  content: "\E2F8";
+}
+
+.t-icon-image::before {
+  content: "\E498";
+}
+
+.t-icon-star::before {
+  content: "\E781";
+}
+
+.t-icon-tag::before {
+  content: "\E7E1";
+}
+
+.t-icon-usergroup::before {
+  content: "\E8D3";
+}

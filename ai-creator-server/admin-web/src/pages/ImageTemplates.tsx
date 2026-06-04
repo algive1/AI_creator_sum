@@ -1,0 +1,141 @@
+import { useEffect, useState } from 'react';
+import { Button, Checkbox, Form, Image, Input, InputNumber, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Upload, message } from 'antd';
+import { BulbOutlined, DeleteOutlined, EditOutlined, PlusOutlined, UploadOutlined } from '@ant-design/icons';
+import api from '../services/api';
+import { TEMPLATE_USAGE_SHORT } from '../utils/adminLabels';
+
+const POSITIONS = [
+  { key: 'text_to_image', label: '文生图' }, { key: 'image_to_image', label: '图生图' },
+  { key: 'image_edit', label: '图片编辑' }, { key: 'inspiration', label: '灵感广场' },
+];
+
+const USAGE_OPTIONS = [
+  { label: '文生图 — 从文字描述生成新图', value: 'generate' },
+  { label: '图生图参考 — 上传参考图，参考风格生成', value: 'reference' },
+  { label: '图片编辑 — 上传原图，局部修改', value: 'edit' },
+];
+
+const USAGE_TARGET_FEATURES: Record<string, string> = {
+  generate: 'text_to_image',
+  reference: 'image_to_image',
+  edit: 'image_edit',
+};
+
+function resolveTargetFeature(usageType: string, config: Record<string, any>) {
+  const selectedPosition = POSITIONS.find(item => item.key !== 'inspiration' && config[item.key]);
+  return selectedPosition?.key || USAGE_TARGET_FEATURES[usageType] || 'text_to_image';
+}
+
+export default function ImageTemplates() {
+  const [data, setData] = useState<any[]>([]);
+  const [cats, setCats] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editing, setEditing] = useState<any>(null);
+  const [form] = Form.useForm();
+  const [saving, setSaving] = useState(false);
+  const [uploadingCover, setUploadingCover] = useState(false);
+  const [displayConfig, setDisplayConfig] = useState<Record<string, any>>({});
+  const coverUrl = Form.useWatch('coverUrl', form);
+
+  const [pagination, setPagination] = useState({ current: 1, pageSize: 20, total: 0 });
+  const fetch = (page = 1) => { setLoading(true); api.get('/templates', { params: { type: 'image', page, pageSize: 20 } }).then((r: any) => { const d = r.data?.list || r.data || []; setData(Array.isArray(d) ? d : []); setPagination(p => ({ ...p, current: page, total: r.data?.pagination?.total || 0 })); }).finally(() => setLoading(false)); };
+  const fetchCats = () => { api.get('/content/template-categories').then((r: any) => setCats(r.data || [])); };
+  useEffect(() => { fetch(); fetchCats(); }, []);
+
+  const openCreate = () => { setEditing(null); form.resetFields(); form.setFieldsValue({ ratio: '1:1', sortOrder: 0, status: 'active', usageType: 'generate' }); setDisplayConfig({}); setModalOpen(true); };
+  const openEdit = (item: any) => { setEditing(item); form.setFieldsValue({ title: item.title || item.name, prompt: item.prompt, coverUrl: item.coverUrl, categoryId: item.categoryId, ratio: item.ratio || '1:1', quality: item.quality || '', style: item.style || '', sortOrder: item.sortOrder || 0, isRecommended: item.isRecommended || false, status: item.status || 'active', usageType: item.usageType || 'generate' }); setDisplayConfig(item.displayConfig || {}); setModalOpen(true); };
+
+  const toggleDisplay = (k: string) => { setDisplayConfig(p => p[k] ? (() => { const c = { ...p }; delete c[k]; return c; })() : { ...p, [k]: { pinned: false, pinOrder: 0 } }); };
+  const togglePin = (k: string) => { setDisplayConfig(p => { if (!p[k]) return p; const max = Math.max(0, ...Object.values(p).map((x: any) => x?.pinOrder || 0)); return { ...p, [k]: { ...p[k], pinned: !p[k].pinned, pinOrder: p[k].pinned ? 0 : max + 1 } }; }); };
+  const uploadCoverFile = async (options: any) => {
+    const file = options.file as File;
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('category', 'template_cover');
+    formData.append('refType', 'template_cover');
+    try {
+      setUploadingCover(true);
+      const result: any = await api.post('/files/upload', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+      const fileInfo = result?.data || result;
+      const url = fileInfo?.url || fileInfo?.cdnUrl;
+      if (!url) throw new Error('上传成功但未返回文件地址');
+      form.setFieldsValue({ coverUrl: url });
+      message.success('封面上传成功');
+      options.onSuccess?.(fileInfo, file);
+    } catch (e: any) {
+      message.error(e?.message || '封面上传失败');
+      options.onError?.(e);
+    } finally {
+      setUploadingCover(false);
+    }
+  };
+
+  const save = async () => { try { setSaving(true); const v = await form.validateFields(); const usageType = v.usageType || 'generate'; const body = { ...v, templateType: 'image', usageType, targetFeature: resolveTargetFeature(usageType, displayConfig), displayConfig: Object.keys(displayConfig).length > 0 ? displayConfig : null }; if (editing) await api.put('/templates/' + editing.id, body); else await api.post('/templates', body); message.success(editing ? '已保存' : '已创建'); setModalOpen(false); fetch(); } catch (e: any) { if (e?.errorFields) return; message.error(e?.message || '保存模板失败'); } finally { setSaving(false); } };
+  const toggleStatus = async (r: any) => { try { const s = r.status === 'active' ? 'inactive' : 'active'; await api.put('/templates/' + r.id, { status: s }); message.success(s === 'active' ? '已启用' : '已停用'); fetch(); } catch (e: any) { message.error(e?.message || '更新模板状态失败'); } };
+  const del = async (id: number) => { try { await api.delete('/templates/' + id); message.success('已删除'); fetch(); } catch (e: any) { message.error(e?.message || '删除模板失败'); } };
+
+  const cols = [
+    { title: '封面', width: 70, render: (_: any, r: any) => r.coverUrl ? <Image src={r.coverUrl} width={48} height={48} style={{ borderRadius: 4, objectFit: 'cover' }} preview={false} /> : <div style={{ width: 48, height: 48, borderRadius: 4, background: '#f0f0f0' }} /> },
+    { title: '名称', dataIndex: 'title', width: 150, ellipsis: true, render: (v: string, r: any) => <span><strong>{v}</strong>{r.isRecommended ? <Tag color="orange" style={{ marginLeft: 4 }}>推荐</Tag> : ''}</span> },
+    { title: '分类', dataIndex: 'categoryId', width: 100, render: (v: number) => { const c = cats.find(x => x.id === v); return c ? <Tag color="blue">{c.name}</Tag> : '-'; }},
+    { title: '用法', dataIndex: 'usageType', width: 90, render: (v: string) => <Tag color={v === 'edit' ? 'orange' : v === 'reference' ? 'purple' : 'blue'}>{TEMPLATE_USAGE_SHORT[v] || '文生图'}</Tag> },
+    { title: '展示位置', width: 180, render: (_: any, r: any) => { const cfg = r.displayConfig; if (!cfg || !Object.keys(cfg).length) return '-'; return <Space size={2} wrap>{Object.keys(cfg).map(k => <Tag key={k} color={cfg[k]?.pinned ? 'orange' : 'blue'}>{POSITIONS.find(p => p.key === k)?.label || k}{cfg[k]?.pinned ? ' 📌' : ''}</Tag>)}</Space>; }},
+    { title: '提示词', dataIndex: 'prompt', ellipsis: true, width: 180 },
+    { title: '引用', dataIndex: 'usageCount', width: 60 },
+    { title: '排序', dataIndex: 'sortOrder', width: 60 },
+    { title: '状态', dataIndex: 'status', width: 70, render: (v: string) => <Tag color={v === 'active' ? 'green' : 'default'}>{v === 'active' ? '启用' : '停用'}</Tag> },
+    { title: '操作', width: 200, render: (_: any, r: any) => (<Space size={4}><Button size="small" icon={<EditOutlined />} onClick={() => openEdit(r)}>编辑</Button><Switch checked={r.status === 'active'} onChange={() => toggleStatus(r)} checkedChildren="开" unCheckedChildren="关" /><Popconfirm title="确认删除？" onConfirm={() => del(r.id)}><Button size="small" danger icon={<DeleteOutlined />} /></Popconfirm></Space>)},
+  ];
+
+  return (
+    <div>
+      <h2><BulbOutlined /> 图片模板</h2>
+      <Button type="primary" icon={<PlusOutlined />} onClick={openCreate} style={{ marginBottom: 12 }}>新增模板</Button>
+      <Table rowKey="id" columns={cols} dataSource={data} loading={loading} size="middle" pagination={pagination} onChange={(p: any) => fetch(p.current)} />
+      <Modal title={editing ? '编辑模板' : '新增模板'} open={modalOpen} onCancel={() => setModalOpen(false)} onOk={save} confirmLoading={saving} width={640} destroyOnClose>
+        <Form form={form} layout="vertical" style={{ marginTop: 12 }}>
+          <Form.Item name="title" label="模板名称" rules={[{ required: true }]}><Input /></Form.Item>
+          <Form.Item name="prompt" label="提示词" rules={[{ required: true }]} extra="用户选择后填入生成框。"><Input.TextArea rows={3} /></Form.Item>
+          <Form.Item label="封面图片" extra="支持上传 jpg、png、webp，也可以手动填写图片 URL。">
+            <Space align="start" size={12} style={{ width: '100%' }}>
+              {coverUrl ? <Image src={coverUrl} width={96} height={96} style={{ borderRadius: 6, objectFit: 'cover' }} /> : <div style={{ width: 96, height: 96, borderRadius: 6, background: '#f5f5f5', border: '1px dashed #d9d9d9' }} />}
+              <div style={{ flex: 1 }}>
+                <Space style={{ marginBottom: 8 }}>
+                  <Upload accept="image/jpeg,image/png,image/webp" showUploadList={false} customRequest={uploadCoverFile} maxCount={1}>
+                    <Button icon={<UploadOutlined />} loading={uploadingCover}>上传封面</Button>
+                  </Upload>
+                </Space>
+                <Form.Item name="coverUrl" noStyle><Input placeholder="https://..." /></Form.Item>
+              </div>
+            </Space>
+          </Form.Item>
+          <Form.Item name="usageType" label="模板用法" extra="决定模板出现在小程序的哪个功能页中。文生图Tab/图生图Tab/图片编辑Tab。" rules={[{ required: true }]}>
+            <Select options={USAGE_OPTIONS} />
+          </Form.Item>
+          <Form.Item name="categoryId" label="分类"><Select allowClear placeholder="选择分类" options={cats.map((c: any) => ({ label: c.name, value: c.id }))} /></Form.Item>
+          <Form.Item label="展示位置" extra="勾选后出现在小程序对应页面。">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {POSITIONS.map(p => (
+                <div key={p.key} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Checkbox checked={!!displayConfig[p.key]} onChange={() => toggleDisplay(p.key)}>{p.label}</Checkbox>
+                  {displayConfig[p.key] && <><Checkbox checked={!!displayConfig[p.key].pinned} onChange={() => togglePin(p.key)} style={{ marginLeft: 16 }}>置顶</Checkbox>{displayConfig[p.key].pinned && <span style={{ fontSize: 12, color: '#999' }}>顺序 {displayConfig[p.key].pinOrder}</span>}</>}
+                </div>
+              ))}
+            </div>
+          </Form.Item>
+          <Space style={{ display: 'flex' }} size="middle">
+            <Form.Item name="ratio" label="比例"><Input style={{ width: 90 }} /></Form.Item>
+            <Form.Item name="quality" label="画质"><Input style={{ width: 90 }} /></Form.Item>
+            <Form.Item name="style" label="风格"><Input style={{ width: 90 }} /></Form.Item>
+          </Space>
+          <Space style={{ display: 'flex' }} size="middle">
+            <Form.Item name="sortOrder" label="排序"><InputNumber min={0} style={{ width: 80 }} /></Form.Item>
+            <Form.Item name="isRecommended" label="推荐" valuePropName="checked"><Switch /></Form.Item>
+            {editing && <Form.Item name="status" label="状态"><Select options={[{ label: '启用', value: 'active' }, { label: '停用', value: 'inactive' }]} style={{ width: 100 }} /></Form.Item>}
+          </Space>
+        </Form>
+      </Modal>
+    </div>
+  );
+}

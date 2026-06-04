@@ -1,0 +1,23 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="AI漫剧">
+<defs>
+<linearGradient id="orbComic" x1="92" y1="88" x2="416" y2="412" gradientUnits="userSpaceOnUse"><stop stop-color="#8B5CFF"/><stop offset="1" stop-color="#FF76C9"/></linearGradient>
+<linearGradient id="faceComic" x1="158" y1="134" x2="360" y2="342" gradientUnits="userSpaceOnUse"><stop stop-color="#FFFFFF"/><stop offset="1" stop-color="#FFE9F8"/></linearGradient>
+<filter id="shadowComic" x="50" y="46" width="412" height="426" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feDropShadow dx="0" dy="24" stdDeviation="26" flood-color="#8B5CFF" flood-opacity="0.22"/></filter>
+</defs>
+<g filter="url(#shadowComic)">
+<circle cx="254" cy="258" r="132" fill="url(#orbComic)"/>
+<circle cx="194" cy="196" r="62" fill="#FFFFFF" opacity="0.13"/>
+<path d="M74 296C142 214 276 176 432 204" stroke="#CBB0FF" stroke-width="10" stroke-linecap="round" opacity="0.6"/>
+<path d="M92 338C184 390 326 386 428 288" stroke="#FFB6E3" stroke-width="8" stroke-linecap="round" opacity="0.52"/>
+<path d="M160 166C160 144 178 126 200 126H312C334 126 352 144 352 166V262C352 284 334 302 312 302H252L206 346C196 355 180 348 182 334L186 302C171 297 160 281 160 262V166Z" fill="url(#faceComic)"/>
+<path d="M184 158L210 124L238 158" stroke="#FFFFFF" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M274 158L304 124L330 158" stroke="#FFFFFF" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="222" cy="220" r="16" fill="#7B5CFF"/>
+<circle cx="292" cy="220" r="16" fill="#FF5CB8"/>
+<path d="M232 254C248 267 270 267 286 254" stroke="#1F2437" stroke-width="10" stroke-linecap="round" opacity="0.78"/>
+</g>
+<rect x="342" y="98" width="76" height="62" rx="28" fill="#7B5CFF"/>
+<text x="380" y="139" fill="white" font-family="Arial, sans-serif" font-size="34" font-weight="800" text-anchor="middle">AI</text>
+<circle cx="126" cy="126" r="15" stroke="#FFB4E2" stroke-width="8" opacity="0.78"/>
+<path d="M386 322L410 330L386 338L378 362L370 338L346 330L370 322L378 298L386 322Z" fill="#FFD15C"/>
+</svg>

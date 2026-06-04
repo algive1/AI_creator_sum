@@ -1,0 +1,85 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="默认用户头像">
+  <title>默认用户头像</title>
+  <defs>
+    <linearGradient id="bg" x1="64" y1="32" x2="448" y2="480" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F3EEFF"/>
+      <stop offset="0.55" stop-color="#E7E0FF"/>
+      <stop offset="1" stop-color="#DAD2FF"/>
+    </linearGradient>
+    <linearGradient id="hair" x1="152" y1="154" x2="363" y2="395" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3B2539"/>
+      <stop offset="0.52" stop-color="#2B1A2E"/>
+      <stop offset="1" stop-color="#17131F"/>
+    </linearGradient>
+    <linearGradient id="skin" x1="188" y1="155" x2="334" y2="340" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFE2D6"/>
+      <stop offset="0.56" stop-color="#FFD0C2"/>
+      <stop offset="1" stop-color="#F6B8AD"/>
+    </linearGradient>
+    <linearGradient id="shirt" x1="150" y1="358" x2="360" y2="492" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#A187FF"/>
+      <stop offset="1" stop-color="#7859F4"/>
+    </linearGradient>
+    <linearGradient id="cap" x1="132" y1="78" x2="380" y2="174" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFF0F7"/>
+      <stop offset="0.48" stop-color="#F4DFF2"/>
+      <stop offset="1" stop-color="#EBD8FF"/>
+    </linearGradient>
+    <linearGradient id="capBill" x1="164" y1="132" x2="350" y2="190" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#EEDCFF"/>
+      <stop offset="1" stop-color="#CDBBFF"/>
+    </linearGradient>
+    <linearGradient id="purple" x1="220" y1="86" x2="296" y2="152" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#B69CFF"/>
+      <stop offset="1" stop-color="#7B5CFF"/>
+    </linearGradient>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="150%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#7262D8" flood-opacity="0.22"/>
+    </filter>
+    <filter id="faceShadow" x="-20%" y="-20%" width="140%" height="140%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#331A3D" flood-opacity="0.12"/>
+    </filter>
+    <clipPath id="avatarClip">
+      <rect x="36" y="36" width="440" height="440" rx="132"/>
+    </clipPath>
+  </defs>
+  <rect x="36" y="36" width="440" height="440" rx="132" fill="url(#bg)"/>
+  <rect x="38" y="38" width="436" height="436" rx="130" stroke="white" stroke-opacity="0.82" stroke-width="4"/>
+  <g clip-path="url(#avatarClip)">
+    <circle cx="96" cy="122" r="38" fill="#FFFFFF" opacity="0.45"/>
+    <circle cx="422" cy="154" r="54" fill="#FFFFFF" opacity="0.28"/>
+    <circle cx="412" cy="384" r="66" fill="#BFAEFF" opacity="0.16"/>
+    <path d="M112 474C126 400 181 350 256 350C331 350 386 400 400 474H112Z" fill="url(#shirt)" filter="url(#softShadow)"/>
+    <path d="M175 366C190 403 225 424 256 424C287 424 322 403 337 366C314 354 286 348 256 348C226 348 198 354 175 366Z" fill="#8D70F8" opacity="0.65"/>
+    <path d="M146 269C143 198 180 132 257 132C334 132 371 199 368 269C366 323 386 371 405 419C359 406 325 388 305 352H207C187 388 153 406 107 419C126 371 148 323 146 269Z" fill="url(#hair)"/>
+    <path d="M154 286C150 215 184 151 256 151C328 151 362 215 358 286C356 328 367 366 382 399C347 386 322 368 306 339H206C190 368 165 386 130 399C145 366 156 328 154 286Z" fill="#2A1B31" opacity="0.75"/>
+    <path d="M139 153C151 98 195 63 256 63C317 63 361 98 373 153C335 132 295 124 256 124C217 124 177 132 139 153Z" fill="url(#cap)" filter="url(#softShadow)"/>
+    <path d="M138 151C176 124 216 111 256 111C296 111 336 124 374 151C374 173 361 188 338 194C286 180 226 180 174 194C151 188 138 173 138 151Z" fill="url(#capBill)"/>
+    <g filter="url(#faceShadow)">
+      <path d="M171 235C171 183 205 139 256 139C307 139 341 183 341 235C341 301 304 347 256 347C208 347 171 301 171 235Z" fill="url(#skin)"/>
+      <path d="M181 225C181 177 211 146 256 146C301 146 331 177 331 225C331 284 299 329 256 329C213 329 181 284 181 225Z" fill="#FFD8CE" opacity="0.58"/>
+    </g>
+    <ellipse cx="169" cy="246" rx="16" ry="29" fill="#F8BFB5"/>
+    <ellipse cx="343" cy="246" rx="16" ry="29" fill="#F8BFB5"/>
+    <path d="M164 248C168 241 174 240 177 249" stroke="#DE8F8B" stroke-width="4" stroke-linecap="round" opacity="0.45"/>
+    <path d="M348 248C344 241 338 240 335 249" stroke="#DE8F8B" stroke-width="4" stroke-linecap="round" opacity="0.45"/>
+    <path d="M174 202C184 159 216 129 260 130C304 131 330 160 338 203C315 171 274 160 239 167C211 172 191 185 174 202Z" fill="#3A243A"/>
+    <path d="M188 199C203 166 231 146 268 148C294 150 317 165 331 197C304 180 282 177 259 181C229 186 209 187 188 199Z" fill="#2E1B2E"/>
+    <path d="M212 155C200 181 202 205 215 225C179 207 168 181 180 153C189 132 207 118 232 111C219 126 218 140 212 155Z" fill="#3B2539"/>
+    <ellipse cx="224" cy="242" rx="23" ry="30" fill="#261B25"/>
+    <ellipse cx="288" cy="242" rx="23" ry="30" fill="#261B25"/>
+    <circle cx="216" cy="231" r="8" fill="white"/>
+    <circle cx="280" cy="231" r="8" fill="white"/>
+    <circle cx="231" cy="253" r="4" fill="white" opacity="0.55"/>
+    <circle cx="295" cy="253" r="4" fill="white" opacity="0.55"/>
+    <path d="M198 208C211 198 231 198 243 207" stroke="#4B2B3C" stroke-width="8" stroke-linecap="round"/>
+    <path d="M270 207C282 198 302 198 315 208" stroke="#4B2B3C" stroke-width="8" stroke-linecap="round"/>
+    <path d="M256 254C250 267 249 278 259 281" stroke="#D58C87" stroke-width="5" stroke-linecap="round" opacity="0.48"/>
+    <path d="M239 302C249 311 264 311 274 302" stroke="#D66F83" stroke-width="7" stroke-linecap="round"/>
+    <ellipse cx="197" cy="284" rx="23" ry="11" fill="#FF9EB2" opacity="0.35"/>
+    <ellipse cx="315" cy="284" rx="23" ry="11" fill="#FF9EB2" opacity="0.35"/>
+    <rect x="231" y="82" width="50" height="42" rx="16" fill="url(#purple)"/>
+    <path d="M256 93L263 105L277 108L267 118L269 132L256 126L243 132L245 118L235 108L249 105L256 93Z" fill="white" opacity="0.88"/>
+    <path d="M153 148C178 132 218 121 256 121C294 121 334 132 359 148" stroke="#FFFFFF" stroke-opacity="0.5" stroke-width="8" stroke-linecap="round"/>
+  </g>
+</svg>

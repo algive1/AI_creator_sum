@@ -1,0 +1,16 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="会员权益">
+  <title>会员权益</title>
+  <defs>
+    <linearGradient id="bg" x1="48" y1="32" x2="208" y2="224" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6C4BFF" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#FF5CB8" stop-opacity="0.08"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="88" y1="72" x2="168" y2="188" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6C4BFF"/>
+      <stop offset="1" stop-color="#FF5CB8"/>
+    </linearGradient>
+  </defs>
+  <rect x="24" y="24" width="208" height="208" rx="56" fill="url(#bg)"/>
+  <path d="M128 56L152 104L205 112L166 150L176 203L128 178L80 203L90 150L51 112L104 104L128 56Z" fill="url(#mark)"/>
+  <path d="M106 132L122 148L153 116" stroke="white" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
