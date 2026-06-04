@@ -6,7 +6,7 @@ import {
   SafetyCertificateOutlined, LogoutOutlined, MenuFoldOutlined, MenuUnfoldOutlined, HistoryOutlined,
   FileOutlined, SettingOutlined, CrownOutlined, GiftOutlined, BulbOutlined, CloudServerOutlined,
   CloudSyncOutlined, CheckCircleOutlined, FileProtectOutlined, ShareAltOutlined,
-  WechatOutlined, ControlOutlined,
+  WechatOutlined, ControlOutlined, CloudUploadOutlined,
 } from '@ant-design/icons';
 import Dashboard from '../pages/Dashboard';
 import Users from '../pages/Users';
@@ -35,6 +35,7 @@ import AuditLog from '../pages/AuditLog';
 import StorageSettings from '../pages/StorageSettings';
 import ApiReference from '../pages/ApiReference';
 import FeatureToggles from '../pages/FeatureToggles';
+import BackupManagement from '../pages/BackupManagement';
 
 const { Header, Sider, Content } = AntLayout;
 
@@ -106,6 +107,7 @@ const menuItems = [
   { key: '/launch-check', icon: <CheckCircleOutlined />, label: '上线配置检查' },
   { key: '/feature-toggles', icon: <ControlOutlined />, label: '功能开关' },
   { key: '/system-update', icon: <CloudSyncOutlined />, label: '系统更新' },
+  { key: '/backup', icon: <CloudUploadOutlined />, label: '备份管理' },
   { key: '/settings', icon: <SettingOutlined />, label: '系统设置' },
   { key: '/audit-log', icon: <HistoryOutlined />, label: '操作日志' },
 ];
@@ -258,6 +260,7 @@ export default function Layout() {
             <Route path="/launch-check" element={<LaunchCheck />} />
             <Route path="/feature-toggles" element={<FeatureToggles />} />
             <Route path="/system-update" element={<SystemUpdate />} />
+            <Route path="/backup" element={<BackupManagement />} />
             <Route path="/settings/*" element={<Settings />} />
             <Route path="/audit-log" element={<AuditLog />} />
             <Route path="/storage/tencent-cos" element={<StorageSettings />} />

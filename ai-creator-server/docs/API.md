@@ -69,6 +69,11 @@
 | `GET /api/v1/admin/membership/benefit-icons` | 新增后台权益图标库列表 | 会员管理页可选择已有种子/上传/链接图标 |
 | `POST /api/v1/admin/membership/benefit-icons` | 新增后台权益图标库登记接口 | 上传文件仍复用 `/api/v1/admin/files/upload`，登记后可在权益配置中选择 |
 | `/assets/member-benefit-icons/*.svg` | 新增内置种子 SVG 图标地址 | 后台与小程序可直接预览/展示默认 28 个权益图标 |
+| `GET /api/v1/admin/backup/history` | 新增备份历史列表接口 | 返回备份文件清单 + 邮件配置状态 |
+| `POST /api/v1/admin/backup/trigger` | 新增手动触发备份接口 | 立即执行一次数据库备份 |
+| `POST /api/v1/admin/backup/test-email` | 新增备份邮件测试接口 | 用最近备份文件发送测试邮件 |
+| `PUT /api/v1/admin/backup/email-config` | 新增备份邮件配置接口 | 设置 enabled/from/to |
+| `POST /api/v1/admin/system/cron/:taskName` | 新增定时任务手动触发接口 | membership-expiry / monthly-points / daily-backup |
 
 ## 安装接口
 

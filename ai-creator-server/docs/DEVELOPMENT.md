@@ -68,6 +68,12 @@ npm run check:deploy
 
 ## 变更记录
 
+### 2026-06-04 备份管理后台页面
+
+- 新增 `routes/admin-backup.ts`：备份历史列表、手动触发、测试邮件、邮件配置
+- 新增 `admin-web/src/pages/BackupManagement.tsx`：备份管理页面（历史+配置+手动操作）
+- 后台菜单新增「备份管理」（`/backup`），位于「系统更新」下方
+
 ### 2026-06-04 备份邮件通知
 
 - 新增 `services/backup-email.service.ts`：备份完成后自动 gzip 压缩并通过 SMTP 发送到指定邮箱
@@ -76,6 +82,19 @@ npm run check:deploy
   - system_configs：`backup.email.enabled`（开关）、`backup.email.from`（发件人）、`backup.email.to`（收件人）
 - 压缩后超 20MB 不发附件，改发纯文本通知
 - 邮件发送失败不影响备份本身
+
+### 2026-06-04 CodesOnline 供应商更新 + 档位绑定修复
+
+- 新增迁移 `20260604_001_update_codesonline_provider.sql`：更新 Base URL + 将 gpt-image-2 绑定为 image_standard 主模型
+- API Key 通过 `CODESONLINE_IMAGE_API_KEY` 环境变量同步，不写入迁移
+
+### 2026-06-03 权益图标 / 音频模式 / 参考图上限 / 积分任务 / 水印合规
+
+- 新增迁移 `20260604_001_member_benefit_icons.sql`：会员权益图标库种子
+- 新增迁移 `20260604_002_tier_audio_modes.sql`：档位能力表 audio modes 字段
+- 新增迁移 `20260604_003_max_reference_images.sql`：档位能力表 max_reference_images 字段
+- 新增迁移 `20260603_001_seed_point_tasks.sql`：积分任务种子
+- 新增迁移 `20260603_002_seed_legal_docs_watermark.sql`：水印合规法律文档种子
 
 ### 2026-06-04 定时任务看门狗 + 手动触发
 
@@ -210,7 +229,7 @@ APIMart 使用 `provider_type=apimart`，Base URL 默认为 `https://api.apimart
 - 内容合规。
 - 微信配置：小程序、微信支付、客服、使用帮助、底部导航、接口参考。
 - 对象存储：COS、OSS、七牛、又拍云、移动云、本地存储。
-- 上线配置检查、功能开关、系统更新、系统设置、操作日志。
+- 上线配置检查、功能开关、系统更新、备份管理、系统设置、操作日志。
 
 新增后台页面时，需要同时改 `Layout.tsx` 的菜单和 `<Routes>`。
 
