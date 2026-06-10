@@ -1,12 +1,12 @@
 <template>
   <view class="page records-page">
-    <AppTopbar class="app-nav-root" title="记录" back />
+    <AppTopbar class="app-nav-root" title="记录" back transparent />
 
     <view class="page-head">
       <view class="page-title">记录</view>
     </view>
 
-    <LegacyTopTabs v-model="activeFilter" :items="filters" />
+    <LegacyTopTabs :model-value="activeFilter" :items="filters" @select="activeFilter = $event" />
 
     <view class="search-box">
       <input class="search-input" v-model="query" placeholder="搜索作品名称或关键词" placeholder-class="search-placeholder" />

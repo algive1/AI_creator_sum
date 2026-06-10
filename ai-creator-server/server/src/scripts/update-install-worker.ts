@@ -5,7 +5,11 @@ async function main() {
   await runInstallWorkerFromContextFile(contextPath);
 }
 
-main().catch((err: any) => {
-  console.error(err?.message || String(err));
-  process.exit(1);
-});
+main()
+  .then(() => {
+    process.exit(0);
+  })
+  .catch((err: any) => {
+    console.error(err?.message || String(err));
+    process.exit(1);
+  });

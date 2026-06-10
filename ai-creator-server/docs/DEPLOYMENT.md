@@ -1,403 +1,557 @@
-# 部署指南（小白版）
+# 部署指南
 
-> 本文档假设你有一台 Linux 云服务器（已装宝塔面板）和一台 Windows 电脑（已装 WSL）。跟着步骤走，不需要懂 Linux。
+本文是服务端和后台的唯一主部署文档。旧的 `DEPLOYMENT_GUIDE.md` 不再维护，小白快速顺序见 `BEGINNER_GUIDE.md`。
+
+适用范围：
+
+- 后端 `server`
+- 管理后台 `admin-web`
+- 后台在线更新
+
+不包含：
+
+- `uni-app` 小程序发布。小程序需要单独构建和上传微信开发者工具。
 
 ---
 
-## 一、准备清单
+## 1. 准备
 
-开始之前确认你手里有：
+服务器建议：
 
-- [ ] 服务器 IP 地址（如 `123.456.78.90`）
-- [ ] 宝塔面板登录地址和密码（服务器购买后通常会收到短信）
-- [ ] 一个域名，已经解析到服务器 IP（如 `api.你的网站.com`）
-- [ ] 本项目的完整源码（`i:\AI_creator_sum\ai-creator-server`）
+- Linux 服务器，建议 2 核 4G 以上
+- 宝塔面板
+- Nginx
+- MySQL 8
+- Node.js 20.x LTS，或稳定的 Node.js 22.x LTS
+- PM2
+- `tar`、`curl`、`mysqldump`
 
----
+宝塔终端确认：
 
-## 二、服务器环境（宝塔面板操作）
+```bash
+node -v
+npm -v
+pm2 -v
+tar --version
+curl --version
+mysqldump --version
+```
 
-### 2.1 登录宝塔
-
-浏览器打开 `https://你的服务器IP:面板端口`（默认端口通常是 8888 或随机生成的），用短信里的账号密码登录。
-
-### 2.2 安装软件
-
-进入宝塔面板 → 软件商店，搜索安装以下软件：
-
-| 软件 | 用途 | 怎么装 |
-|------|------|--------|
-| Nginx | 网站服务器，把域名指向我们的程序 | 搜索 → 一键安装 |
-| MySQL 8.0 | 数据库，存用户、任务、订单等数据 | 搜索 → 一键安装 |
-| Node.js 版本管理器 | 运行 Node.js 程序 | 搜索 → 一键安装 |
-
-装好 Node.js 版本管理器后，点进去安装 **Node.js 20.x LTS**。
-
-### 2.3 安装 PM2（进程守护）
-
-打开宝塔面板 → 终端，粘贴以下命令：
+如果缺 PM2：
 
 ```bash
 npm install -g pm2
+pm2 startup
 ```
 
-PM2 的作用：让程序在后台一直运行，崩溃了自动重启，重启服务器后自动启动。
+`pm2 startup` 会输出一条需要复制执行的命令，按终端提示执行即可。安装完成后系统会自动 `pm2 save` 当前进程列表。
 
-### 2.4 创建数据库
-
-宝塔面板 → 数据库 → 添加数据库：
-
-| 填写项 | 填什么 | 说明 |
-|--------|--------|------|
-| 数据库名 | `ai_creator` | 程序的数据库名字 |
-| 用户名 | `ai_creator` | 连接数据库用的账号 |
-| 密码 | 点「随机生成」，**记下来** | 后面安装要用 |
-| 访问权限 | `localhost` | 只允许本机连接，安全 |
-
-### 2.5 创建网站（配置域名）
-
-宝塔面板 → 网站 → 添加站点：
-
-- 域名：填你的域名（如 `api.你的网站.com`）
-- 其他默认，点确定
-
-创建后点「设置」→「反向代理」→ 添加反向代理：
-
-| 填写项 | 填什么 |
-|--------|--------|
-| 目标 URL | `http://127.0.0.1:3000` |
-| 发送域名 | `$host` |
-
-这个步骤的意思是：访问你的域名 → Nginx 接收 → 转发给我们的程序（3000 端口）。
-
-### 2.6 创建项目目录
-
-宝塔面板 → 终端：
+创建运行目录：
 
 ```bash
 mkdir -p /www/wwwroot/ai-creator/update-packages
 mkdir -p /www/wwwroot/ai-creator/uploads
+mkdir -p /www/wwwroot/ai-creator/backups
+mkdir -p /www/wwwroot/ai-creator/logs
 ```
 
-- `ai-creator`：放我们的程序
-- `update-packages`：放更新包
-- `uploads`：放用户上传的图片
+创建数据库：
+
+- 数据库名：`ai_creator`
+- 用户名：`ai_creator`
+- 字符集：`utf8mb4`
+- 访问权限：`localhost`
+
+Nginx 反向代理：
+
+```text
+https://你的域名 -> http://127.0.0.1:3000
+```
+
+后台静态资源缓存建议：
+
+```nginx
+location = /index.html {
+  proxy_pass http://127.0.0.1:3000;
+  add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+}
+
+location /assets/ {
+  proxy_pass http://127.0.0.1:3000;
+  add_header Cache-Control "public, max-age=31536000, immutable" always;
+}
+
+location / {
+  proxy_pass http://127.0.0.1:3000;
+}
+```
+
+视频上传默认允许到 200MB，Nginx/宝塔反向代理需要配置：
+
+```nginx
+client_max_body_size 200m;
+proxy_connect_timeout 60s;
+proxy_send_timeout 300s;
+proxy_read_timeout 300s;
+```
+
+后端文件内容代理默认读取超时为 `FILE_CONTENT_PROXY_TIMEOUT_MS=120000`。如果生产环境跨地域 COS 或大视频预览容易超时，可在 `/www/wwwroot/ai-creator/current/server/.env` 和共享 `.env` 中调大后重启 PM2。
+
+服务器安全组只需要开放 80、443 和宝塔面板端口。后端只监听 `127.0.0.1:3000`，不要对公网开放 3000。
 
 ---
 
-## 三、打包（Windows 电脑上用 WSL）
+## 2. 打包
 
-WSL 是 Windows 自带的 Linux 子系统，用来运行打包脚本。
-
-### 3.1 打开 WSL
-
-Windows 开始菜单 → 搜索 "WSL" → 打开 Ubuntu。如果没装过，在 PowerShell 管理员窗口运行：
-
-```powershell
-wsl --install
-```
-
-第一次打开会提示创建用户名和密码，随便设一个就行。
-
-### 3.2 安装 Node.js（WSL 里）
-
-```bash
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt-get install -y nodejs
-```
-
-这两行的作用：下载 Node.js 20 的安装脚本并执行，装好后就能用 `node` 和 `npm` 命令。
-
-### 3.3 执行打包
+在 Windows 的 WSL 里执行：
 
 ```bash
 cd /mnt/i/AI_creator_sum/ai-creator-server
-bash scripts/build-release.sh 1.0.1
+bash scripts/build-release.sh <版本号>
 ```
 
-WSL 里 `/mnt/i/` 就是 Windows 的 `I:` 盘。版本号 `1.0.1` 每次发版改成新的。
-
-等脚本跑完（大约 2-5 分钟），会在项目根目录生成：
-
-```
-ai-creator-release-1.0.1.tar.gz
-```
-
-这就是要上传到服务器的发布包。
-
-打包脚本会在临时目录里重新安装依赖并执行后台 lint/build、后端 lint/编码检查/build，然后运行发布包结构检查。发布包包含 `docs`、`scripts`、`server/src`、`server/src/migrations`、`server/scripts`、`admin-web/src` 等源码和迁移；不包含 `dist`、`node_modules`、真实 `.env`、上传文件、日志、备份和本地压缩包。服务器安装或更新时会重新构建。
-
-### 3.4 上传到服务器
-
-在 WSL 终端里执行（把 IP 和路径换成你的）：
+如果本次发布要上线真实微信收款，使用严格模式：
 
 ```bash
-scp ai-creator-release-1.0.1.tar.gz root@你的服务器IP:/www/wwwroot/ai-creator/update-packages/
+REQUIRE_WECHAT_PAY_READY=1 bash scripts/build-release.sh <版本号>
 ```
 
-会提示输入服务器密码（宝塔的 root 密码）。上传需要几十秒到几分钟，取决于文件大小和网速。
+成功后，压缩包生成在 `ai-creator-server/` 目录：
 
-> **备选方式**：如果 scp 不会用，打开宝塔面板 → 文件管理 → 进入 `/www/wwwroot/ai-creator/update-packages/` → 点上传 → 选择文件。
+```text
+ai-creator-release-<版本号>.tar.gz
+```
+
+打包脚本会执行：
+
+- `admin-web` 依赖安装、build、lint，并把全新 `admin-web/dist` 放入发布包
+- `server` 依赖安装、lint、`check:architecture-unified`、`check:payment`、`check:encoding`、`check:migrations-idempotent`、`check:video-pricing`、`check:xiaoma-video-params`、build
+- 发布包结构检查 `scripts/inspect-release.sh`
+
+发布包包含：
+
+- `server` 源码、迁移、脚本
+- `admin-web` 源码
+- `admin-web/dist` 全新构建产物
+- `docs`
+- `scripts`
+- `release.json`
+
+发布包不包含：
+
+- `server/dist` 或其他运行时 `dist`
+- `node_modules`
+- 真实 `.env`
+- 上传文件
+- 日志
+- 备份
+- 小程序 `uni-app`
+
+WSL 打包默认临时目录是 `/tmp/ai-creator-release`。不要把 `RELEASE_STAGING_ROOT` 指到 `/mnt/c/...`，否则 `tsx` 可能出现 IPC socket 错误。
 
 ---
 
-## 四、安装程序
+## 3. 首次部署
 
-### 4.1 解压
+上传发布包：
 
-宝塔面板 → 终端：
+```bash
+scp ai-creator-release-<版本号>.tar.gz root@你的服务器IP:/www/wwwroot/ai-creator/update-packages/
+```
+
+或用宝塔文件管理上传到：
+
+```text
+/www/wwwroot/ai-creator/update-packages/
+```
+
+解压到运行根目录：
 
 ```bash
 cd /www/wwwroot/ai-creator
-tar -xzf update-packages/ai-creator-release-1.0.1.tar.gz
+tar -xzf update-packages/ai-creator-release-<版本号>.tar.gz
 ```
 
-解压后目录结构：
-
-```
-ai-creator/
-├── server/        ← 后端程序
-├── admin-web/     ← 后台管理页面
-├── scripts/       ← 工具脚本
-└── release.json   ← 版本信息
-```
-
-### 4.2 构建
+构建后端和后台：
 
 ```bash
-# 构建后端
 cd /www/wwwroot/ai-creator/server
 npm ci --include=dev
 npm run build
 
-# 构建后台前端
 cd /www/wwwroot/ai-creator/admin-web
 npm ci --include=dev
 npm run build
 ```
 
-每行的作用：
-- `npm ci` → 安装依赖（下载程序需要的第三方库）
-- `npm run build` → 把 TypeScript 代码编译成 JavaScript（浏览器/Node.js 才能执行）
-
-> **不需要手动创建或编辑 .env 文件。** 安装向导会自动生成。若你希望在安装或更新时自动写入供应商 API Key，可在启动安装/执行 `npm run db:migrate` 前把 `OPENAI_API_KEY`、`XIAOMA_API_KEY`、`BAGEGE_API_KEY`、`WELLAPI_API_KEY`、`CODESONLINE_IMAGE_API_KEY`、`APIMART_API_KEY` 写入服务器环境或 `.env`；系统会加密同步到数据库，不要把真实 Key 写入 SQL 种子文件。未配置 Key 的供应商专属档位不会展示给小程序。若数据库里的本地存储地址仍是默认 `/static`，也可设置 `LOCAL_BASE_URL=https://你的后端域名/static` 后运行 `npm run db:migrate` 同步。
-
-### 4.3 启动
+首次打开安装入口需要先临时启动服务：
 
 ```bash
 cd /www/wwwroot/ai-creator/server
 pm2 start dist/index.js --name ai-creator --update-env
 pm2 save
-pm2 startup
 ```
 
-- `pm2 start` → 启动程序
-- `pm2 save` → 记住当前运行的程序列表
-- `pm2 startup` → 设置开机自启（按提示复制粘贴输出的命令）
+这个临时启动只用于打开 `/install`。安装向导执行完成后，会创建统一运行结构，并把 PM2 重新绑定到：
+
+```text
+/www/wwwroot/ai-creator/current/server/dist/index.js
+```
+
+生产环境不需要手工写 `server/.env`。安装向导会生成 `server/.env`，同步到 `shared/.env`，并写入强 `JWT_SECRET` 和 `ENCRYPTION_KEY`。
 
 ---
 
-## 五、安装向导
+## 4. 安装向导
 
-浏览器打开 `https://你的域名/install`，进入 6 步安装向导。**每一步都有中文提示，跟着提示填就行。**
+浏览器打开：
 
-### 第 1 步：环境检测
+```text
+https://你的域名/install
+```
 
-系统自动检查 Node.js、PM2、MySQL、磁盘空间、目录权限。全部绿色通过点「下一步」。
+真实步骤顺序：
 
-如果出现红色「待处理」：
-- **admin-web/dist 或 server/dist 未找到** → 回到 4.2 重新构建
-- **MySQL 连接失败** → 检查数据库是否创建了
+1. 环境检测
+2. 数据库配置
+3. 管理员配置
+4. 系统配置
+5. 执行安装
+6. 完成
 
-### 第 2 步：数据库配置
+环境检测必须通过：
 
-| 填写项 | 填什么 |
-|--------|--------|
-| 数据库地址 | `127.0.0.1`（不动的） |
-| 数据库端口 | `3306`（不动的） |
-| 数据库名称 | `ai_creator`（之前创建的名字） |
-| 数据库用户名 | `ai_creator`（之前创建的用户名） |
-| 数据库密码 | 之前记录的密码 |
+- Node.js
+- PM2
+- MySQL 驱动
+- `server` 目录可写
+- `server/dist/index.js`
+- `admin-web/dist/index.html`
 
-填好后点「测试连接」，成功点「下一步」。
+执行安装会自动完成：
 
-### 第 3 步：管理员配置
+1. 写入 `server/.env`
+2. 同步 `shared/.env`
+3. 捕获当前平铺部署为 `releases/initial-<version>-<time>`
+4. 创建 `current` 指向初始版本
+5. 测试数据库连接
+6. 建表、执行迁移、导入种子数据
+7. 初始化系统配置
+8. 创建管理员账号
+9. 从 `current/server/dist/index.js` 启动 PM2
+10. 写入 `shared/.env.installed`
 
-设置后台登录的账号密码，长度不够会有提示。**记好这个密码。**
+安装向导写入安装锁后，当前后端进程会自动进入已安装运行态并启动后台任务，包括会员定时任务、备份检查、广告清理和图片/视频异步轮询。PM2 启动时会显式加载 `current/server/.env`，不要用旧环境变量手工覆盖 `JWT_SECRET`、`ENCRYPTION_KEY`、数据库或端口配置。
 
-> JWT 密钥和加密密钥由系统自动生成，不需要手动填。
+安装完成后访问：
 
-### 第 4 步：系统配置
-
-| 填写项 | 填什么 |
-|--------|--------|
-| 后端端口 | `3000`（不动的） |
-| 站点名称 | `AI创作工坊`（或你的品牌名） |
-| 后台标题 | `AI创作工坊后台` |
-| 时区 | `Asia/Shanghai` |
-| 存储方式 | 选 `本地存储`（默认） |
-
-### 第 5 步：执行安装
-
-确认信息无误 → 点「开始安装」。系统自动完成：
-
-1. 写入配置文件
-2. 创建数据库表
-3. 导入初始数据
-4. 创建管理员账号
-5. 启动服务
-
-进度条走完点「进入后台登录」。
-
-### 第 6 步：完成
-
-看到绿色"安装完成" → 点「进入后台登录」→ 用第 3 步设置的账号密码登录。
+```text
+https://你的域名/login
+```
 
 ---
 
-## 六、登录后台后要做什么
+## 5. 运行结构
 
-登录后台后按顺序检查这些：
+安装完成后应是：
 
-| 顺序 | 检查项 | 在哪里 |
-|------|--------|--------|
-| 1 | 功能开关全部打开 | 左侧菜单 → 功能开关 |
-| 2 | 微信小程序 AppID/Secret 填写 | 微信配置 → 微信小程序 |
-| 3 | 微信支付商户号/密钥填写 | 微信配置 → 微信支付 |
-| 4 | 客服入口配置 | 微信配置 → 微信客服 |
-| 5 | 小程序运营素材配置 | 微信配置 → 小程序素材 |
-| 6 | 底部导航栏配置 | 微信配置 → 底部导航 |
-| 7 | 积分套餐创建 | 积分管理 |
-| 8 | 会员套餐创建 | 会员套餐 |
-| 9 | 模型档位配置 | AI 模型管理 → 功能页配置 |
-| 10 | 供应商 Base URL/API Key 填写 | AI 模型管理 → 供应商与模型；也可先通过 `.env` 的供应商 Key 变量自动同步 |
-| 11 | 模型测试 | AI 模型管理 → 模型测试 |
-| 12 | 上传 SSL 证书 | 宝塔面板 → 网站设置 → SSL |
+```text
+/www/wwwroot/ai-creator/
+  server/
+  admin-web/
+  shared/.env
+  shared/.env.installed
+  releases/
+  current -> releases/initial-<version>-<time> 或 releases/<version>
+  update-packages/
+  uploads/
+  backups/
+  logs/
+```
 
-小程序素材配置里的图片必须使用公网 HTTPS，并把图片域名加入微信公众平台 `downloadFile` 合法域名。未配置素材时，小程序会使用本地 JPG 或 CSS 绘制兜底。
+关键规则：
 
-如果使用 APIMart：新部署执行迁移后会出现 `APIMart` 供应商和 `apimart_*` 专属档位。Base URL 默认 `https://api.apimart.ai/v1`，API Key 可在后台填写或用 `APIMART_API_KEY` 自动同步；不要把真实供应商模型 ID 暴露给小程序。图生图、图生视频、首尾帧视频和视频编辑依赖公网可访问的 HTTPS 素材 URL，本地 HTTP 上传地址不适合生产环境调用第三方模型。
-
----
-
-## 七、后续版本更新
-
-以后发新版本时，不需要重装，通过后台在线更新：
-
-1. **打包**：WSL 里运行 `bash scripts/build-release.sh 新版本号`
-2. **上传**：scp 到 `/www/wwwroot/ai-creator/update-packages/`，也可以在后台系统更新页上传 `.tar.gz`
-3. **后台操作**：登录后台 → 系统更新 → 扫描 → 预检查 → 输入目标版本号确认 → 安装
-
-系统会自动备份数据库和旧代码；如果失败发生在切换 `current` 之后，会自动回滚代码到旧版本。整个过程不需要 SSH。
-
-当前更新流程的关键规则：
-
-1. 发布包必须命名为 `ai-creator-release-<版本号>.tar.gz`，版本号必须大于当前版本。
-2. 更新服务会先解压并构建后端和后台，构建成功后才执行数据库迁移。
-3. 构建失败不会执行数据库迁移，也不会切换 `current`。
-4. 迁移成功后才把 `/www/wwwroot/ai-creator/current` 软链接切到目标 release，并用 PM2 从 `current/server/dist/index.js` 重启。
-5. `/health` 返回的 `releaseVersion` 必须等于目标版本，否则自动回滚 `current` 到旧版本并重启 PM2。
-6. 安装锁统一写入 `/www/wwwroot/ai-creator/shared/.env.installed`，旧的 `server/.env.installed` 只作为兼容读取来源。
-7. 更新失败后会保留数据库备份和代码备份；数据库不会自动导回，后台提供数据库备份恢复入口，需要人工确认后执行。
+- `shared/.env` 是后续更新复用的运行配置。
+- `shared/.env.installed` 是统一安装锁。
+- `current` 是当前运行版本。
+- PM2 应从 `current/server/dist/index.js` 启动，并使用 `current/server/.env` 中的运行配置。
+- 旧的 `server/.env.installed` 只作为兼容读取来源，不要再手工维护。
+- 不要把旧服务器的 `current`、`shared/.env`、`shared/.env.installed`、`.pm2` 混到新部署里。
 
 ---
 
-## 八、常见问题
+## 6. 登录后台后配置
 
-### 访问域名显示"无法访问"
+后台地址：
 
-1. 检查服务器安全组是否放行了 80（HTTP）和 443（HTTPS）端口
-2. 检查域名是否解析到了服务器 IP
-3. 检查 Nginx 是否在运行：宝塔面板首页看到 Nginx 是绿色运行状态
+```text
+https://你的域名/login
+```
 
-### 访问 /install 显示 502
+建议按顺序配置：
+
+1. 微信配置：小程序 AppID / AppSecret
+2. AI 模型管理：供应商 Base URL / API Key
+3. AI 模型管理：同步模型、绑定图片/视频档位
+4. 功能开关：确认需要的功能已开启
+5. 微信支付：只有真实收款时才配置
+6. 积分管理、会员套餐
+7. 模板分类、图片模板、视频模板、灵感模板
+8. 备份管理：备份目录、保留天数、SMTP 通知
+9. 对象存储：生产小程序必须使用 COS/OSS/七牛/又拍云/移动云 EOS 等对象存储，并配置公网 HTTPS CDN 域名；`local` 只适合本地开发或内网自测
+10. 上线配置检查
+
+腾讯云 COS 配置必须使用完整 Bucket 名（例如 `examplebucket-1250000000`），`Region` 必须与存储桶所在地域一致。服务端 COS 上传和删除依赖官方 `cos-nodejs-sdk-v5`，生产更新后需重新安装依赖、构建并重启服务。
+
+没有可用供应商 API Key 时，小程序不会展示对应模型档位。
+
+---
+
+## 7. 小程序发布
+
+小程序不在服务端发布包里，必须单独构建。
+
+生产接口地址在：
+
+```text
+uni-app/.env.production
+```
+
+必须配置：
+
+```text
+VITE_API_BASE_URL=https://你的域名/api/v1
+```
+
+生产构建会强制检查 `VITE_API_BASE_URL`，为空会直接失败。
+
+构建：
+
+```bash
+cd /mnt/i/AI_creator_sum/uni-app
+npm ci
+npm run build:mp-weixin
+```
+
+生成目录：
+
+```text
+uni-app/dist/build/mp-weixin
+```
+
+微信公众平台需要配置：
+
+- request 合法域名：`https://你的后端域名`
+- uploadFile 合法域名：`https://你的后端域名`
+- downloadFile 合法域名：`https://你的后端域名` 和对象存储 CDN 域名
+
+真机至少确认：
+
+1. 能登录
+2. 首页能打开
+3. 能进入生图/生视频页
+4. 能看到模型档位
+5. 生成图片或视频成功后，结果地址是公网 `https://`，不是相对路径、`localhost` 或 `http://`
+
+---
+
+## 8. 后续更新
+
+打包新版本：
+
+```bash
+cd /mnt/i/AI_creator_sum/ai-creator-server
+bash scripts/build-release.sh <新版本号>
+```
+
+上传到：
+
+```text
+/www/wwwroot/ai-creator/update-packages/
+```
+
+后台操作：
+
+```text
+后台 -> 系统更新 -> 扫描 -> 预检查 -> 输入目标版本号 -> 开始安装
+```
+
+真实更新流程：
+
+1. 备份数据库
+2. 备份当前代码
+3. 解压新版本到 `releases/<version>`
+4. 链接或复制 `shared/.env` 到新版本 `server/.env`
+5. 安装后端依赖
+6. 后端编码检查和 build
+7. 安装后台依赖
+8. 后台 build
+9. 清理后台 `dist/assets` 中未被 `index.html` 引用的旧 hash 资源
+10. Linux 生产环境执行 `npm run check:deploy`
+11. 扫描危险 SQL
+12. 执行 `npm run db:migrate`
+13. 切换 `current` 到目标 release
+14. 删除旧 PM2 记录并从 `current/server/dist/index.js` 重新启动
+15. 校验 `/health.releaseVersion` 等于目标版本
+16. 写入 `shared/.env.installed`
+17. 清理生产依赖
+
+注意：
+
+- 不是 `pm2 reload` 零停机更新。
+- 健康检查版本不一致会自动回滚 `current` 并重新绑定 PM2。
+- 如果失败发生在切换 `current` 后，代码会自动回滚；数据库不会自动导回，需要在后台备份管理里人工确认恢复。
+- 目标版本号必须大于当前版本。
+
+---
+
+## 9. 上线检查
+
+安装或更新后执行：
+
+```bash
+cd /www/wwwroot/ai-creator/current/server
+npm run check:runtime
+npm run check:launch
+npm run check:video-pricing
+npm run check:xiaoma-video-params
+npm run check:payment
+```
+
+涉及视频模型更新时，还要确认公开档位接口返回小马可用入口：
+
+```bash
+curl -s "https://你的域名/api/v1/public/model-tiers?feature=video_create"
+curl -s "https://你的域名/api/v1/public/model-tiers?feature=image_to_video"
+curl -s "https://你的域名/api/v1/public/model-tiers?feature=first_last_frame_video"
+```
+
+如需复核小马上游视频价格，先在服务器配置小马供应商 Key，再执行：
+
+```bash
+npm run sync:xiaoma-video-pricing -- --output ../../docs/xiaoma-video-pricing.snapshot.json
+```
+
+该脚本只写价格快照，不会修改后台平台售价。后台「AI 模型管理 -> 功能页配置」里的 `points_cost/pricing_rules` 仍是小程序展示和任务预扣的唯一生效价格来源；`token_preauth` 只做预扣，不做 token 自动结算。
+
+真实微信收款上线前执行：
+
+```bash
+npm run check:payment -- --strict-real-collection
+```
+
+Linux 生产环境还要执行：
+
+```bash
+npm run check:deploy
+```
+
+判断原则：
+
+- `FAIL` 必须处理。
+- `WARN` 要看内容，确认是否可接受。
+
+---
+
+## 10. 常见问题
+
+### 10.1 找不到发布包
+
+发布包生成在：
+
+```text
+ai-creator-server/ai-creator-release-<版本号>.tar.gz
+```
+
+如果没有 `.tar.gz`，通常是 `build-release.sh` 在 lint、build、架构检查、支付检查、编码检查、迁移幂等检查或视频定价检查阶段失败，不能只看“开始打包”的日志。
+
+### 10.2 `/install` 打不开或 502
+
+检查：
+
+```bash
+pm2 list
+pm2 logs ai-creator --lines 50
+curl http://127.0.0.1:3000/health
+```
+
+常见原因：
+
+- PM2 未安装
+- `server/dist/index.js` 未构建
+- 3000 端口被占用
+- Nginx 反向代理配置错误
+
+### 10.3 安装向导最后一步 PM2 失败
+
+先看日志：
 
 ```bash
 pm2 logs ai-creator --lines 50
 ```
 
-看最近的错误日志。常见原因：
-- 数据库连接失败 → 检查 MySQL 是否在运行
-- 端口被占用 → `netstat -tlnp | grep 3000`
-
-### 安装向导最后一步卡住
-
-PM2 启动服务需要几秒钟。如果进度条一直在"正在启动 PM2 服务"，刷新页面重新进入安装向导即可（已完成步骤不会重复执行）。
-
-### 安装完成后登录后台失败
-
-按顺序排查这四个原因：
-
-**1. 密码记错了**（最常见）
-
-安装向导第 3 步输入的密码和现在输入的不一致。用下面的方法重置。
-
-**2. 安装向导没走完**
-
-访问 `https://你的域名/install` 看状态：
-- 如果显示"部分完成"→ 点"重试启动服务"
-- 如果显示安装向导首页 → 说明没执行安装，走完 5 步
-- 如果自动跳转到 `/login` → 说明安装已完成，问题不在安装
-
-**3. PM2 进程挂了**
-
-```bash
-pm2 list
-pm2 logs ai-creator --lines 30
-```
-
-如果 `pm2 list` 看不到 `ai-creator`，说明进程没启动。重新启动：
+如果看到 `Unreachable code This is caused by either a bug in Node.js...`，优先切换到 Node.js 20.x LTS 或稳定 22.x LTS，然后重新安装依赖和构建：
 
 ```bash
 cd /www/wwwroot/ai-creator/server
-pm2 start dist/index.js --name ai-creator --update-env
+npm ci --include=dev
+npm run build
 ```
 
-如果日志里看到 `FATAL: JWT_SECRET is missing, too short, or uses a known default`，说明 `.env` 里的密钥不安全。删除 `server/.env`，重新走一遍安装向导让它自动生成。
+再回安装向导点击“重试启动服务”。
 
-**4. 数据库里没有管理员账号**
+### 10.4 导入旧数据库后安装状态异常
 
-```bash
-mysql -u root -p ai_creator -e "SELECT username FROM admin_users;"
+如果旧库已有 `system.installed=true` 和管理员账号，不要重复建表。确认：
+
+```text
+/www/wwwroot/ai-creator/current
+/www/wwwroot/ai-creator/shared/.env
+/www/wwwroot/ai-creator/shared/.env.installed
+/www/wwwroot/ai-creator/.pm2
 ```
 
-如果结果为空，说明安装向导创建管理员那步失败了。重新走安装向导。
+这些都属于本次部署后，再在安装向导点击“重试启动服务/修复安装状态”。
 
-### 忘记管理员密码，重置方法
+### 10.5 登录后台失败
+
+按顺序检查：
+
+1. `/install` 是否自动跳到 `/login`
+2. PM2 是否在线：`pm2 list`
+3. 数据库是否有管理员：
 
 ```bash
-cd /www/wwwroot/ai-creator/server
+mysql -u root -p ai_creator -e "SELECT username, role_key, status FROM admin_users;"
+```
+
+忘记密码时生成新哈希：
+
+```bash
+cd /www/wwwroot/ai-creator/current/server
 node -e "const b=require('bcryptjs');console.log(b.hashSync('你的新密码',10))"
 ```
 
-会输出一串乱码（密码哈希），复制它。然后：
+然后更新：
 
 ```bash
-mysql -u root -p ai_creator -e "UPDATE admin_users SET password_hash='刚才复制的乱码' WHERE username='admin';"
+mysql -u root -p ai_creator -e "UPDATE admin_users SET password_hash='刚才复制的哈希' WHERE username='admin';"
 ```
 
-用新密码登录即可。
+### 10.6 小程序没有模型档位
 
-### 小程序连不上
+检查：
 
-1. 确认域名是 `https://`（不是 `http://`）
-2. 微信公众平台 → 开发管理 → 服务器域名 → 把 `https://你的域名` 加到 request/uploadFile/downloadFile 合法域名
-3. 宝塔面板 → 网站设置 → SSL → 申请 Let's Encrypt 免费证书
+1. 后台供应商 Base URL / API Key 是否填写
+2. 图片/视频档位是否绑定可用模型
+3. 功能开关是否打开
+4. 小程序生产包是否指向正确 `VITE_API_BASE_URL`
 
-### 如何看程序是否在运行
+### 10.7 微信支付成功但权益没到账
 
-```bash
-pm2 list
-```
+后台检查支付订单：
 
-看到 `ai-creator` 状态是 `online` 就说明在运行。
+- `payStatus=paid`
+- `grantStatus=granted`
 
-### 如何重启程序
-
-```bash
-pm2 restart ai-creator
-```
-
----
-
-> 遇到本文未覆盖的问题，查看 [AI 开发指南](AI_DEVELOPMENT_GUIDE.md) 或联系开发人员。
+如果 `grantStatus=pending`，在后台支付订单页补发权益。

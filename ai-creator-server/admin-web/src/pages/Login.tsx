@@ -4,6 +4,13 @@ import { Card, Form, Input, Button, message } from 'antd';
 import { UserOutlined, LockOutlined } from '@ant-design/icons';
 import api from '../services/api';
 
+function loginErrorMessage(err: any): string {
+  const responseMessage = err?.response?.data?.message;
+  if (responseMessage) return responseMessage;
+  if (err?.message && err.message !== 'Network Error') return err.message;
+  return '网络连接失败，请检查服务是否正常运行';
+}
+
 export default function Login() {
   const [loading, setLoading] = useState(false);
   const nav = useNavigate();
@@ -18,7 +25,7 @@ export default function Login() {
       message.success('登录成功');
       nav('/');
     } catch (e: any) {
-      if (!e?.response) message.error('登录失败，请稍后重试');
+      message.error(loginErrorMessage(e));
     } finally {
       setLoading(false);
     }

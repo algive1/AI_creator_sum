@@ -1,11 +1,13 @@
 import { defineStore } from 'pinia';
-import { getMeFull } from '@/api/user';
+import { bindPhone, getMeFull } from '@/api/user';
 import { STORAGE_KEYS } from '@/utils/constants';
 
 interface UserState {
   profile: Record<string, unknown> | null;
   loading: boolean;
 }
+
+let fullProfilePromise: Promise<Record<string, unknown>> | null = null;
 
 export const useUserStore = defineStore('user', {
   state: (): UserState => ({
@@ -23,24 +25,51 @@ export const useUserStore = defineStore('user', {
     }
   },
   actions: {
-    hydrate() {
-      const profile = uni.getStorageSync(STORAGE_KEYS.profile);
-      this.profile = profile && typeof profile === 'object' ? profile as Record<string, unknown> : null;
+    async hydrate() {
+      try {
+        const { data } = await uni.getStorage({ key: STORAGE_KEYS.profile });
+        this.profile = data && typeof data === 'object' ? data as Record<string, unknown> : null;
+      } catch {
+        this.profile = null;
+      }
     },
     async loadFullProfile() {
+      if (fullProfilePromise) return fullProfilePromise;
       this.loading = true;
-      try {
+      fullProfilePromise = (async () => {
         const profile = await getMeFull<Record<string, unknown>>();
         this.profile = profile;
-        uni.setStorageSync(STORAGE_KEYS.profile, profile);
+        await setStorageSafe(STORAGE_KEYS.profile, profile);
         return profile;
+      })();
+      try {
+        return await fullProfilePromise;
       } finally {
+        fullProfilePromise = null;
         this.loading = false;
       }
     },
-    clear() {
+    async bindPhoneByCode(code: string) {
+      const profile = await bindPhone<Record<string, unknown>>(code);
+      this.profile = profile;
+      await setStorageSafe(STORAGE_KEYS.profile, profile);
+      return profile;
+    },
+    async clear() {
       this.profile = null;
-      uni.removeStorageSync(STORAGE_KEYS.profile);
+      try {
+        await uni.removeStorage({ key: STORAGE_KEYS.profile });
+      } catch {
+        // 静默失败
+      }
     }
   }
 });
+
+async function setStorageSafe(key: string, value: unknown): Promise<void> {
+  try {
+    await uni.setStorage({ key, data: value });
+  } catch {
+    // 静默失败——状态已在内存中
+  }
+}

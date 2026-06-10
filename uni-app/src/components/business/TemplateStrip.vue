@@ -3,7 +3,10 @@
     <scroll-view scroll-x class="template-scroll" :show-scrollbar="false">
       <view class="template-row">
         <button v-for="item in templates" :key="item.id" class="template-card" @tap="$emit('select', item)">
-          <image class="template-cover" :src="item.coverUrl" mode="aspectFill" />
+          <image v-if="item.coverUrl" class="template-cover" :src="item.coverUrl" mode="aspectFill" />
+          <view v-else class="template-cover template-cover-fallback">
+            <image class="template-fallback-icon" :src="fallbackIconOf(item.mediaType)" mode="aspectFit" />
+          </view>
           <view v-if="item.mediaType === 'video'" class="template-play">
             <view class="template-play-icon"></view>
           </view>
@@ -26,6 +29,10 @@ withDefaults(defineProps<{
 });
 
 defineEmits<{ select: [template: CreativeTemplate] }>();
+
+function fallbackIconOf(mediaType: string) {
+  return mediaType === 'video' ? '/static/icons/icon_video_ai.svg' : '/static/icons/icon_image_ai.svg';
+}
 </script>
 
 <style scoped lang="scss">
@@ -61,6 +68,18 @@ defineEmits<{ select: [template: CreativeTemplate] }>();
 .template-cover {
   width: 100%;
   height: 100%;
+}
+
+.template-cover-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #eef2ff, #fdf2f8);
+}
+
+.template-fallback-icon {
+  width: 66rpx;
+  height: 66rpx;
 }
 
 .template-card::after {

@@ -40,7 +40,7 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
 
 router.get('/', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const { orderType, status, payStatus, page, pageSize } = req.query as any;
+    const { orderType, status, payStatus, page, pageSize, lastId } = req.query as any;
     const result = await listOrders({
       userId: req.user!.userId,
       orderType: orderType === 'points' || orderType === 'membership' ? orderType : undefined,
@@ -48,6 +48,7 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
       payStatus: payStatus ? String(payStatus) : undefined,
       page: page ? Number(page) : 1,
       pageSize: pageSize ? Number(pageSize) : 20,
+      lastId: lastId ? Number(lastId) : undefined,
     });
     success(res, result);
   } catch (err: any) {

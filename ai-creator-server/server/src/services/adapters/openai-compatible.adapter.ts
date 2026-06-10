@@ -8,6 +8,14 @@ import {
   ParsedResult, CostInfo, applyStatusMapping, extractParsedResult,
   joinBasePath, providerNoResultMessage,
 } from './adapter.interface';
+import {
+  applyGenericImageParams,
+  applyGptImage2Params,
+  applyNanoBananaParams,
+  isGptImage2Model,
+  isNanoBananaModel,
+  normalizeImageParams,
+} from './image-param-mapper';
 
 export class OpenAICompatibleAdapter implements IProviderAdapter {
   readonly providerType = 'openai_compatible';
@@ -15,22 +23,60 @@ export class OpenAICompatibleAdapter implements IProviderAdapter {
   async submitTask(params: SubmitTaskParams): Promise<SubmitTaskResult> {
     const { baseUrl, apiKey, timeout } = params.providerConfig;
     const isVideo = params.taskType.includes('video');
-    const url = joinBasePath(baseUrl, isVideo ? '/v1/videos/generations' : '/v1/images/generations');
+    // 解析 request_template 中的可选配置
+    const template = safeParseJson(params.requestTemplate);
+    const submitPath = template?.submit_path
+      || (isVideo ? '/v1/video/generations' : '/v1/images/generations');
+    const url = joinBasePath(baseUrl, submitPath);
+
+    // 提取 request_template 中的 body 字段（排除元数据字段）
+    const TEMPLATE_META_KEYS = new Set(['submit_path', 'response_format', 'extra_params']);
+    const templateBodyFields: Record<string, any> = {};
+    if (template) {
+      for (const [key, value] of Object.entries(template)) {
+        if (!TEMPLATE_META_KEYS.has(key) && value !== undefined && value !== null) {
+          templateBodyFields[key] = value;
+        }
+      }
+    }
 
     const body: any = {
       model: params.upstreamCode,
       prompt: params.prompt,
-      response_format: 'url',
+      // 合并 request_template 中的 body 字段（如 quality, style 等硬编码配置）
+      ...templateBodyFields,
     };
+    // 仅在 request_template 明确指定时才传 response_format（部分供应商不支持）
+    if (template?.response_format) {
+      body.response_format = template.response_format;
+    }
     if (isVideo) {
       body.ratio = params.params.ratio;
       body.duration = params.params.duration;
       body.size = params.params.nativeSize && params.params.nativeSize !== 'auto' ? params.params.nativeSize : undefined;
       body.images = params.images || [];
+      // 用户提交的参数不覆盖 template 中的硬编码值
+      if (params.params.resolution && !templateBodyFields.resolution) body.resolution = params.params.resolution;
+      if (params.params.quality && !templateBodyFields.quality) body.quality = params.params.quality;
+      if (params.params.fps && !templateBodyFields.fps) body.fps = params.params.fps;
     } else {
-      body.n = params.params.imageCount || 1;
-      body.size = params.params.nativeSize && params.params.nativeSize !== 'auto' ? params.params.nativeSize : '1024x1024';
-      if (params.images?.length) body.images = params.images;
+      const normalized = normalizeImageParams(params.params);
+      if (isGptImage2Model(params.upstreamCode)) {
+        applyGptImage2Params(body, normalized);
+      } else if (isNanoBananaModel(params.upstreamCode)) {
+        applyNanoBananaParams(body, normalized);
+      } else {
+        body.size = params.params.nativeSize && params.params.nativeSize !== 'auto' ? params.params.nativeSize : '1024x1024';
+        applyGenericImageParams(body, normalized);
+      }
+      if (params.images?.length) {
+        if (templateBodyFields.extra_body && typeof templateBodyFields.extra_body === 'object' && !Array.isArray(templateBodyFields.extra_body)) {
+          body.extra_body = { ...templateBodyFields.extra_body, image: params.images };
+        } else {
+          body.images = params.images;
+        }
+      }
+      if (params.params.style && !templateBodyFields.style) body.style = params.params.style;
     }
 
     const resp = await axios.post(url, body, {
@@ -91,6 +137,12 @@ export class OpenAICompatibleAdapter implements IProviderAdapter {
   }
 }
 
+function safeParseJson(value: any): Record<string, any> | null {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
 function isTerminalStatus(status: string): boolean {
   const mapped = applyStatusMapping(status, {});
   return ['completed', 'failed', 'cancelled'].includes(mapped);
@@ -104,7 +156,8 @@ function buildQueryTaskUrl(queryTaskUrl: string, baseUrl: string, providerTaskId
     if (template.includes(':task_id')) return template.replace(/:task_id/g, encoded);
     return joinBasePath(template, '/' + encoded);
   }
-  return joinBasePath(baseUrl, '/v1/tasks/' + encoded);
+  // 默认用视频端点查询（兼容 Agnes AI /v1/video/generations/{id}）
+  return joinBasePath(baseUrl, '/v1/video/generations/' + encoded);
 }
 
 function extractProviderStatus(data: any): string {

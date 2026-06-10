@@ -1,8 +1,9 @@
 <template>
   <view class="asset-strip-section">
     <view class="asset-strip-tip">{{ tip }}</view>
-    <view class="asset-thumb-grid">
-      <view v-for="slot in normalizedSlots" :key="slot.slotIndex" class="asset-thumb-item" :class="slot.asset ? 'filled' : 'empty'">
+    <scroll-view scroll-x class="asset-thumb-scroll" :show-scrollbar="false">
+      <view class="asset-thumb-grid">
+        <view v-for="slot in normalizedSlots" :key="slot.slotIndex" class="asset-thumb-item" :class="slot.asset ? 'filled' : 'empty'">
         <block v-if="slot.asset">
           <button class="asset-thumb-preview" @tap="$emit('replace', slot.slotIndex)">
             <image v-if="slot.asset.mediaType !== 'video'" class="asset-thumb-img" :src="slot.asset.path" mode="aspectFill" />
@@ -24,8 +25,9 @@
           <view class="asset-empty-text">待上传</view>
           <view class="asset-empty-index">{{ slot.displayIndex }}/{{ max }}</view>
         </view>
+        </view>
       </view>
-    </view>
+    </scroll-view>
   </view>
 </template>
 
@@ -80,19 +82,28 @@ function assetTagClass(asset: LegacyAsset) {
   font-weight: 700;
 }
 
-.asset-thumb-grid {
-  display: flex;
-  gap: 12rpx;
+.asset-thumb-scroll {
   width: 100%;
-  overflow-x: auto;
-  padding: 2rpx 2rpx 8rpx;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.asset-thumb-grid {
+  display: inline-flex;
+  gap: 12rpx;
+  min-width: 100%;
+  max-width: none;
+  padding: 12rpx 2rpx 8rpx;
+  white-space: nowrap;
 }
 
 .asset-thumb-item {
   position: relative;
-  flex: 0 0 148rpx;
-  width: 148rpx;
-  aspect-ratio: 1 / 1;
+  flex: 0 0 calc((100vw - 96rpx) / 4);
+  width: calc((100vw - 96rpx) / 4);
+  min-width: calc((100vw - 96rpx) / 4);
+  max-width: none;
+  aspect-ratio: 4 / 3;
   border-radius: 18rpx;
 }
 

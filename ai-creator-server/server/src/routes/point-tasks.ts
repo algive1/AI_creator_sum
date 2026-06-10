@@ -39,7 +39,7 @@ async function isTaskCompleted(userId: number, taskKey: string) {
     case 'watch_ad': {
       const rows = await query<any>(
         `SELECT id FROM ad_reward_logs
-          WHERE user_id = ? AND ad_date = CURDATE() AND reward_status = 'claimed'
+          WHERE user_id = ? AND ad_date = CURDATE() AND ad_scene = 'reward' AND reward_status = 'claimed'
           LIMIT 1`,
         [userId],
       );

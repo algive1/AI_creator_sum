@@ -56,12 +56,15 @@ export async function preloadStorageConfigs(): Promise<void> {
     try {
       const value = await SettingsService.getSystemString(configKey, '');
       if (value && value.trim() !== '') {
+        if (shouldKeepLocalDevOverride(envKey)) continue;
         process.env[envKey] = value;
       } else if (formalStorageConfigured && configKey.startsWith('storage.')) {
+        if (shouldKeepLocalDevOverride(envKey)) continue;
         delete process.env[envKey];
       }
     } catch {
       if (formalStorageConfigured && configKey.startsWith('storage.')) {
+        if (shouldKeepLocalDevOverride(envKey)) continue;
         delete process.env[envKey];
       }
     }
@@ -76,4 +79,10 @@ async function hasFormalStorageConfig(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function shouldKeepLocalDevOverride(envKey: string): boolean {
+  if (process.env.NODE_ENV !== 'development') return false;
+  if (!['LOCAL_UPLOAD_DIR', 'LOCAL_BASE_URL'].includes(envKey)) return false;
+  return !!String(process.env[envKey] || '').trim();
 }

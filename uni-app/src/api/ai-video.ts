@@ -5,6 +5,7 @@ export interface VideoTaskPayload {
   featureKey?: string;
   subType?: 'text2video' | 'img2video' | 'first_last_frame' | 'video_edit' | string;
   videoMode?: string;
+  referenceMode?: string;
   prompt: string;
   tierKey?: string;
   tierId?: number;
@@ -18,6 +19,11 @@ export interface VideoTaskPayload {
   customWidth?: number;
   customHeight?: number;
   duration?: string;
+  fps?: number;
+  seed?: number | string;
+  audioUrl?: string;
+  audio_url?: string;
+  audioFileId?: number;
   audioMode?: string;
   style?: string;
   quality?: string;
@@ -26,8 +32,14 @@ export interface VideoTaskPayload {
   formData?: Record<string, unknown>;
   params?: {
     resolution?: string;
+    fps?: number;
+    seed?: number | string;
+    audioUrl?: string;
+    audio_url?: string;
+    audioFileId?: number;
     preserveAudio?: boolean;
     inputAssets?: Array<Record<string, unknown>>;
+    referenceMode?: string;
     [key: string]: unknown;
   };
   uploadKeys?: unknown[];
@@ -36,7 +48,7 @@ export interface VideoTaskPayload {
 }
 
 export function getVideoModels<T = { list: unknown[] }>(featureKey: string = FEATURE_KEYS.video) {
-  return get<T>('/public/model-tiers', { feature: featureKey }, { silent: true });
+  return get<T>('/public/model-tiers', { feature: featureKey }, { silent: true, cacheTtl: 60_000 });
 }
 
 export function createVideoTask<T = Record<string, unknown>>(payload: VideoTaskPayload) {

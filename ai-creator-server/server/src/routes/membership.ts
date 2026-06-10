@@ -1,4 +1,4 @@
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { authMiddleware } from '../middleware/auth';
 import {
   getMembershipPlans,
@@ -9,8 +9,24 @@ import {
 } from '../services/membership.service';
 import { success, error } from '../utils/response';
 import { ErrorCodes } from '../types';
+import { SettingsService } from '../services/settings.service';
 
 const router = Router();
+const MEMBERSHIP_DISABLED_MESSAGE = '会员功能已关闭，请联系管理员';
+const POINTS_EXPIRE_TYPE_DISABLED = 'none';
+
+async function requireMembershipEnabled(_req: Request, res: Response, next: NextFunction) {
+  try {
+    const enabled = await SettingsService.getBoolean('membership.enabled', true);
+    if (!enabled) {
+      error(res, ErrorCodes.FORBIDDEN, MEMBERSHIP_DISABLED_MESSAGE);
+      return;
+    }
+    next();
+  } catch {
+    error(res, ErrorCodes.SERVER_ERROR, '读取会员功能开关失败');
+  }
+}
 
 function parseHighlightFeatures(value: any): any {
   if (typeof value !== 'string') return value;
@@ -29,12 +45,14 @@ function serializePointRule(row: any): any {
     monthlyPoints: Number(row.monthly_points || 0),
     giftPoints: Number(row.gift_points || 0),
     grantMode: row.grant_mode || 'immediate',
-    pointsExpireType: row.points_expire_type || 'with_membership',
+    pointsExpireType: POINTS_EXPIRE_TYPE_DISABLED,
+    pointsExpireDays: null,
+    pointsExpireEnabled: false,
     pointsDiscountRate: Number(row.points_discount_rate ?? 1),
   };
 }
 
-router.get('/plans', authMiddleware, async (req: Request, res: Response) => {
+router.get('/plans', requireMembershipEnabled, async (req: Request, res: Response) => {
   try {
     const version = (req.query as any).version;
     const list = await getMembershipPlans(version || undefined);
@@ -60,15 +78,15 @@ router.get('/plans', authMiddleware, async (req: Request, res: Response) => {
       list: plans,
     });
   } catch {
-    error(res, ErrorCodes.SERVER_ERROR, 'Failed to get membership plans');
+    error(res, ErrorCodes.SERVER_ERROR, '获取会员套餐失败');
   }
 });
 
-router.get('/plans/:id(\\d+)', authMiddleware, async (req: Request, res: Response) => {
+router.get('/plans/:id(\\d+)', authMiddleware, requireMembershipEnabled, async (req: Request, res: Response) => {
   try {
     const detail = await getPlanDetail(parseInt(req.params.id, 10));
     if (!detail) {
-      error(res, ErrorCodes.NOT_FOUND, 'Membership plan not found', 404);
+      error(res, ErrorCodes.NOT_FOUND, '会员套餐不存在', 404);
       return;
     }
 
@@ -90,25 +108,25 @@ router.get('/plans/:id(\\d+)', authMiddleware, async (req: Request, res: Respons
       featureDiscounts: detail.featureDiscounts,
     });
   } catch {
-    error(res, ErrorCodes.SERVER_ERROR, 'Failed to get membership plan detail');
+    error(res, ErrorCodes.SERVER_ERROR, '获取会员套餐详情失败');
   }
 });
 
-router.get('/me', authMiddleware, async (req: Request, res: Response) => {
+router.get('/me', authMiddleware, requireMembershipEnabled, async (req: Request, res: Response) => {
   try {
     const membership = await getUserMembership(req.user!.userId);
     success(res, membership);
   } catch {
-    error(res, ErrorCodes.SERVER_ERROR, 'Failed to get membership status');
+    error(res, ErrorCodes.SERVER_ERROR, '获取会员状态失败');
   }
 });
 
-router.get('/rights', authMiddleware, async (req: Request, res: Response) => {
+router.get('/rights', authMiddleware, requireMembershipEnabled, async (req: Request, res: Response) => {
   try {
     const rights = await getMembershipRights(req.user!.userId);
     success(res, { rights });
   } catch {
-    error(res, ErrorCodes.SERVER_ERROR, 'Failed to get membership rights');
+    error(res, ErrorCodes.SERVER_ERROR, '获取会员权益失败');
   }
 });
 

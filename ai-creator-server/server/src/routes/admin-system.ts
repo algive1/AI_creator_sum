@@ -3,13 +3,14 @@ import { Router, Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
 import { adminAuthMiddleware } from '../middleware/auth';
-import { query, queryOne } from '../utils/db';
+import { getDbPoolMetrics, query, queryOne } from '../utils/db';
 import { success } from '../utils/response';
 import { config } from '../utils/config';
 import { getLocalUploadDir, ensureLocalUploadDir } from '../services/storage/local-paths';
 import { StorageService } from '../services/storage/storage.service';
 import { evaluateInstallStatus } from '../services/install-readiness.service';
 import { runCronTask, type CronTaskName } from '../services/cron-watchdog.service';
+import { readRuntimeReleaseVersion } from '../utils/runtime-version';
 
 type CheckStatus = 'ok' | 'warning' | 'fail';
 
@@ -25,13 +26,7 @@ const adminDistPath = path.resolve(serverRoot, '../admin-web/dist');
 const serverBuildPath = path.resolve(serverRoot, 'dist/index.js');
 
 function readPackageVersion(): string {
-  try {
-    const pkgPath = path.resolve(serverRoot, 'package.json');
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-    return pkg.version || 'unknown';
-  } catch {
-    return 'unknown';
-  }
+  return readRuntimeReleaseVersion(path.resolve(serverRoot, 'dist'), process.cwd());
 }
 
 function safeError(err: any): string {
@@ -237,8 +232,34 @@ router.get('/system/check', adminAuthMiddleware, async (_req: Request, res: Resp
   });
 });
 
+router.get('/system/metrics', adminAuthMiddleware, async (_req: Request, res: Response) => {
+  const [activeTasks, queuedTasks, taskStats] = await Promise.all([
+    queryOne<any>("SELECT COUNT(*) AS count FROM ai_tasks WHERE status = 'processing'"),
+    queryOne<any>("SELECT COUNT(*) AS count FROM ai_tasks WHERE status = 'queued'"),
+    queryOne<any>(
+      `SELECT
+         COUNT(*) AS total,
+         SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+         AVG(CASE WHEN status = 'completed' AND completed_at IS NOT NULL
+                  THEN TIMESTAMPDIFF(SECOND, COALESCE(provider_started_at, started_at, created_at), completed_at)
+                  ELSE NULL END) AS avg_seconds
+       FROM ai_tasks
+       WHERE created_at >= DATE_SUB(NOW(3), INTERVAL 1 HOUR)`,
+    ),
+  ]);
+  const total = Number(taskStats?.total || 0);
+  const completed = Number(taskStats?.completed || 0);
+  success(res, {
+    activeTasks: Number(activeTasks?.count || 0),
+    queuedTasks: Number(queuedTasks?.count || 0),
+    taskSuccessRateLastHour: total > 0 ? completed / total : 0,
+    avgCompletionSecondsLastHour: Number(taskStats?.avg_seconds || 0),
+    dbPool: getDbPoolMetrics(),
+  });
+});
+
 // POST /cron/:taskName — 手动触发定时任务（运维兜底 / 系统 crontab 触发）
-const VALID_CRON_TASKS: CronTaskName[] = ['membership-expiry', 'monthly-points', 'daily-backup'];
+const VALID_CRON_TASKS: CronTaskName[] = ['membership-expiry', 'monthly-points', 'daily-backup', 'ad-cleanup'];
 router.post('/cron/:taskName', adminAuthMiddleware, async (req: Request, res: Response) => {
   const taskName = req.params.taskName as CronTaskName;
   if (!VALID_CRON_TASKS.includes(taskName)) {

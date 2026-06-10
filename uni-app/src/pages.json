@@ -1,6 +1,6 @@
 {
   "pages": [
-    { "path": "pages/home/index", "style": { "navigationBarTitleText": "AI创作工坊", "navigationStyle": "custom" } },
+    { "path": "pages/home/index", "style": { "navigationBarTitleText": "AI创作工坊", "navigationStyle": "custom", "enablePullDownRefresh": true } },
     { "path": "pages/inspiration/index", "style": { "navigationBarTitleText": "灵感", "navigationStyle": "custom" } },
     { "path": "pages/comic/index", "style": { "navigationBarTitleText": "AI漫剧", "navigationStyle": "custom" } },
     { "path": "pages/history/index", "style": { "navigationBarTitleText": "记录", "navigationStyle": "custom" } },
@@ -15,9 +15,7 @@
     { "path": "pages/invite/index", "style": { "navigationBarTitleText": "邀请好友" } },
     { "path": "pages/checkin/index", "style": { "navigationBarTitleText": "每日签到" } },
     { "path": "pages/tasks/index", "style": { "navigationBarTitleText": "任务中心" } },
-    { "path": "pages/generating/index", "style": { "navigationBarTitleText": "生成中" } },
     { "path": "pages/result/index", "style": { "navigationBarTitleText": "生成结果" } },
-    { "path": "pages/task-detail/index", "style": { "navigationBarTitleText": "任务详情" } },
     { "path": "pages/login/index", "style": { "navigationBarTitleText": "登录" } },
     { "path": "pages/announcements/index", "style": { "navigationBarTitleText": "公告消息", "enablePullDownRefresh": true } },
     { "path": "pages/agreement/index", "style": { "navigationBarTitleText": "用户协议" } }

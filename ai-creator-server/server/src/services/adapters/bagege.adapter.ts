@@ -10,6 +10,14 @@ import {
   ParsedResult, CostInfo, applyStatusMapping, extractParsedResult,
   joinBasePath, providerNoResultMessage,
 } from './adapter.interface';
+import {
+  applyGenericImageParams,
+  applyGptImage2Params,
+  applyNanoBananaParams,
+  isGptImage2Model,
+  isNanoBananaModel,
+  normalizeImageParams,
+} from './image-param-mapper';
 
 export class BagegeAdapter implements IProviderAdapter {
   readonly providerType = 'bagege';
@@ -130,17 +138,22 @@ export class BagegeAdapter implements IProviderAdapter {
 }
 
 function buildImageBody(params: SubmitTaskParams, isEdit: boolean): Record<string, any> {
+  const input = params.params || {};
+  const normalized = normalizeImageParams(input);
   const body: Record<string, any> = {
     model: params.upstreamCode,
     prompt: params.prompt,
     response_format: 'url',
   };
-  const input = params.params || {};
-  if (!isEdit) body.n = input.imageCount || 1;
-  body.size = input.nativeSize && input.nativeSize !== 'auto' ? input.nativeSize : '1024x1024';
-  copyDefined(body, 'quality', input.quality);
-  copyDefined(body, 'aspect_ratio', input.ratio || input.aspect_ratio);
-  copyDefined(body, 'resolution', input.resolution);
+  if (isGptImage2Model(params.upstreamCode)) {
+    applyGptImage2Params(body, normalized);
+  } else if (isNanoBananaModel(params.upstreamCode)) {
+    applyNanoBananaParams(body, normalized);
+  } else {
+    body.size = input.nativeSize && input.nativeSize !== 'auto' ? input.nativeSize : '1024x1024';
+    applyGenericImageParams(body, normalized);
+  }
+  if (isEdit) delete body.n;
   copyDefined(body, 'style', input.style);
   copyDefined(body, 'negative_prompt', input.negativePrompt || input.negative_prompt);
   copyDefined(body, 'mask_url', input.maskUrl || input.mask_url);

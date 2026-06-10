@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS model_tiers (
   tag VARCHAR(16) NOT NULL DEFAULT '' COMMENT 'recommend/hot/hd',
   icon_file_id BIGINT UNSIGNED NULL COMMENT 'tier icon files.id',
   points_cost INT NOT NULL DEFAULT 1 COMMENT 'points cost',
+  pricing_mode VARCHAR(32) NOT NULL DEFAULT 'fixed' COMMENT 'fixed / matrix / per_second_matrix / token_preauth',
+  pricing_rules JSON NULL COMMENT 'dynamic platform points pricing rules',
   is_default TINYINT(1) NOT NULL DEFAULT 0,
   is_recommended TINYINT(1) NOT NULL DEFAULT 0,
   status VARCHAR(16) NOT NULL DEFAULT 'active',
@@ -71,6 +73,10 @@ CREATE TABLE IF NOT EXISTS tier_capabilities (
   allow_upscale TINYINT(1) NOT NULL DEFAULT 0,
   max_images INT NOT NULL DEFAULT 1,
   max_reference_images INT NOT NULL DEFAULT 4,
+  input_mode VARCHAR(32) NULL COMMENT 'video input mode override',
+  reference_upload_mode VARCHAR(32) NULL COMMENT 'video upload mode override',
+  min_reference_images INT NULL COMMENT 'minimum required reference assets',
+  required_reference TINYINT(1) NULL COMMENT 'whether reference asset is required',
   max_duration_seconds INT NOT NULL DEFAULT 30,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
@@ -83,6 +89,54 @@ SET @column_exists := (
 );
 SET @sql := IF(@column_exists = 0,
   'ALTER TABLE tier_capabilities ADD COLUMN max_reference_images INT NOT NULL DEFAULT 4 AFTER max_images',
+  'SELECT 1'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @column_exists := (
+  SELECT COUNT(*) FROM information_schema.columns
+  WHERE table_schema = DATABASE() AND table_name = 'tier_capabilities' AND column_name = 'input_mode'
+);
+SET @sql := IF(@column_exists = 0,
+  'ALTER TABLE tier_capabilities ADD COLUMN input_mode VARCHAR(32) NULL COMMENT ''video input mode override'' AFTER max_reference_images',
+  'SELECT 1'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @column_exists := (
+  SELECT COUNT(*) FROM information_schema.columns
+  WHERE table_schema = DATABASE() AND table_name = 'tier_capabilities' AND column_name = 'reference_upload_mode'
+);
+SET @sql := IF(@column_exists = 0,
+  'ALTER TABLE tier_capabilities ADD COLUMN reference_upload_mode VARCHAR(32) NULL COMMENT ''video upload mode override'' AFTER input_mode',
+  'SELECT 1'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @column_exists := (
+  SELECT COUNT(*) FROM information_schema.columns
+  WHERE table_schema = DATABASE() AND table_name = 'tier_capabilities' AND column_name = 'min_reference_images'
+);
+SET @sql := IF(@column_exists = 0,
+  'ALTER TABLE tier_capabilities ADD COLUMN min_reference_images INT NULL COMMENT ''minimum required reference assets'' AFTER reference_upload_mode',
+  'SELECT 1'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @column_exists := (
+  SELECT COUNT(*) FROM information_schema.columns
+  WHERE table_schema = DATABASE() AND table_name = 'tier_capabilities' AND column_name = 'required_reference'
+);
+SET @sql := IF(@column_exists = 0,
+  'ALTER TABLE tier_capabilities ADD COLUMN required_reference TINYINT(1) NULL COMMENT ''whether reference asset is required'' AFTER min_reference_images',
   'SELECT 1'
 );
 PREPARE stmt FROM @sql;

@@ -1,6 +1,6 @@
 <template>
   <view class="member-page">
-    <AppTopbar class="app-nav-root" title="会员中心" back />
+    <AppTopbar class="app-nav-root" title="会员中心" back transparent />
 
     <view class="member-hero">
       <view class="hero-glow glow-one"></view>
@@ -18,7 +18,7 @@
         <view class="hero-subtitle">2K画质 · AI视频 · AI漫画 · 去水印</view>
         <view class="hero-benefits">
           <view v-for="item in heroBenefits" :key="item.label" class="hero-benefit">
-            <view class="hero-benefit-icon">{{ item.icon }}</view>
+            <image class="hero-benefit-icon" :src="item.icon || DEFAULT_BENEFIT_ICON" mode="aspectFit" />
             <text>{{ item.label }}</text>
           </view>
         </view>
@@ -128,6 +128,7 @@ import { createOrder, payOrder } from '@/api/payment';
 import AppTopbar from '@/components/common/AppTopbar.vue';
 import { appEnv } from '@/env/index';
 import { useAuthStore } from '@/stores/auth';
+import { useConfigStore } from '@/stores/config';
 import { PAGE_ROUTES } from '@/utils/constants';
 import { memberPackages, memberRights } from '@/utils/mock';
 import { isDevFallbackEnabled, warnDevFallback } from '@/utils/dev-fallback';
@@ -199,12 +200,12 @@ type BenefitDefinition = {
 };
 
 const heroBenefits = [
-  { icon: 'HD', label: '高清画质' },
-  { icon: '∞', label: '无限创作' },
-  { icon: 'AI', label: 'AI特效' },
-  { icon: '★', label: '专属素材' },
-  { icon: '↗', label: '优先处理' },
-  { icon: '水', label: '去水印' },
+  { icon: '/static/icons/benefit_hd_quality.svg', label: '高清画质' },
+  { icon: '/static/icons/benefit_default.svg', label: '无限创作' },
+  { icon: '/static/icons/benefit_ai_video.svg', label: 'AI特效' },
+  { icon: '/static/icons/benefit_materials.svg', label: '专属素材' },
+  { icon: '/static/icons/benefit_priority.svg', label: '优先处理' },
+  { icon: '/static/icons/benefit_remove_watermark.svg', label: '去水印' },
 ];
 
 const DEFAULT_BENEFIT_ICON = '/static/icons/benefit_default.svg';
@@ -233,8 +234,10 @@ const packages = ref<MemberPlan[]>([]);
 const selectedPackageId = ref('');
 const loading = ref(false);
 const authStore = useAuthStore();
+const configStore = useConfigStore();
 const failedBenefitIcons = ref<Record<string, boolean>>({});
 
+const membershipEnabled = computed(() => configStore.publicConfig?.membershipEnabled !== false);
 const versionTabs = computed(() => versions.value.map((item) => ({ key: item.versionKey, label: item.name })));
 const versionSwitchStyle = computed(() => `grid-template-columns: repeat(${Math.max(versionTabs.value.length, 1)}, minmax(0, 1fr));`);
 const activeVersion = computed(() => versions.value.find((item) => item.versionKey === activeVersionTab.value));
@@ -272,8 +275,38 @@ const rightsRows = computed(() => {
 });
 
 onShow(() => {
-  loadMemberPage();
+  refreshMemberEntry();
 });
+
+async function refreshMemberEntry() {
+  configStore.hydrate();
+  try {
+    await configStore.loadPublicConfig();
+  } catch {
+    // 使用本地缓存决定是否继续加载会员中心。
+  }
+  if (!membershipEnabled.value) {
+    handleMembershipDisabled();
+    return;
+  }
+  loadMemberPage();
+}
+
+function handleMembershipDisabled() {
+  loading.value = false;
+  versions.value = [];
+  packages.value = [];
+  selectedPackageId.value = '';
+  uni.showToast({ title: '会员功能已关闭', icon: 'none' });
+  setTimeout(() => {
+    const pages = getCurrentPages();
+    if (pages.length > 1) {
+      uni.navigateBack();
+      return;
+    }
+    uni.reLaunch({ url: PAGE_ROUTES.profile });
+  }, 300);
+}
 
 async function loadMemberPage() {
   loading.value = true;
@@ -537,7 +570,7 @@ function normalizePointRule(rawRule: unknown): PointRule | null {
     monthlyPoints: Number(raw.monthlyPoints ?? raw.monthly_points ?? 0),
     giftPoints: Number(raw.giftPoints ?? raw.gift_points ?? 0),
     grantMode: String(raw.grantMode ?? raw.grant_mode ?? 'immediate'),
-    pointsExpireType: String(raw.pointsExpireType ?? raw.points_expire_type ?? 'with_membership'),
+    pointsExpireType: String(raw.pointsExpireType ?? raw.points_expire_type ?? 'none'),
     pointsDiscountRate: Number(raw.pointsDiscountRate ?? raw.points_discount_rate ?? 1),
   };
 }
@@ -724,6 +757,10 @@ function formatRightValue(value: unknown) {
 }
 
 async function choosePackage(item: MemberPlan) {
+  if (!membershipEnabled.value) {
+    uni.showToast({ title: '会员功能已关闭', icon: 'none' });
+    return;
+  }
   selectedPackageId.value = item.id;
   if (item.__fallback) {
     uni.showToast({ title: '演示套餐，后台配置后可购买', icon: 'none' });
@@ -884,17 +921,12 @@ async function choosePackage(item: MemberPlan) {
 }
 
 .hero-benefit-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  display: block;
   width: 42rpx;
   height: 42rpx;
   margin: 0 auto 6rpx;
   border-radius: 16rpx;
   background: rgba(255, 255, 255, 0.17);
-  color: #ffffff;
-  font-size: 18rpx;
-  font-weight: 900;
   box-shadow: inset 0 0 0 1rpx rgba(255, 255, 255, 0.18);
 }
 

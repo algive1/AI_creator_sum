@@ -3,10 +3,16 @@ import { query, queryOne } from '../utils/db';
 import { success, error } from '../utils/response';
 import { ErrorCodes } from '../types';
 import { getLegalRequiredStatus } from './legal';
-import { optionalUserId, matchesTarget, isToday } from '../utils/content-helpers';
+import { optionalUserId, matchesTarget } from '../utils/content-helpers';
 import { SettingsService } from '../services/settings.service';
 import { getAdRewardConfig, getAdRewardStatus } from '../services/ads.service';
 import { getCheckinConfig, getSigninStatus } from '../services/signin.service';
+import {
+  getAnnouncementRecords,
+  getPopupAnnouncementForUser,
+  listVisibleAnnouncements,
+  toPublicAnnouncement,
+} from '../services/announcement.service';
 
 const router = Router();
 
@@ -14,16 +20,30 @@ router.get('/home', async (req: Request, res: Response) => {
   try {
     const userId = await optionalUserId(req);
     const legalRequired = userId ? await getLegalRequiredStatus(userId) : { required: true, missing: [] };
-    const popupAnnouncement = legalRequired.required ? null : await getPopupAnnouncement(userId);
-    const homeAnnouncements = await getHomeAnnouncements(userId);
-    const featureEntries = await getFeatureEntries();
-    const recommendedTemplates = await getTemplates('recommended');
-    const hotTemplates = await getTemplates('hot');
-    const inspirationSections = await getInspirationSections();
-    const userSummary = userId ? await getUserSummary(userId) : null;
-    const recentWorks = userId ? await getRecentWorks(userId) : [];
-    const membershipEnabled = await SettingsService.getBoolean('membership.enabled', false);
-    const [adConfig, checkinConfig, adStatus, checkinStatus] = await Promise.all([
+    const [
+      popupAnnouncement,
+      homeAnnouncements,
+      featureEntries,
+      recommendedTemplates,
+      hotTemplates,
+      inspirationSections,
+      userSummary,
+      recentWorks,
+      membershipEnabled,
+      adConfig,
+      checkinConfig,
+      adStatus,
+      checkinStatus,
+    ] = await Promise.all([
+      getPopupAnnouncement(userId),
+      getHomeAnnouncements(userId),
+      getFeatureEntries(),
+      getTemplates('recommended'),
+      getTemplates('hot'),
+      getInspirationSections(),
+      userId ? getUserSummary(userId) : Promise.resolve(null),
+      userId ? getRecentWorks(userId) : Promise.resolve([]),
+      SettingsService.getBoolean('membership.enabled', false),
       getAdRewardConfig(),
       getCheckinConfig(),
       userId ? getAdRewardStatus(userId) : Promise.resolve(null),
@@ -59,60 +79,22 @@ router.get('/home', async (req: Request, res: Response) => {
 });
 
 async function getPopupAnnouncement(userId: number | null) {
-  const item = await queryOne<any>(
-    `SELECT * FROM announcements
-      WHERE enabled = 1 AND deleted_at IS NULL AND type = 'popup'
-        AND (start_at IS NULL OR start_at <= NOW(3))
-        AND (end_at IS NULL OR end_at >= NOW(3))
-        AND show_frequency <> 'list_only'
-      ORDER BY priority DESC, sort_order DESC, created_at DESC LIMIT 1`,
-  );
-  if (!item) return null;
-  if (userId && !(await matchesTarget(item, userId))) return null;
-  if (userId) {
-    const record = await queryOne<any>('SELECT * FROM announcement_user_records WHERE announcement_id = ? AND user_id = ?', [item.id, userId]);
-    if (!shouldShowPopup(item, record)) return null;
-  }
-  return { id: item.id, title: item.title, content: item.content, type: item.type, showFrequency: item.show_frequency };
+  return getPopupAnnouncementForUser(userId, { markSeen: true });
 }
 
 async function getHomeAnnouncements(userId: number | null) {
-  const rows = await query<any>(
-    `SELECT * FROM announcements
-      WHERE enabled = 1 AND deleted_at IS NULL AND type IN ('home', 'profile', 'system', 'activity', 'maintenance')
-        AND (start_at IS NULL OR start_at <= NOW(3))
-        AND (end_at IS NULL OR end_at >= NOW(3))
-      ORDER BY priority DESC, sort_order DESC, created_at DESC
-      LIMIT 10`,
-  );
+  const rows = await listVisibleAnnouncements({
+    types: ['popup', 'home', 'profile', 'system', 'activity', 'maintenance'],
+    includeListOnly: false,
+    limit: 10,
+  });
   if (rows.length === 0) return [];
-  const records = userId
-    ? await query<any>(
-      `SELECT * FROM announcement_user_records
-        WHERE user_id = ? AND announcement_id IN (${rows.map(() => '?').join(',')})`,
-      [userId, ...rows.map((row: any) => row.id)],
-    )
-    : [];
+  const records = userId ? await getAnnouncementRecords(userId, rows.map((row: any) => Number(row.id))) : [];
   const result: any[] = [];
   for (const row of rows) {
     if (userId && !(await matchesTarget(row, userId))) continue;
     const record = userId ? records.find((item: any) => Number(item.announcement_id) === Number(row.id)) : null;
-    if (userId) {
-      if (record?.closed_at && isToday(record.closed_at) && row.show_frequency === 'once_per_day') continue;
-    }
-    result.push({
-      id: row.id,
-      title: row.title,
-      content: row.content,
-      type: row.type,
-      showFrequency: row.show_frequency,
-      priority: row.priority,
-      startAt: row.start_at,
-      endAt: row.end_at,
-      createdAt: row.created_at,
-      readAt: record?.read_at || null,
-      closedAt: record?.closed_at || null,
-    });
+    result.push(toPublicAnnouncement(row, record));
   }
   return result;
 }
@@ -179,18 +161,6 @@ async function getRecentWorks(userId: number) {
       ? (r.thumbnail.startsWith('local://') ? '/mock/' + r.thumbnail.replace('local://', '') : r.thumbnail) : null,
     status: r.status, createdAt: r.created_at,
   }));
-}
-
-function shouldShowPopup(item: any, record: any) {
-  const frequency = item.show_frequency || 'once_per_day';
-  if (frequency === 'list_only') return false;
-  if (frequency === 'every_open') return true;
-  if (!record) return true;
-  if (frequency === 'once') return !record.closed_at && !record.popup_count;
-  if (frequency === 'once_per_day') {
-    return !(record.closed_at && isToday(record.closed_at)) && !(record.last_popup_at && isToday(record.last_popup_at));
-  }
-  return true;
 }
 
 export default router;

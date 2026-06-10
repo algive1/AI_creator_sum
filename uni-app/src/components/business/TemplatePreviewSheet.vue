@@ -7,17 +7,27 @@
 
       <view class="template-title">{{ template.title }}</view>
       <view class="template-tags">
-        <text v-for="tag in template.tags" :key="tag">{{ tag }}</text>
+        <text v-for="tag in template.tags" :key="tag" class="template-tag">{{ tag }}</text>
       </view>
 
       <view class="prompt-box">提示词：{{ template.prompt }}</view>
 
-      <view class="preview-frame" :class="{ video: template.mediaType === 'video' }">
-        <image v-if="template.coverUrl" class="preview-media" :src="template.coverUrl" mode="aspectFill" />
+      <view class="preview-frame" :class="{ 'preview-frame-video': template.mediaType === 'video' }">
+        <video
+          v-if="videoPreviewUrl"
+          class="preview-media preview-media-video video-media"
+          :src="videoPreviewUrl"
+          :poster="template.coverUrl"
+          controls
+          object-fit="contain"
+          @error="onVideoError"
+        />
+        <image v-else-if="template.coverUrl" class="preview-media" :src="template.coverUrl" mode="aspectFill" />
         <view v-else class="preview-media empty-preview">AI</view>
-        <view v-if="template.mediaType === 'video'" class="video-play">
+        <view v-if="template.mediaType === 'video' && !videoPreviewUrl" class="video-play">
           <view class="play-triangle"></view>
         </view>
+        <view v-if="template.mediaType === 'video' && !videoPreviewUrl" class="video-unavailable">暂无视频预览</view>
       </view>
 
       <view class="sheet-actions">
@@ -29,7 +39,9 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue';
 import type { CreativeTemplate } from '@/utils/mock';
+import { showMemberRequiredDialog } from '@/utils/app-dialog';
 
 const props = defineProps<{
   template: CreativeTemplate | null;
@@ -40,19 +52,44 @@ defineEmits<{
   use: [template: CreativeTemplate];
 }>();
 
+const videoPreviewUrl = computed(() => {
+  const template = props.template;
+  if (!template || template.mediaType !== 'video') return '';
+  const mediaUrl = String(template.mediaUrl || '').trim();
+  const coverUrl = String(template.coverUrl || '').trim();
+  return mediaUrl && mediaUrl !== coverUrl ? mediaUrl : '';
+});
+
 function saveMedia() {
   const template = props.template;
   if (!template) return;
+  if (template.canSave === false || template.canUse === false) {
+    showMemberRequiredDialog({
+      title: '开通会员保存模板素材',
+      message: template.lockReason || '该模板需开通会员后保存。'
+    });
+    return;
+  }
   if (template.mediaType === 'video') {
-    const filePath = template.mediaUrl || '';
-    if (!filePath) {
+    const videoUrl = videoPreviewUrl.value;
+    if (!videoUrl) {
       uni.showToast({ title: '视频素材待接入', icon: 'none' });
       return;
     }
-    uni.saveVideoToPhotosAlbum({
-      filePath,
-      success: () => uni.showToast({ title: '已保存到相册', icon: 'none' }),
-      fail: () => uni.showToast({ title: '保存失败，请检查相册权限', icon: 'none' })
+    uni.downloadFile({
+      url: videoUrl,
+      success: (res) => {
+        if (res.statusCode && res.statusCode >= 400) {
+          uni.showToast({ title: '视频下载失败', icon: 'none' });
+          return;
+        }
+        uni.saveVideoToPhotosAlbum({
+          filePath: res.tempFilePath,
+          success: () => uni.showToast({ title: '已保存到相册', icon: 'none' }),
+          fail: (error) => uni.showToast({ title: albumSaveErrorText(error), icon: 'none' })
+        });
+      },
+      fail: () => uni.showToast({ title: '视频下载失败，请检查域名配置', icon: 'none' })
     });
     return;
   }
@@ -60,7 +97,7 @@ function saveMedia() {
   uni.getImageInfo({
     src: template.mediaUrl || template.coverUrl,
     success: (res) => saveImage(res.path),
-    fail: () => saveImage(template.mediaUrl || template.coverUrl)
+    fail: () => uni.showToast({ title: '图片加载失败，请检查图片地址', icon: 'none' })
   });
 }
 
@@ -68,8 +105,23 @@ function saveImage(filePath: string) {
   uni.saveImageToPhotosAlbum({
     filePath,
     success: () => uni.showToast({ title: '已保存到相册', icon: 'none' }),
-    fail: () => uni.showToast({ title: '保存失败，请检查相册权限', icon: 'none' })
+    fail: (error) => uni.showToast({ title: albumSaveErrorText(error), icon: 'none' })
   });
+}
+
+function onVideoError() {
+  uni.showToast({ title: '视频无法播放，请检查视频域名或格式', icon: 'none' });
+}
+
+function albumSaveErrorText(error: unknown) {
+  const message = String((error as { errMsg?: string; message?: string })?.errMsg || (error as { message?: string })?.message || '');
+  if (/auth|authorize|scope\.writePhotosAlbum|permission|deny|denied/i.test(message)) {
+    return '保存失败，请在设置中允许相册权限';
+  }
+  if (/file|path|not found|no such|invalid/i.test(message)) {
+    return '保存失败，文件无效，请重新打开后再试';
+  }
+  return '保存失败，请稍后重试';
 }
 </script>
 
@@ -139,7 +191,7 @@ function saveImage(filePath: string) {
   margin-top: 12rpx;
 }
 
-.template-tags text {
+.template-tag {
   height: 34rpx;
   padding: 0 12rpx;
   border-radius: 10rpx;
@@ -187,13 +239,13 @@ function saveImage(filePath: string) {
   font-weight: 900;
 }
 
-.preview-frame.video .preview-media {
+.preview-media-video {
   height: 430rpx;
 }
 
 .video-play {
   position: absolute;
-  top: 50%;
+  top: 44%;
   left: 50%;
   display: flex;
   align-items: center;
@@ -212,6 +264,26 @@ function saveImage(filePath: string) {
   border-top: 18rpx solid transparent;
   border-bottom: 18rpx solid transparent;
   border-left: 28rpx solid #ffffff;
+}
+
+.video-media {
+  background: #101729;
+}
+
+.video-unavailable {
+  position: absolute;
+  right: 20rpx;
+  bottom: 18rpx;
+  left: 20rpx;
+  min-height: 48rpx;
+  padding: 0 18rpx;
+  border-radius: 12rpx;
+  background: rgba(16, 23, 42, 0.58);
+  color: #ffffff;
+  font-size: 24rpx;
+  font-weight: 800;
+  line-height: 48rpx;
+  text-align: center;
 }
 
 .sheet-actions {

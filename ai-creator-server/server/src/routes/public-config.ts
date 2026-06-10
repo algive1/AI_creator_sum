@@ -2,14 +2,17 @@
 import { Router, Request, Response } from 'express';
 import { queryOne, query } from '../utils/db';
 import { success, error } from '../utils/response';
-import { parseJson } from '../utils/content-helpers';
 import { ErrorCodes } from '../types';
 import { SettingsService } from '../services/settings.service';
 import { normalizeTemplateTargetFeatureKey, toLegacyTemplate } from '../services/template.service';
 import { getModelTierList } from '../services/model-tier-list.service';
+import { getModelFeaturesList } from '../services/model-capability.service';
 import { optionalUserAuthMiddleware } from '../middleware/auth';
+import { sanitizeHelpHtml } from '../utils/html-sanitizer';
+import { isActiveMember } from '../services/membership.service';
 
 const router = Router();
+const TEMPLATE_SAVE_USE_MEMBER_MESSAGE = '\u8be5\u6a21\u677f\u4e3a\u4f1a\u5458\u4e13\u5c5e\uff0c\u5f00\u901a\u4f1a\u5458\u540e\u53ef\u4fdd\u5b58\u7d20\u6750\u548c\u4f7f\u7528\u6a21\u677f\u3002';
 const DEFAULT_CUSTOMER_SERVICE = {
   enabled: true,
   title: '联系客服',
@@ -39,20 +42,6 @@ const DEFAULT_VISUAL_ASSETS = {
 router.get('/public/app', async (_req: Request, res: Response) => {
   try {
     const appName = await firstSetting(['public.app_name', 'app.name', 'site.name'], 'AI Creator');
-    const [wechatLoginEnabled, paymentEnabled, membershipEnabled] = await Promise.all([
-      SettingsService.getBoolean('wechat.login_enabled', true),
-      SettingsService.getBoolean('wechat_pay.enabled', false),
-      SettingsService.getBoolean('membership.enabled', false),
-    ]);
-    const inviteEnabled = await SettingsService.getBoolean('invite.enabled', false);
-    const [promptOptimizeEnabled, scriptGenerateEnabled, promptGenerateEnabled, storyboardGenerateEnabled] = await Promise.all([
-      SettingsService.getBoolean('ai.prompt_optimize.enabled', false),
-      SettingsService.getBoolean('ai.script_generate.enabled', false),
-      SettingsService.getBoolean('ai.prompt_generate.enabled', false),
-      SettingsService.getBoolean('ai.storyboard_generate.enabled', false),
-    ]);
-    const imageFeature = await queryOne<any>("SELECT status FROM model_features WHERE feature_key = 'image_create'");
-    const videoFeature = await queryOne<any>("SELECT status FROM model_features WHERE feature_key = 'video_create'");
     const publicKeys = [
       'compliance_tips',
       'membership.show_entry',
@@ -65,73 +54,70 @@ router.get('/public/app', async (_req: Request, res: Response) => {
       'watermark_remove_enabled',
       'watermark_remove_required_plan',
     ];
+
+    const [
+      [wechatLoginEnabled, paymentEnabled, membershipEnabled],
+      inviteEnabled,
+      [promptOptimizeEnabled, scriptGenerateEnabled, promptGenerateEnabled, storyboardGenerateEnabled],
+      [promptOptimizeMemberOnly, imageTemplateUseMemberOnly, saveToAlbumMemberOnly, templateSaveUseMemberOnly],
+      [imageFeature, videoFeature],
+      publicValues,
+      allFeatureKeys,
+      customerService,
+      help,
+      visualAssets,
+      tabBarRaw,
+    ] = await Promise.all([
+      Promise.all([
+        SettingsService.getBoolean('wechat.login_enabled', true),
+        SettingsService.getBoolean('wechat_pay.enabled', false),
+        SettingsService.getBoolean('membership.enabled', false),
+      ]),
+      SettingsService.getBoolean('invite.enabled', false),
+      Promise.all([
+        SettingsService.getBoolean('ai.prompt_optimize.enabled', false),
+        SettingsService.getBoolean('ai.script_generate.enabled', false),
+        SettingsService.getBoolean('ai.prompt_generate.enabled', false),
+        SettingsService.getBoolean('ai.storyboard_generate.enabled', false),
+      ]),
+      Promise.all([
+        SettingsService.getBoolean('membership.prompt_optimize_member_only', false),
+        SettingsService.getBoolean('membership.image_template_use_member_only', false),
+        SettingsService.getBoolean('membership.save_to_album_member_only', false),
+        SettingsService.getBoolean('membership.template_save_use_member_only', false),
+      ]),
+      Promise.all([
+        queryOne<any>("SELECT status FROM model_features WHERE feature_key = 'image_create'"),
+        queryOne<any>("SELECT status FROM model_features WHERE feature_key = 'video_create'"),
+      ]),
+      Promise.all(publicKeys.map(async (key) => {
+        const rawValue = await SettingsService.get(key, '');
+        try {
+          return [key, typeof rawValue === 'string' ? JSON.parse(rawValue) : rawValue] as const;
+        } catch {
+          return [key, rawValue] as const;
+        }
+      })),
+      getModelFeaturesList('active'),
+      getCustomerServiceConfig(),
+      getHelpConfig(),
+      getVisualAssetsConfig(),
+      SettingsService.getString('miniapp.tab_bar', ''),
+    ]);
+
     const result: Record<string, any> = {};
-    for (const key of publicKeys) {
-      const rawValue = await SettingsService.get(key, '');
-      try {
-        result[key] = typeof rawValue === 'string' ? JSON.parse(rawValue) : rawValue;
-      } catch {
-        result[key] = rawValue;
-      }
+    for (const [key, value] of publicValues) {
+      result[key] = value;
     }
-    const allFeatureKeys = await query<any>(
-      `SELECT feature_key FROM model_features WHERE status = 'active' ORDER BY sort_order`,
-    );
     const featureKeys = allFeatureKeys.map((r: any) => r.feature_key);
 
-    const tierRows = await query<any>(
-      `SELECT t.*, mf.feature_key, mf.feature_name,
-              f.cdn_url AS icon_url
-         FROM model_tiers t
-         JOIN model_features mf ON mf.id = t.feature_id
-         LEFT JOIN files f ON f.id = t.icon_file_id AND f.is_deleted = 0
-        WHERE mf.status = 'active' AND t.status = 'active'
-        ORDER BY mf.sort_order, t.sort_order`,
-    );
-
     const modelTiers: Record<string, any[]> = {};
-    for (const t of tierRows) {
-      const cap = await queryOne<any>('SELECT * FROM tier_capabilities WHERE tier_id = ?', [t.id]);
-      const item = {
-        id: t.id,
-        tierId: t.id,
-        tierName: t.tier_name,
-        tierKey: t.tier_key,
-        description: t.description || '',
-        tag: t.tag || '',
-        iconUrl: t.icon_url || '',
-        basePointsCost: t.points_cost,
-        pointsCost: t.points_cost,
-        memberDiscountPercent: 100,
-        memberDiscountApplied: false,
-        isDefault: !!t.is_default,
-        isRecommended: !!t.is_recommended,
-        sortOrder: t.sort_order,
-        qualityMultipliers: typeof t.quality_multipliers === 'string' ? JSON.parse(t.quality_multipliers) : (t.quality_multipliers || {}),
-        capabilities: cap ? {
-          ratios: parseJson(cap.supported_ratios, []),
-          qualities: parseJson(cap.supported_qualities, []),
-          styles: parseJson(cap.supported_styles, []),
-          durations: cap.supported_durations ? parseJson(cap.supported_durations, []) : null,
-          cameraMoves: cap.supported_camera_moves ? parseJson(cap.supported_camera_moves, []) : null,
-          audioModes: cap.supported_audio_modes ? parseJson(cap.supported_audio_modes, []) : null,
-          defaultAudioMode: cap.default_audio_mode || 'silent',
-          supportedSizeModes: parseJson(cap.supported_size_modes, ['auto', 'ratio']),
-          allowCustomPixels: !!cap.allow_custom_pixels,
-          nativeSizes: parseJson(cap.native_sizes, []),
-          defaultRatio: cap.default_ratio || '1:1',
-          maxWidth: cap.max_width,
-          maxHeight: cap.max_height,
-          maxTotalPixels: cap.max_total_pixels,
-          allowPostprocess: !!cap.allow_postprocess,
-          postprocessModes: parseJson(cap.postprocess_modes, []),
-          maxImages: cap.max_images,
-          maxReferenceImages: cap.max_reference_images || 4,
-          maxDurationSeconds: cap.max_duration_seconds,
-        } : null,
-      };
-      if (!modelTiers[t.feature_key]) modelTiers[t.feature_key] = [];
-      modelTiers[t.feature_key].push(item);
+    const tierResults = await Promise.all(featureKeys.map(async (featureKey: string) => ({
+      featureKey,
+      tiers: await getModelTierList(featureKey),
+    })));
+    for (const { featureKey, tiers } of tierResults) {
+      if (tiers?.list?.length) modelTiers[featureKey] = tiers.list;
     }
 
     result.appName = appName;
@@ -143,6 +129,10 @@ router.get('/public/app', async (_req: Request, res: Response) => {
     result['wechat.login_enabled'] = wechatLoginEnabled;
     result['wechat_pay.enabled'] = paymentEnabled;
     result['membership.enabled'] = membershipEnabled;
+    result['membership.prompt_optimize_member_only'] = promptOptimizeMemberOnly;
+    result['membership.image_template_use_member_only'] = imageTemplateUseMemberOnly;
+    result['membership.save_to_album_member_only'] = saveToAlbumMemberOnly;
+    result['membership.template_save_use_member_only'] = templateSaveUseMemberOnly;
     result['invite.enabled'] = inviteEnabled;
     result['feature.image_create.enabled'] = imageFeature?.status === 'active';
     result['feature.video_create.enabled'] = videoFeature?.status === 'active';
@@ -158,13 +148,23 @@ router.get('/public/app', async (_req: Request, res: Response) => {
       promptGenerate: promptGenerateEnabled,
       storyboardGenerate: storyboardGenerateEnabled,
     };
+    result.memberOnly = {
+      promptOptimize: promptOptimizeMemberOnly,
+      imageTemplateUse: imageTemplateUseMemberOnly,
+      saveToAlbum: saveToAlbumMemberOnly,
+      templateSaveUse: templateSaveUseMemberOnly,
+    };
     result.featureKeys = featureKeys;
     result.modelTiers = modelTiers;
-    result.customerService = await getCustomerServiceConfig();
-    result.help = await getHelpConfig();
-    result.visualAssets = await getVisualAssetsConfig();
-    const tabBarRaw = await SettingsService.getString('miniapp.tab_bar', '');
+    result.customerService = customerService;
+    result.help = help;
+    result.visualAssets = visualAssets;
     try { result.tabBar = tabBarRaw ? JSON.parse(tabBarRaw) : null; } catch { result.tabBar = null; }
+    result.navigation = {
+      tabBar: result.tabBar,
+      bottom: result.tabBar,
+      tabs: result.tabBar,
+    };
     success(res, result);
   } catch { error(res, ErrorCodes.SERVER_ERROR, '获取公开配置失败'); }
 });
@@ -180,10 +180,11 @@ router.get('/public/model-tiers', optionalUserAuthMiddleware, async (req: Reques
 });
 
 // GET /public/templates?type=image|video&feature=text_to_image&page=1&pageSize=10
-router.get('/public/templates', async (req: Request, res: Response) => {
+router.get('/public/templates', optionalUserAuthMiddleware, async (req: Request, res: Response) => {
   try {
     const templateType = (req.query.type as string) || 'image';
-    const feature = (req.query.feature as string) || '';
+    const feature = String(req.query.feature || '');
+    const normalizedFeature = feature ? normalizeTemplateTargetFeatureKey(feature) : '';
     const page = Math.max(1, parseInt(req.query.page as string) || 1);
     const pageSize = Math.min(Math.max(1, parseInt(req.query.pageSize as string) || 10), 50);
     const rows = await query<any>(
@@ -200,26 +201,23 @@ router.get('/public/templates', async (req: Request, res: Response) => {
         ORDER BY t.is_recommended DESC, t.sort_order DESC, t.id DESC`,
       [templateType]
     );
-    const all = rows.map((row: any) => toLegacyTemplate(row, row.category_name || ''));
+    const permission = await getTemplateSaveUsePermission(req.user?.userId || 0);
+    const all = await Promise.all(rows.map(async (row: any) => ({
+      ...await normalizeLegacyTemplateMedia(toLegacyTemplate(row, row.category_name || '')),
+      ...permission,
+    })));
 
     // Filter by display_config feature if specified; sort pinned first
     let templates = all;
-    if (feature) {
-      const normalizedFeature = normalizeTemplateTargetFeatureKey(feature);
+    if (normalizedFeature) {
+      const featureAliases = targetFeatureLookupValues(normalizedFeature);
       templates = all
         .filter((t: any) => {
-          const cfg = t.displayConfig;
-          if (cfg && typeof cfg === 'object' && (cfg[feature] || cfg[normalizedFeature])) return true;
-          return normalizeTemplateTargetFeatureKey(t.targetFeature) === normalizedFeature;
+          const cfg = templateDisplayConfig(t, feature, normalizedFeature);
+          if (cfg) return true;
+          return featureAliases.includes(normalizeTemplateTargetFeatureKey(t.targetFeature));
         })
-        .sort((a: any, b: any) => {
-          const aPin = a.displayConfig?.[feature]?.pinOrder ?? 0;
-          const bPin = b.displayConfig?.[feature]?.pinOrder ?? 0;
-          if (aPin && bPin) return aPin - bPin;
-          if (aPin) return -1;
-          if (bPin) return 1;
-          return (b.sortOrder || 0) - (a.sortOrder || 0);
-        });
+        .sort((a: any, b: any) => compareTemplatesForFeature(a, b, feature, normalizedFeature));
     }
 
     const total = templates.length;
@@ -231,6 +229,16 @@ router.get('/public/templates', async (req: Request, res: Response) => {
   }
 });
 
+async function getTemplateSaveUsePermission(userId: number) {
+  const membershipEnabled = await SettingsService.getBoolean('membership.enabled', false);
+  const templateSaveUseMemberOnly = membershipEnabled
+    && await SettingsService.getBoolean('membership.template_save_use_member_only', false);
+  if (!templateSaveUseMemberOnly || await isActiveMember(userId)) {
+    return { canView: true, canUse: true, canSave: true, lockReason: '' };
+  }
+  return { canView: true, canUse: false, canSave: false, lockReason: TEMPLATE_SAVE_USE_MEMBER_MESSAGE };
+}
+
 export default router;
 
 async function firstSetting(keys: string[], fallback: string): Promise<string> {
@@ -239,6 +247,68 @@ async function firstSetting(keys: string[], fallback: string): Promise<string> {
     if (value.trim()) return value;
   }
   return fallback;
+}
+
+function targetFeatureLookupValues(feature: string) {
+  const normalized = normalizeTemplateTargetFeatureKey(feature);
+  const values = new Set<string>([normalized]);
+  if (normalized === 'text_to_image') values.add('image_create');
+  if (normalized === 'text_to_video') values.add('video_create');
+  if (normalized === 'image_edit') values.add('image_editing');
+  return Array.from(values).filter(Boolean);
+}
+
+function templateDisplayConfig(template: any, rawFeature: string, normalizedFeature: string) {
+  const displayConfig = template.displayConfig;
+  if (!displayConfig || typeof displayConfig !== 'object') return null;
+  return displayConfig[normalizedFeature] || displayConfig[rawFeature] || null;
+}
+
+function compareTemplatesForFeature(a: any, b: any, rawFeature: string, normalizedFeature: string) {
+  const aPin = templatePinMeta(a, rawFeature, normalizedFeature);
+  const bPin = templatePinMeta(b, rawFeature, normalizedFeature);
+  if (aPin.pinned !== bPin.pinned) return bPin.pinned - aPin.pinned;
+  if (aPin.pinOrder !== bPin.pinOrder) return bPin.pinOrder - aPin.pinOrder;
+  if (Number(a.sortOrder || 0) !== Number(b.sortOrder || 0)) return Number(b.sortOrder || 0) - Number(a.sortOrder || 0);
+  return Number(b.id || b.templateId || 0) - Number(a.id || a.templateId || 0);
+}
+
+function templatePinMeta(template: any, rawFeature: string, normalizedFeature: string) {
+  const cfg = templateDisplayConfig(template, rawFeature, normalizedFeature);
+  return {
+    pinned: cfg?.pinned ? 1 : 0,
+    pinOrder: Number(cfg?.pinOrder || 0),
+  };
+}
+
+async function normalizeLegacyTemplateMedia(template: any) {
+  return {
+    ...template,
+    coverUrl: await normalizePublicMediaUrl(template.coverUrl),
+    previewUrl: await normalizePublicMediaUrl(template.previewUrl),
+  };
+}
+
+async function normalizePublicMediaUrl(url: string): Promise<string> {
+  const value = String(url || '').trim();
+  if (!value || /^https?:\/\//i.test(value) || !value.startsWith('/')) return value;
+
+  const apiDomain = String(process.env.APP_PUBLIC_URL || process.env.PUBLIC_API_DOMAIN || process.env.SITE_API_DOMAIN || '').trim().replace(/\/+$/, '')
+    || String(await SettingsService.getString('site.api_domain', '')).trim().replace(/\/+$/, '');
+  if (apiDomain) return `${apiDomain}${value}`;
+
+  if (value.startsWith('/static/')) {
+    const localBaseUrl = String(process.env.LOCAL_BASE_URL || '').trim().replace(/\/+$/, '')
+      || String(await SettingsService.getString('storage.local.base_url', '')).trim().replace(/\/+$/, '');
+    try {
+      const parsed = new URL(localBaseUrl);
+      return `${parsed.origin}${value}`;
+    } catch {
+      return value;
+    }
+  }
+
+  return value;
 }
 
 async function getCustomerServiceConfig() {
@@ -290,7 +360,7 @@ async function getHelpConfig() {
   return {
     enabled,
     title: title || DEFAULT_HELP.title,
-    contentHtml: contentHtml || DEFAULT_HELP.contentHtml,
+    contentHtml: sanitizeHelpHtml(contentHtml || DEFAULT_HELP.contentHtml),
   };
 }
 

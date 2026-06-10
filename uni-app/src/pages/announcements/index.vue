@@ -11,11 +11,14 @@
         </view>
       </view>
 
-      <view v-if="loading" class="state-card">正在加载公告...</view>
+      <view v-if="loading" class="state-card state-loading">
+        <text class="state-spinner"></text>
+        <text>正在加载公告...</text>
+      </view>
       <view v-else-if="announcements.length === 0" class="state-card">暂无公告</view>
 
       <view v-else class="announcement-list">
-        <view v-for="item in announcements" :key="item.id" class="announcement-card">
+        <view v-for="item in announcements" :key="item.id" class="announcement-card" @tap="openAnnouncement(item)">
           <view class="announcement-top">
             <view class="announcement-title">
               <text v-if="!item.readAt" class="unread-dot"></text>
@@ -23,18 +26,39 @@
             </view>
             <view class="announcement-type">{{ typeLabel(item.type) }}</view>
           </view>
-          <view class="announcement-content">{{ item.content }}</view>
-          <view class="announcement-time">{{ formatTime(item.startAt || item.createdAt) }}</view>
+          <view class="announcement-content">{{ announcementPreview(item.content) }}</view>
+          <view class="announcement-bottom">
+            <view class="announcement-time">{{ formatTime(item.startAt || item.createdAt) }}</view>
+            <view class="announcement-open">查看详情</view>
+          </view>
         </view>
+      </view>
+    </view>
+
+    <view v-if="detailVisible && detailAnnouncement" class="detail-mask" @tap="closeAnnouncementDetail">
+      <view class="detail-panel" @tap.stop>
+        <view class="detail-head">
+          <view class="detail-heading">
+            <view class="detail-title">{{ detailAnnouncement.title }}</view>
+            <view class="detail-meta">
+              <text>{{ typeLabel(detailAnnouncement.type) }}</text>
+              <text>{{ formatTime(detailAnnouncement.startAt || detailAnnouncement.createdAt) }}</text>
+            </view>
+          </view>
+          <view class="detail-close" @tap="closeAnnouncementDetail">×</view>
+        </view>
+        <scroll-view scroll-y class="detail-scroll">
+          <rich-text class="detail-rich" :nodes="detailContentHtml" />
+        </scroll-view>
       </view>
     </view>
   </view>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import { onPullDownRefresh, onShow } from '@dcloudio/uni-app';
-import { getAnnouncements, markAnnouncementRead } from '@/api/config';
+import { getAnnouncementDetail, getAnnouncements, markAnnouncementRead } from '@/api/config';
 import { useAuthStore } from '@/stores/auth';
 
 interface AnnouncementItem {
@@ -50,6 +74,9 @@ interface AnnouncementItem {
 const auth = useAuthStore();
 const loading = ref(false);
 const announcements = ref<AnnouncementItem[]>([]);
+const detailVisible = ref(false);
+const detailAnnouncement = ref<AnnouncementItem | null>(null);
+const detailContentHtml = computed(() => renderAnnouncementHtml(detailAnnouncement.value?.content || ''));
 
 onShow(() => {
   loadAnnouncements();
@@ -64,7 +91,6 @@ async function loadAnnouncements() {
   try {
     const res = await getAnnouncements<{ list?: Array<Record<string, unknown>> }>({ page: 1, pageSize: 50 });
     announcements.value = (Array.isArray(res.list) ? res.list : []).map(normalizeAnnouncement);
-    if (auth.isLoggedIn) markVisibleAsRead();
   } catch {
     announcements.value = [];
     uni.showToast({ title: '公告加载失败', icon: 'none' });
@@ -85,13 +111,58 @@ function normalizeAnnouncement(row: Record<string, unknown>): AnnouncementItem {
   };
 }
 
-function markVisibleAsRead() {
-  const unread = announcements.value.filter((item) => item.id && !item.readAt);
-  if (!unread.length) return;
-  Promise.all(unread.map((item) => markAnnouncementRead(item.id).catch(() => undefined))).then(() => {
+async function openAnnouncement(item: AnnouncementItem) {
+  detailAnnouncement.value = item;
+  detailVisible.value = true;
+  if (item.id) {
+    try {
+      const detail = await getAnnouncementDetail<Record<string, unknown>>(item.id);
+      detailAnnouncement.value = normalizeAnnouncement(detail);
+    } catch {
+      // Keep the list item open when detail fetch fails.
+    }
+  }
+  if (auth.isLoggedIn && item.id && !item.readAt) {
+    markAnnouncementRead(item.id).catch(() => undefined);
     const now = new Date().toISOString();
-    announcements.value = announcements.value.map((item) => item.readAt ? item : { ...item, readAt: now });
-  });
+    announcements.value = announcements.value.map((row) => row.id === item.id ? { ...row, readAt: now } : row);
+    detailAnnouncement.value = detailAnnouncement.value ? { ...detailAnnouncement.value, readAt: now } : detailAnnouncement.value;
+  }
+}
+
+function closeAnnouncementDetail() {
+  detailVisible.value = false;
+}
+
+function announcementPreview(content: string) {
+  const text = stripHtml(content).replace(/\s+/g, ' ').trim();
+  return text.length > 96 ? `${text.slice(0, 96)}...` : text || '点击查看公告详情';
+}
+
+function stripHtml(value: string) {
+  return String(value || '').replace(/<[^>]+>/g, ' ');
+}
+
+function escapeHtml(value: string) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function renderAnnouncementHtml(content: string) {
+  const text = String(content || '').trim();
+  if (!text) return '<p>暂无内容</p>';
+  const safe = text
+    .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?>[\s\S]*?<\/style>/gi, '');
+  if (/<\/?[a-z][\s\S]*>/i.test(safe)) return safe;
+  return safe
+    .split(/\n{2,}/)
+    .map((paragraph) => `<p>${escapeHtml(paragraph).replace(/\n/g, '<br/>')}</p>`)
+    .join('');
 }
 
 function typeLabel(type: string) {
@@ -188,6 +259,29 @@ function formatTime(value?: string | null) {
   text-align: center;
 }
 
+.state-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12rpx;
+}
+
+.state-spinner {
+  width: 28rpx;
+  height: 28rpx;
+  box-sizing: border-box;
+  border: 4rpx solid rgba(122, 92, 255, 0.18);
+  border-top-color: #7a5cff;
+  border-radius: 50%;
+  animation: state-spin 0.82s linear infinite;
+}
+
+@keyframes state-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .announcement-list {
   display: flex;
   flex-direction: column;
@@ -248,13 +342,112 @@ function formatTime(value?: string | null) {
   font-size: 24rpx;
   font-weight: 700;
   line-height: 1.6;
-  white-space: pre-wrap;
+  display: -webkit-box;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+.announcement-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18rpx;
+  margin-top: 18rpx;
 }
 
 .announcement-time {
-  margin-top: 18rpx;
+  min-width: 0;
   color: #9aa2b6;
   font-size: 21rpx;
   font-weight: 800;
+}
+
+.announcement-open {
+  flex-shrink: 0;
+  color: #7a5cff;
+  font-size: 22rpx;
+  font-weight: 900;
+}
+
+.detail-mask {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  padding: calc(32rpx + env(safe-area-inset-top)) 28rpx calc(32rpx + env(safe-area-inset-bottom));
+  background: rgba(20, 24, 43, 0.58);
+}
+
+.detail-panel {
+  width: 660rpx;
+  max-width: 100%;
+  max-height: 82vh;
+  overflow: hidden;
+  border-radius: 28rpx;
+  background: #ffffff;
+  box-shadow: 0 28rpx 80rpx rgba(26, 31, 58, 0.22);
+}
+
+.detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 22rpx;
+  padding: 30rpx 32rpx 22rpx;
+  border-bottom: 1rpx solid #f0edff;
+}
+
+.detail-heading {
+  min-width: 0;
+}
+
+.detail-title {
+  color: #252941;
+  font-size: 34rpx;
+  font-weight: 900;
+  line-height: 1.3;
+}
+
+.detail-meta {
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+  margin-top: 12rpx;
+  color: #8a91a8;
+  font-size: 22rpx;
+  font-weight: 800;
+}
+
+.detail-close {
+  flex-shrink: 0;
+  width: 52rpx;
+  height: 52rpx;
+  border-radius: 50%;
+  background: #f5f3ff;
+  color: #7a5cff;
+  font-size: 34rpx;
+  font-weight: 700;
+  line-height: 48rpx;
+  text-align: center;
+}
+
+.detail-scroll {
+  box-sizing: border-box;
+  height: 58vh;
+  padding: 28rpx 32rpx 34rpx;
+}
+
+.detail-rich {
+  color: #343a52;
+  font-size: 27rpx;
+  line-height: 1.75;
 }
 </style>

@@ -107,6 +107,7 @@ CREATE TABLE IF NOT EXISTS user_memberships (
   source VARCHAR(16) NOT NULL DEFAULT 'purchase',
   auto_renew TINYINT(1) NOT NULL DEFAULT 0,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  INDEX idx_user_status_expire (user_id, status, expire_at),
   INDEX idx_user_status (user_id, status),
   INDEX idx_expire_at (expire_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -127,6 +128,7 @@ CREATE TABLE IF NOT EXISTS member_orders (
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   UNIQUE INDEX uk_order_no (order_no),
+  INDEX idx_user_status_created (user_id, status, created_at),
   INDEX idx_user (user_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 

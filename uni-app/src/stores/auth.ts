@@ -20,50 +20,98 @@ export const useAuthStore = defineStore('auth', {
     isLoggedIn: (state) => Boolean(state.token)
   },
   actions: {
-    hydrate() {
-      this.token = String(uni.getStorageSync(STORAGE_KEYS.token) || '');
-      this.refreshToken = String(uni.getStorageSync(STORAGE_KEYS.refreshToken) || '');
-      const user = uni.getStorageSync(STORAGE_KEYS.user);
-      this.user = user && typeof user === 'object' ? user as Record<string, unknown> : null;
+    async hydrate() {
+      try {
+        const [token, refreshToken, user] = await Promise.all([
+          getStorageString(STORAGE_KEYS.token),
+          getStorageString(STORAGE_KEYS.refreshToken),
+          getStorageObject(STORAGE_KEYS.user),
+        ]);
+        this.token = token;
+        this.refreshToken = refreshToken;
+        this.user = user;
+      } catch {
+        // 存储读取失败时保持空状态
+      }
     },
-    applyLogin(payload: LoginResponse) {
+    async applyLogin(payload: LoginResponse) {
       this.token = payload.token;
       this.refreshToken = payload.refreshToken || this.refreshToken;
       this.user = payload.user || null;
       this.expiresIn = payload.expiresIn || '';
-      uni.setStorageSync(STORAGE_KEYS.token, this.token);
-      if (this.refreshToken) uni.setStorageSync(STORAGE_KEYS.refreshToken, this.refreshToken);
-      uni.setStorageSync(STORAGE_KEYS.user, this.user || {});
+      await Promise.all([
+        setStorage(STORAGE_KEYS.token, this.token),
+        this.refreshToken ? setStorage(STORAGE_KEYS.refreshToken, this.refreshToken) : Promise.resolve(),
+        setStorage(STORAGE_KEYS.user, this.user || {}),
+      ]);
     },
-    applyTokenRefresh(payload: { token: string; refreshToken?: string; expiresIn?: string }) {
+    async applyTokenRefresh(payload: { token: string; refreshToken?: string; expiresIn?: string }) {
       this.token = payload.token;
       this.refreshToken = payload.refreshToken || this.refreshToken;
       this.expiresIn = payload.expiresIn || this.expiresIn;
-      uni.setStorageSync(STORAGE_KEYS.token, this.token);
-      if (this.refreshToken) uni.setStorageSync(STORAGE_KEYS.refreshToken, this.refreshToken);
+      await Promise.all([
+        setStorage(STORAGE_KEYS.token, this.token),
+        this.refreshToken ? setStorage(STORAGE_KEYS.refreshToken, this.refreshToken) : Promise.resolve(),
+      ]);
     },
     async loginWithWechat(inviteCode?: string) {
       const payload = await loginByUniCode(inviteCode);
-      this.applyLogin(payload);
+      await this.applyLogin(payload);
       return payload;
     },
     async loginWithDev(inviteCode?: string) {
       const payload = await devLogin(inviteCode);
-      this.applyLogin(payload);
+      await this.applyLogin(payload);
       return payload;
     },
-    clearSession() {
+    async clearSession() {
       this.token = '';
       this.refreshToken = '';
       this.user = null;
       this.expiresIn = '';
-      uni.removeStorageSync(STORAGE_KEYS.token);
-      uni.removeStorageSync(STORAGE_KEYS.refreshToken);
-      uni.removeStorageSync(STORAGE_KEYS.user);
+      await Promise.all([
+        removeStorage(STORAGE_KEYS.token),
+        removeStorage(STORAGE_KEYS.refreshToken),
+        removeStorage(STORAGE_KEYS.user),
+      ]);
     },
-    logout() {
-      this.clearSession();
+    async logout() {
+      await this.clearSession();
       uni.reLaunch({ url: PAGE_ROUTES.home });
     }
   }
 });
+
+async function getStorageString(key: string): Promise<string> {
+  try {
+    const { data } = await uni.getStorage({ key });
+    return typeof data === 'string' ? data : '';
+  } catch {
+    return '';
+  }
+}
+
+async function getStorageObject(key: string): Promise<Record<string, unknown> | null> {
+  try {
+    const { data } = await uni.getStorage({ key });
+    return data && typeof data === 'object' ? data as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+async function setStorage(key: string, value: unknown): Promise<void> {
+  try {
+    await uni.setStorage({ key, data: value });
+  } catch {
+    // 静默失败——存储写入失败时状态已在内存中
+  }
+}
+
+async function removeStorage(key: string): Promise<void> {
+  try {
+    await uni.removeStorage({ key });
+  } catch {
+    // 静默失败
+  }
+}

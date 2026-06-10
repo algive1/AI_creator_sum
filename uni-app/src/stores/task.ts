@@ -1,13 +1,13 @@
 import { defineStore } from 'pinia';
 import { getTaskDetail, getTasks } from '@/api/task';
 import { isTaskProcessing } from '@/utils/task-display';
+import { taskPoller } from '@/utils/task-poller';
 
 interface TaskState {
   list: Record<string, unknown>[];
   pagination: Record<string, unknown> | null;
   currentTask: Record<string, unknown> | null;
   loading: boolean;
-  pollTimer: ReturnType<typeof setInterval> | null;
 }
 
 export const useTaskStore = defineStore('task', {
@@ -15,8 +15,7 @@ export const useTaskStore = defineStore('task', {
     list: [],
     pagination: null,
     currentTask: null,
-    loading: false,
-    pollTimer: null
+    loading: false
   }),
   actions: {
     async loadTasks(params: Record<string, unknown> = {}) {
@@ -37,15 +36,14 @@ export const useTaskStore = defineStore('task', {
       this.currentTask = task;
       return task;
     },
-    startPolling(id: number, interval = 3000) {
-      this.stopPolling();
-      this.pollTimer = setInterval(() => {
-        this.loadTask(id).catch(() => undefined);
-      }, interval);
+    startPolling(id: number, _interval = 3000) {
+      taskPoller.add(id, (task) => {
+        this.currentTask = task;
+      });
+      taskPoller.pollNow().catch(() => undefined);
     },
     stopPolling() {
-      if (this.pollTimer) clearInterval(this.pollTimer);
-      this.pollTimer = null;
+      // Global poller stays alive for other pages.
     }
   }
 });

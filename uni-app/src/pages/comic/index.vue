@@ -1,6 +1,6 @@
 <template>
   <view class="screen manga-page">
-    <AppTopbar class="app-nav-root" title="AI漫剧" back>
+    <AppTopbar class="app-nav-root" title="AI漫剧" back transparent>
       <template #right>
         <button class="record-entry" @tap="goHistory">
           <view class="record-entry-icon"></view>
@@ -219,9 +219,10 @@
         </view>
       </view>
 
-      <view class="generate-button disabled" @tap="submitManga">开发进度90%</view>
+      <view class="generate-button" @tap="submitManga">生成漫剧</view>
     </view>
 
+    <AppDialogHost />
     <AppTabBar class="app-nav-root" />
   </view>
 </template>
@@ -231,6 +232,7 @@ import { computed, ref } from 'vue';
 import { onShow } from '@dcloudio/uni-app';
 import AppTabBar from '@/components/common/AppTabBar.vue';
 import AppTopbar from '@/components/common/AppTopbar.vue';
+import AppDialogHost from '@/components/common/AppDialogHost.vue';
 import LegacyPromptComposer from '@/components/legacy/LegacyPromptComposer.vue';
 import { createComicTask } from '@/api/comic';
 import { getVideoModels } from '@/api/ai-video';
@@ -365,6 +367,7 @@ const activeMode = ref<CreationMode['key']>('text');
 const configStore = useConfigStore();
 const authStore = useAuthStore();
 const comicBannerFailed = ref(false);
+const storyboardGenerateEnabled = computed(() => configStore.features.storyboardGenerate !== false);
 type ModelTier = {
   tierKey: string;
   tierName: string;
@@ -405,10 +408,14 @@ const comicBannerSource = computed(() => {
   return url && !comicBannerFailed.value ? url : '';
 });
 
-onShow(() => {
-  authStore.hydrate();
+onShow(async () => {
+  await authStore.hydrate();
   configStore.hydrate();
-  configStore.loadPublicConfig().catch(() => undefined);
+  await configStore.loadPublicConfig().catch(() => undefined);
+  if (!storyboardGenerateEnabled.value) {
+    handleStoryboardDisabled();
+    return;
+  }
   getVideoModels().then((res) => {
     const list = Array.isArray(res.list) ? res.list as Record<string, unknown>[] : [];
     if (!list.length && isDevFallbackEnabled) warnDevFallback('comic-tiers', 'GET /public/model-tiers returned empty list');
@@ -420,6 +427,19 @@ onShow(() => {
     selectedModelIndex.value = middleModelIndex();
   });
 });
+
+function handleStoryboardDisabled() {
+  models.value = [];
+  uni.showToast({ title: 'AI漫剧功能已关闭', icon: 'none' });
+  setTimeout(() => {
+    const pages = getCurrentPages();
+    if (pages.length > 1) {
+      uni.navigateBack();
+      return;
+    }
+    uni.reLaunch({ url: PAGE_ROUTES.home });
+  }, 300);
+}
 
 function goHistory() {
   if (!authStore.isLoggedIn) {
@@ -499,8 +519,10 @@ function smartFillStoryPrompt() {
 }
 
 async function submitManga() {
-  uni.showToast({ title: '开发进度90%', icon: 'none' });
-  return;
+  if (!storyboardGenerateEnabled.value) {
+    uni.showToast({ title: 'AI漫剧功能已关闭', icon: 'none' });
+    return;
+  }
   if (!story.value.trim()) {
     uni.showToast({ title: '请先填写剧情梗概', icon: 'none' });
     return;
@@ -530,7 +552,7 @@ async function submitManga() {
     });
     const id = Number(result.id || result.taskId);
     if (!Number.isInteger(id) || id <= 0) {
-      uni.showToast({ title: 'Task submit failed', icon: 'none' });
+      uni.showToast({ title: '任务提交失败，请稍后重试', icon: 'none' });
       return;
     }
     uni.navigateTo({ url: `${PAGE_ROUTES.result}?id=${id}&type=video` });

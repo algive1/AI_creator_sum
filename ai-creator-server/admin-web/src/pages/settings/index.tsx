@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Tabs, Table, Button, Modal, Input, Tag, message, Descriptions, Card, Typography, Space, Form, Switch, Segmented } from 'antd';
 import { CopyOutlined, SettingOutlined, QuestionCircleOutlined } from '@ant-design/icons';
 import api from '../../services/api';
+import { EllipsisText, TimeText } from '../../utils/tableCells';
 
 const { Text, Paragraph } = Typography;
 
@@ -57,6 +58,10 @@ const CONFIG_META: Record<string, ConfigMeta> = {
   'content.filter_enabled': {
     label: '内容过滤',
     description: '是否启用敏感内容过滤。',
+  },
+  'membership.template_save_use_member_only': {
+    label: '模板保存/使用仅会员可用',
+    description: '开启后非会员仍可浏览预览模板，但不能保存模板素材或使用模板生成同款；生成结果保存不受该开关影响。',
   },
   'wechat.app_id': {
     label: '小程序 AppID',
@@ -244,12 +249,12 @@ const CONFIG_META: Record<string, ConfigMeta> = {
     guide: '填写 JSON 数组，留空或 [] 表示不额外配置敏感词。',
   },
   'ai.prompt_optimize.enabled': {
-    label: '智能优化启用',
-    description: '是否启用提示词智能优化。',
+    label: '提示词智能优化开关',
+    description: '控制小程序生图/生视频输入框下方的“智能优化”按钮，对应接口 /tasks/optimize-prompt。',
   },
   'ai.prompt_optimize.model_id': {
-    label: '智能优化默认模型',
-    description: '绑定用于智能优化的默认文本模型 ID。',
+    label: '智能优化文本模型 ID',
+    description: '填写后台“供应商与模型”里已启用的文本模型 ID，用来改写用户输入的提示词。',
     placeholder: '0',
   },
   'ai.prompt_optimize.points_cost': {
@@ -258,12 +263,12 @@ const CONFIG_META: Record<string, ConfigMeta> = {
     placeholder: '0',
   },
   'ai.script_generate.enabled': {
-    label: '脚本生成启用',
-    description: '是否启用脚本生成。',
+    label: '剧本/脚本生成开关',
+    description: '控制后续小程序剧本生成入口，对应接口 /tasks/script。',
   },
   'ai.script_generate.model_id': {
-    label: '脚本生成默认模型',
-    description: '绑定用于脚本生成的默认文本模型 ID。',
+    label: '剧本/脚本文本模型 ID',
+    description: '填写用于把主题生成分镜脚本的文本模型 ID。',
     placeholder: '0',
   },
   'ai.script_generate.points_cost': {
@@ -272,12 +277,12 @@ const CONFIG_META: Record<string, ConfigMeta> = {
     placeholder: '0',
   },
   'ai.prompt_generate.enabled': {
-    label: '提示词生成启用',
-    description: '是否启用提示词生成。',
+    label: '提示词智能补全/生成开关',
+    description: '控制后续小程序提示词输入框的智能补全或多版本提示词生成，对应接口 /tasks/prompt。',
   },
   'ai.prompt_generate.model_id': {
-    label: '提示词生成默认模型',
-    description: '绑定用于提示词生成的默认文本模型 ID。',
+    label: '提示词补全文本模型 ID',
+    description: '填写用于根据创意想法生成多条提示词的文本模型 ID。',
     placeholder: '0',
   },
   'ai.prompt_generate.points_cost': {
@@ -286,12 +291,12 @@ const CONFIG_META: Record<string, ConfigMeta> = {
     placeholder: '0',
   },
   'ai.storyboard_generate.enabled': {
-    label: '分镜生成启用',
-    description: '是否预留并启用 AI 漫剧分镜生成。',
+    label: 'AI 漫剧分镜生成开关',
+    description: '控制后续小程序漫剧分镜生成入口，对应接口 /tasks/storyboard。',
   },
   'ai.storyboard_generate.model_id': {
-    label: '分镜生成默认模型',
-    description: '绑定用于分镜生成的默认文本模型 ID。',
+    label: '漫剧分镜文本模型 ID',
+    description: '填写用于把脚本拆成镜头画面、运镜、光影说明的文本模型 ID。',
     placeholder: '0',
   },
   'ai.storyboard_generate.points_cost': {
@@ -304,6 +309,37 @@ const CONFIG_META: Record<string, ConfigMeta> = {
 function getMeta(key: string): ConfigMeta {
   return CONFIG_META[key] || { label: key, description: '' };
 }
+
+const VISIBLE_SETTING_GROUPS = new Set(['general', 'ai']);
+const VISIBLE_CONFIG_KEYS = new Set([
+  'site.name',
+  'site.api_domain',
+  'site.timezone',
+  'site.lang',
+  'site.allow_register',
+  'site.admin_title',
+  'content.filter_enabled',
+  'content.sensitive_words',
+  'membership.enabled',
+  'membership.show_entry',
+  'membership.template_save_use_member_only',
+  'template.user_share_enabled',
+  'template.user_public_enabled',
+  'template.require_manual_review',
+  'template.require_content_check',
+  'ai.prompt_optimize.enabled',
+  'ai.prompt_optimize.model_id',
+  'ai.prompt_optimize.points_cost',
+  'ai.script_generate.enabled',
+  'ai.script_generate.model_id',
+  'ai.script_generate.points_cost',
+  'ai.prompt_generate.enabled',
+  'ai.prompt_generate.model_id',
+  'ai.prompt_generate.points_cost',
+  'ai.storyboard_generate.enabled',
+  'ai.storyboard_generate.model_id',
+  'ai.storyboard_generate.points_cost',
+]);
 
 const CUSTOMER_SERVICE_DEFAULTS = {
   enabled: true,
@@ -441,7 +477,7 @@ export default function Settings() {
 
   const columns = [
     {
-      title: '配置项', dataIndex: 'key', width: 260,
+      title: '配置项', dataIndex: 'key', width: 360,
       render: (key: string) => {
         const m = getMeta(key);
         return (
@@ -452,7 +488,7 @@ export default function Settings() {
             {advancedMode && (
               <>
                 <br />
-                <Text type="secondary" style={{ fontSize: 12 }}>配置 Key：{key}</Text>
+                <EllipsisText value={key} maxWidth={320} code />
               </>
             )}
           </span>
@@ -460,7 +496,7 @@ export default function Settings() {
       },
     },
     {
-      title: '配置值', dataIndex: 'value', width: 240,
+      title: '配置值', dataIndex: 'value', width: 300,
       render: (v: string, r: any) => {
         if (r.isSecret) {
           return <Tag>{r.maskedValue || '****已隐藏****'}</Tag>;
@@ -468,8 +504,8 @@ export default function Settings() {
         if (r.type === 'boolean' || (v === 'true' || v === 'false')) {
           return <Tag color={v === 'true' ? 'green' : 'default'}>{v === 'true' ? '开启' : '关闭'}</Tag>;
         }
-        if (r.type === 'json') return <Text code style={{ fontSize: 12 }}>{v || '-'}</Text>;
-        return <Text ellipsis style={{ maxWidth: 220 }}>{v || <Text type="secondary">未设置</Text>}</Text>;
+        if (r.type === 'json') return <EllipsisText value={v} maxWidth={278} code />;
+        return <EllipsisText value={v} maxWidth={278} fallback="未设置" />;
       },
     },
     advancedMode ? {
@@ -485,12 +521,12 @@ export default function Settings() {
   const logColumns = [
     { title: '管理员', dataIndex: 'admin_name', width: 100 },
     { title: '分组', dataIndex: 'config_group', width: 80 },
-    { title: '配置 Key', dataIndex: 'config_key', width: 180 },
+    { title: '配置 Key', dataIndex: 'config_key', width: 220, render: (v: string) => <EllipsisText value={v} maxWidth={198} code /> },
     { title: '操作', dataIndex: 'action', width: 60 },
-    { title: '旧值', dataIndex: 'old_value_masked', width: 140, ellipsis: true },
-    { title: '新值', dataIndex: 'new_value_masked', width: 140, ellipsis: true },
+    { title: '旧值', dataIndex: 'old_value_masked', width: 220, ellipsis: true, render: (v: string) => <EllipsisText value={v} maxWidth={198} /> },
+    { title: '新值', dataIndex: 'new_value_masked', width: 220, ellipsis: true, render: (v: string) => <EllipsisText value={v} maxWidth={198} /> },
     { title: 'IP', dataIndex: 'ip_address', width: 120 },
-    { title: '时间', dataIndex: 'created_at', width: 170 },
+    { title: '时间', dataIndex: 'created_at', width: 170, render: (v: string) => <TimeText value={v} /> },
   ];
 
   const renderCustomerServiceSettings = () => (
@@ -533,17 +569,18 @@ export default function Settings() {
     </Card>
   );
 
-  const settingGroups = groups.filter((g: any) => !['wechat', 'wechat_pay', 'invite', 'customer_service', 'storage'].includes(g.group));
+  const visibleConfigs = configs.filter((item: any) => VISIBLE_CONFIG_KEYS.has(item.key));
+  const settingGroups = groups.filter((g: any) => VISIBLE_SETTING_GROUPS.has(g.group));
   const tabItems = settingGroups.map((g: any) => ({
     key: g.group, label: GROUP_LABELS[g.group] || g.group,
     children: g.group === 'customer_service'
       ? renderCustomerServiceSettings()
-      : <Table rowKey="key" columns={columns} dataSource={configs} loading={loading && activeGroup === g.group} size="small" pagination={false} />,
+      : <Table rowKey="key" columns={columns} dataSource={visibleConfigs} loading={loading && activeGroup === g.group} size="small" pagination={false} tableLayout="fixed" scroll={{ x: advancedMode ? 820 : 740 }} />,
   }));
 
   tabItems.push({
     key: 'logs', label: '操作日志',
-    children: <Table rowKey="id" columns={logColumns} dataSource={logs} pagination={logPagination} size="small" onChange={(p: any) => fetchLogs(p.current)} />,
+    children: <Table rowKey="id" columns={logColumns} dataSource={logs} pagination={logPagination} size="small" tableLayout="fixed" scroll={{ x: 1260 }} onChange={(p: any) => fetchLogs(p.current)} />,
   });
 
   return (

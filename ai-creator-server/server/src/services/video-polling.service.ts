@@ -4,10 +4,12 @@ import { AdapterRegistry } from './adapters/adapter.registry';
 import { decryptApiKey } from './openai-adapter.service';
 import {
   addTaskLog,
+  cleanupSavedTaskOutputs,
   finalizeTaskFailure,
   finalizeTaskSuccess,
   positiveInt,
-  saveTaskOutput,
+  SavedTaskOutput,
+  saveTaskOutputWithRetry,
 } from './task.service';
 
 type ProviderInternalStatus = 'processing' | 'completed' | 'failed';
@@ -15,13 +17,30 @@ type ProviderInternalStatus = 'processing' | 'completed' | 'failed';
 let schedulerStarted = false;
 let schedulerTimer: NodeJS.Timeout | null = null;
 let scanRunning = false;
+const readPollInFlightTaskIds = new Set<number>();
 
 export function startVideoPollingScheduler(): void {
-  if (schedulerStarted || process.env.CHECK_DISABLE_VIDEO_POLLING === 'true') return;
+  if (schedulerStarted) return;
+  if (process.env.CHECK_DISABLE_VIDEO_POLLING === 'true') {
+    console.warn('[VideoPolling] scheduler disabled by CHECK_DISABLE_VIDEO_POLLING=true');
+    return;
+  }
   schedulerStarted = true;
-  const intervalSeconds = positiveInt(process.env.VIDEO_TASK_POLL_INTERVAL_SECONDS, 20);
+  const intervalSeconds = positiveInt(process.env.TASK_POLL_SCHEDULER_INTERVAL_SECONDS, positiveInt(process.env.VIDEO_TASK_POLL_INTERVAL_SECONDS, 5));
+  console.log(`[VideoPolling] scheduler started, interval=${intervalSeconds}s`);
 
   recoverProcessingVideoTasksOnStartup()
+    .then(result => {
+      if (result.recovered || result.failed) {
+        console.log(`[VideoPolling] startup recovery: recovered=${result.recovered}, failed=${result.failed}`);
+      }
+      return scanAndPollVideoTasks();
+    })
+    .then(result => {
+      if (result.polled || result.failed) {
+        console.log(`[VideoPolling] startup scan: polled=${result.polled}, failed=${result.failed}`);
+      }
+    })
     .catch(err => console.error('[VideoPolling] startup recovery failed:', err.message || err));
 
   schedulerTimer = setInterval(() => {
@@ -31,13 +50,14 @@ export function startVideoPollingScheduler(): void {
 }
 
 export async function recoverProcessingVideoTasksOnStartup(): Promise<{ recovered: number; failed: number }> {
-  const maxRunningMinutes = positiveInt(process.env.VIDEO_TASK_MAX_RUNNING_MINUTES, 30);
-  const intervalSeconds = positiveInt(process.env.VIDEO_TASK_POLL_INTERVAL_SECONDS, 20);
+  const intervalSeconds = positiveInt(process.env.TASK_POLL_SCHEDULER_INTERVAL_SECONDS, positiveInt(process.env.VIDEO_TASK_POLL_INTERVAL_SECONDS, 5));
   const tasks = await query<any>(
-    `SELECT id, task_type, points_cost, provider_started_at, started_at, updated_at, created_at, provider_task_id
-       FROM ai_tasks
-      WHERE task_type IN ('image', 'video') AND status = 'processing'
-      ORDER BY created_at ASC
+    `SELECT t.id, t.task_type, t.points_cost, t.provider_started_at, t.started_at, t.updated_at, t.created_at, t.provider_task_id,
+            m.config AS model_config
+       FROM ai_tasks t
+       LEFT JOIN ai_models m ON m.id = t.actual_model_id
+      WHERE t.task_type IN ('image', 'video') AND t.status = 'processing'
+      ORDER BY t.created_at ASC
       LIMIT 200`,
   );
 
@@ -57,6 +77,8 @@ export async function recoverProcessingVideoTasksOnStartup(): Promise<{ recovere
         }
         continue;
       }
+      const modelConfig = parseJson(task.model_config, {});
+      const maxRunningMinutes = maxPollingMinutes(task.task_type, modelConfig);
       if (runningMinutes >= maxRunningMinutes) {
         await finalizeTaskFailure(task.id, task.points_cost || 0, 'Provider task polling timed out after service restart; points refunded.');
         failed++;
@@ -67,7 +89,7 @@ export async function recoverProcessingVideoTasksOnStartup(): Promise<{ recovere
             SET next_poll_at = COALESCE(next_poll_at, DATE_ADD(NOW(3), INTERVAL ? SECOND)),
                 processing_lock_until = NULL, updated_at = NOW(3)
           WHERE id = ? AND status = 'processing'`,
-        [Math.min(intervalSeconds, 5), task.id],
+        [Math.min(intervalSeconds, nextPollDelaySeconds(task.task_type, task.poll_count || 0)), task.id],
       );
       await addTaskLog(task.id, 'provider_poll_recovered', 'Provider polling resumed after service restart.');
       recovered++;
@@ -132,11 +154,8 @@ export async function pollSingleVideoTask(taskId: number): Promise<void> {
     const task = await loadVideoPollingTask(taskId);
     if (!task) return;
     const modelConfig = parseJson(task.model_config, {});
-    const maxRunningMinutes = modelConfig.max_polling_minutes
-      || positiveInt(process.env.VIDEO_TASK_MAX_RUNNING_MINUTES, 30);
-    const maxPollCount = modelConfig.max_polling_minutes
-      ? Math.ceil((modelConfig.max_polling_minutes * 60) / positiveInt(process.env.VIDEO_TASK_POLL_INTERVAL_SECONDS, 20))
-      : positiveInt(process.env.VIDEO_TASK_MAX_POLL_COUNT, 120);
+    const maxRunningMinutes = maxPollingMinutes(task.task_type, modelConfig);
+    const maxPollCount = maxPollingCount(task.task_type, modelConfig);
     const startedAt = new Date(task.provider_started_at || task.started_at || task.created_at).getTime();
     if (Number.isFinite(startedAt) && Date.now() - startedAt > maxRunningMinutes * 60 * 1000) {
       await finalizeVideoFailure(task, 'Provider task polling timed out; points refunded.');
@@ -168,6 +187,7 @@ export async function pollSingleVideoTask(taskId: number): Promise<void> {
       [String(providerResult.status || mapped).substring(0, 64), message, nextProgress, task.id],
     );
     await addTaskLog(task.id, 'provider_task_poll', `Provider status: ${String(providerResult.status || mapped).substring(0, 64)}`);
+    console.log(`[Task #${task.id}] poll #${Number(task.poll_count || 0) + 1}, status=${String(providerResult.status || mapped).substring(0, 64)}, progress=${nextProgress}%`);
 
     if (mapped === 'completed') {
       await finalizeVideoSuccess(task, providerResult);
@@ -178,7 +198,7 @@ export async function pollSingleVideoTask(taskId: number): Promise<void> {
       return;
     }
 
-    const intervalSeconds = positiveInt(process.env.VIDEO_TASK_POLL_INTERVAL_SECONDS, 20);
+    const intervalSeconds = nextPollDelaySeconds(task.task_type, Number(task.poll_count || 0) + 1);
     await query(
       `UPDATE ai_tasks
           SET next_poll_at = DATE_ADD(NOW(3), INTERVAL ? SECOND), processing_lock_until = NULL
@@ -191,6 +211,36 @@ export async function pollSingleVideoTask(taskId: number): Promise<void> {
   }
 }
 
+export async function pollProviderTaskIfDue(taskId: number, userId?: number): Promise<boolean> {
+  if (readPollInFlightTaskIds.has(taskId)) return false;
+  readPollInFlightTaskIds.add(taskId);
+  try {
+    const userFilter = userId ? 'AND user_id = ?' : '';
+    const params = userId ? [taskId, userId] : [taskId];
+    const task = await queryOne<any>(
+      `SELECT id
+         FROM ai_tasks
+        WHERE id = ?
+          ${userFilter}
+          AND task_type IN ('image', 'video')
+          AND status = 'processing'
+          AND provider_task_id IS NOT NULL
+          AND (next_poll_at IS NULL OR next_poll_at <= NOW(3))
+          AND (processing_lock_until IS NULL OR processing_lock_until < NOW(3))
+        LIMIT 1`,
+      params,
+    );
+    if (!task) return false;
+    await pollSingleVideoTask(taskId);
+    return true;
+  } catch (err: any) {
+    await addTaskLog(taskId, 'provider_poll_on_read_error', (err.message || 'Provider polling on read failed').substring(0, 500)).catch(() => undefined);
+    return false;
+  } finally {
+    readPollInFlightTaskIds.delete(taskId);
+  }
+}
+
 async function finalizeVideoSuccess(task: any, providerResult: any): Promise<void> {
   const urls = providerResult.result?.urls || [];
   if (!urls.length) {
@@ -200,12 +250,19 @@ async function finalizeVideoSuccess(task: any, providerResult: any): Promise<voi
   await query("UPDATE ai_tasks SET progress = GREATEST(progress, 85), current_step = '保存结果', updated_at = NOW(3) WHERE id = ? AND status = 'processing'", [task.id]);
   const outputType = task.task_type === 'video' ? 'video' : 'image';
   const params = parseJson(task.params, {});
+  const expectedImageCount = outputType === 'image' ? positiveInt(params.imageCount, 1) : 0;
+  if (expectedImageCount > 0 && urls.length < expectedImageCount) {
+    await finalizeVideoFailure(task, `模型返回图片数量不足，期望 ${expectedImageCount} 张，实际 ${urls.length} 张`);
+    return;
+  }
+  const outputUrls = expectedImageCount > 0 ? urls.slice(0, expectedImageCount) : urls;
+  const savedOutputs: SavedTaskOutput[] = [];
   try {
-    for (let i = 0; i < urls.length; i++) {
-      await saveTaskOutput({
+    for (let i = 0; i < outputUrls.length; i++) {
+      const savedOutput = await saveTaskOutputWithRetry({
         taskId: task.id,
         userId: task.user_id,
-        url: urls[i],
+        url: outputUrls[i],
         index: i,
         outputType,
         prompt: task.prompt || '',
@@ -213,8 +270,14 @@ async function finalizeVideoSuccess(task: any, providerResult: any): Promise<voi
         sizePlan: params.sizePlan,
         metadata: providerResult.result?.metadata || {},
       });
+      savedOutputs.push(savedOutput);
     }
   } catch (err: any) {
+    if (savedOutputs.length > 0) {
+      await cleanupSavedTaskOutputs(task.id, savedOutputs).catch(cleanupErr =>
+        addTaskLog(task.id, 'output_cleanup_failed', `异步任务失败后清理部分输出失败：${(cleanupErr.message || cleanupErr).toString().substring(0, 400)}`).catch(() => undefined),
+      );
+    }
     await finalizeVideoFailure(task, err.message || 'Output transfer failed; points refunded.');
     return;
   }
@@ -226,6 +289,9 @@ async function finalizeVideoSuccess(task: any, providerResult: any): Promise<voi
     actualModelId: task.actual_model_id || task.model_id || 0,
     costSnapshot: providerResult.cost || {},
   });
+  const startedAt = new Date(task.provider_started_at || task.started_at || task.created_at).getTime();
+  const totalSeconds = Number.isFinite(startedAt) ? (Date.now() - startedAt) / 1000 : 0;
+  console.log(`[Task #${task.id}] completed, totalTime=${totalSeconds.toFixed(1)}s, cost=${task.points_cost || 0} points`);
 }
 
 async function finalizeVideoFailure(task: any, reason: string): Promise<void> {
@@ -242,7 +308,8 @@ async function finalizeVideoFailure(task: any, reason: string): Promise<void> {
 
 async function failStaleVideoTasks(): Promise<void> {
   const queuedMinutes = positiveInt(process.env.TASK_QUEUE_STALE_QUEUED_MINUTES, 30);
-  const processingMinutesNoProvider = positiveInt(process.env.VIDEO_TASK_STALE_PROCESSING_MINUTES, 45);
+  const processingMinutesNoProvider = positiveInt(process.env.TASK_STALE_PROCESSING_MINUTES, 30);
+  const providerMaxMinutes = Math.max(imageMaxPollingMinutes(), videoMaxPollingMinutes());
   const tasks = await query<any>(
     `SELECT t.id, t.task_type, t.points_cost, t.status, t.provider_task_id, t.provider_started_at, t.started_at, t.created_at,
             m.config AS model_config
@@ -257,16 +324,16 @@ async function failStaleVideoTasks(): Promise<void> {
         )
       ORDER BY t.created_at ASC
       LIMIT 50`,
-    [queuedMinutes, processingMinutesNoProvider, processingMinutesNoProvider],
+    [queuedMinutes, processingMinutesNoProvider, providerMaxMinutes],
   );
 
   for (const task of tasks) {
     const label = task.task_type === 'video' ? 'Video' : 'Image';
     const modelConfig = parseJson(task.model_config, {});
     // Check per-model max_polling_minutes override for stale detection
-    if (task.status === 'processing' && task.provider_task_id && modelConfig.max_polling_minutes) {
+    if (task.status === 'processing' && task.provider_task_id) {
       const startedAt = new Date(task.provider_started_at || task.started_at || task.created_at).getTime();
-      if (Number.isFinite(startedAt) && Date.now() - startedAt <= modelConfig.max_polling_minutes * 60 * 1000) {
+      if (Number.isFinite(startedAt) && Date.now() - startedAt <= maxPollingMinutes(task.task_type, modelConfig) * 60 * 1000) {
         continue; // Not yet stale — per-model limit not exceeded, skip this task
       }
     }
@@ -311,6 +378,39 @@ function estimateVideoProgress(pollCount: number, providerStatus: string, mapped
   if (['pending', 'queued'].includes(lower)) return Math.min(30 + pollCount, 45);
   if (['running', 'processing', 'generating'].includes(lower)) return Math.min(40 + pollCount * 3, 80);
   return Math.min(30 + pollCount * 2, 75);
+}
+
+function nextPollDelaySeconds(taskType: string, completedPollCount: number): number {
+  const nextAttempt = Math.max(1, completedPollCount + 1);
+  if (nextAttempt <= 3) return 3;
+  if (nextAttempt <= 10) return 5;
+  return 10;
+}
+
+function maxPollingMinutes(taskType: string, modelConfig: Record<string, any>): number {
+  const configured = Number(modelConfig.max_polling_minutes || 0);
+  const defaultMinutes = taskType === 'video' ? videoMaxPollingMinutes() : imageMaxPollingMinutes();
+  if (!Number.isFinite(configured) || configured <= 0) return defaultMinutes;
+  return Math.min(configured, defaultMinutes);
+}
+
+function maxPollingCount(taskType: string, modelConfig: Record<string, any>): number {
+  const configuredMinutes = Number(modelConfig.max_polling_minutes || 0);
+  if (Number.isFinite(configuredMinutes) && configuredMinutes > 0) {
+    const cappedMinutes = maxPollingMinutes(taskType, modelConfig);
+    return Math.ceil((cappedMinutes * 60) / 5);
+  }
+  return taskType === 'video'
+    ? positiveInt(process.env.VIDEO_TASK_MAX_POLL_COUNT, 240)
+    : positiveInt(process.env.IMAGE_TASK_MAX_POLL_COUNT, 60);
+}
+
+function imageMaxPollingMinutes(): number {
+  return positiveInt(process.env.IMAGE_TASK_MAX_RUNNING_MINUTES, 5);
+}
+
+function videoMaxPollingMinutes(): number {
+  return positiveInt(process.env.VIDEO_TASK_MAX_RUNNING_MINUTES, 20);
 }
 
 function safeProviderMessage(message: any): string {

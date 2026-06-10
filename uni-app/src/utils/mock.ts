@@ -13,6 +13,12 @@ export interface CreativeTemplate {
   mode: CreativeTemplateMode;
   category: string;
   duration?: string;
+  targetFeature?: string;
+  usageType?: string;
+  displayConfig?: Record<string, unknown> | null;
+  canUse?: boolean;
+  canSave?: boolean;
+  lockReason?: string;
 }
 
 export const mockTemplates = [

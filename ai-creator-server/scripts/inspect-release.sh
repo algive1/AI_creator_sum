@@ -121,6 +121,17 @@ check_sql_locations() {
   fi
 }
 
+check_dist_locations() {
+  local matches
+  matches="$(printf '%s\n' "$LISTING" | grep -E '(^|/)dist(/|$)' | grep -Ev '^admin-web/dist(/|$)' || true)"
+  if [[ -n "$matches" ]]; then
+    fail_check "only admin-web/dist is allowed in release package:"
+    printf '%s\n' "$matches" | sed 's/^/[FAIL] - /' >&2
+  else
+    ok "dist location check passed"
+  fi
+}
+
 printf '[inspect-release] checking package: %s\n' "$PACKAGE_PATH"
 
 check_archive_entries
@@ -147,10 +158,12 @@ require_entry "admin-web/eslint.config.js" '^admin-web/eslint\.config\.js$'
 require_entry "admin-web/vite.config.ts" '^admin-web/vite\.config\.ts$'
 require_entry "admin-web/index.html" '^admin-web/index\.html$'
 require_entry "admin-web/src" '^admin-web/src(/|$)'
+require_entry "admin-web/dist/index.html" '^admin-web/dist/index\.html$'
+require_entry "admin-web/dist/assets" '^admin-web/dist/assets(/|$)'
 
 check_release_json
 
-forbid "dist" '(^|/)dist(/|$)'
+check_dist_locations
 forbid "node_modules" '(^|/)node_modules(/|$)'
 forbid "real env files" '(^|/)\.env($|\.installed$|\.local$|\.production$|\.development$)'
 forbid "runtime data" '(^|/)(uploads|logs|backups|update-packages)(/|$)'

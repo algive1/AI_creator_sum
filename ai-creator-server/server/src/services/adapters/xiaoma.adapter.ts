@@ -10,23 +10,73 @@ import {
   ParsedResult, CostInfo,
   applyStatusMapping, extractParsedResult, summarizeProviderResponse,
 } from './adapter.interface';
+import {
+  applyGenericImageParams,
+  applyGptImage2Params,
+  applyNanoBananaParams,
+  isGptImage2Model,
+  isNanoBananaModel,
+  normalizeImageParams,
+} from './image-param-mapper';
+import { applyXiaomaVideoParams, isXiaomaVideoTaskType } from './xiaoma-video-param-mapper';
 
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 type JsonObject = Record<string, JsonValue>;
 
 const MEDIA_CREATE_PATH = '/v1/media/generate';
 const MEDIA_STATUS_PATH = '/v1/media/status';
+const CIRCUIT_FAILURE_THRESHOLD = 5;
+const CIRCUIT_COOLDOWN_MS = 30_000;
 
 const TEXT_TASK_TYPES = new Set(['text_generation', 'prompt_optimize', 'script_generation', 'text_chat', 'chat']);
+
+type CircuitState = 'closed' | 'open' | 'half_open';
+
+interface CircuitBreakerState {
+  state: CircuitState;
+  failures: number;
+  openedAt: number;
+  halfOpenInFlight: boolean;
+}
+
+const circuitByBaseUrl = new Map<string, CircuitBreakerState>();
 
 export class XiaomaAdapter implements IProviderAdapter {
   readonly providerType = 'xiaoma';
 
   async submitTask(params: SubmitTaskParams): Promise<SubmitTaskResult> {
-    if (TEXT_TASK_TYPES.has(String(params.taskType || '').toLowerCase())) {
-      return this.submitChatTask(params);
+    const circuitKey = circuitKeyFor(params.providerConfig.baseUrl);
+    const circuit = beforeCircuitRequest(circuitKey);
+    if (!circuit.allowed) {
+      return {
+        type: 'sync',
+        status: 'failed',
+        error: {
+          code: 'CIRCUIT_OPEN',
+          message: '小马AI接口暂时不可用，熔断器已打开，请稍后重试',
+        },
+      };
     }
-    return this.submitMediaTask(params);
+    if (TEXT_TASK_TYPES.has(String(params.taskType || '').toLowerCase())) {
+      return this.withCircuit(circuitKey, () => this.submitChatTask(params));
+    }
+    return this.withCircuit(circuitKey, () => this.submitMediaTask(params));
+  }
+
+  private async withCircuit<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    try {
+      const result = await fn();
+      const maybeError = (result as any)?.error;
+      if (maybeError) {
+        recordCircuitFailure(key);
+      } else {
+        recordCircuitSuccess(key);
+      }
+      return result;
+    } catch (err) {
+      recordCircuitFailure(key);
+      throw err;
+    }
   }
 
   private async submitMediaTask(params: SubmitTaskParams): Promise<SubmitTaskResult> {
@@ -207,55 +257,65 @@ export class XiaomaAdapter implements IProviderAdapter {
   }
 
   async queryTask(providerTaskId: string, config: QueryTaskConfig): Promise<QueryTaskResult> {
-    const base = config.queryTaskUrl || config.baseUrl;
-    const url = joinUrl(base, `${MEDIA_STATUS_PATH}?task_id=${encodeURIComponent(providerTaskId)}`);
-
-    const resp = await axios.get<JsonObject>(url, {
-      headers: { Authorization: 'Bearer ' + config.apiKey },
-      timeout: config.timeout || 30000,
-    });
-
-    const data = resp.data;
-    const providerError = extractProviderError(data);
-    if (providerError) {
+    const circuitKey = circuitKeyFor(config.baseUrl || config.queryTaskUrl || '');
+    const circuit = beforeCircuitRequest(circuitKey);
+    if (!circuit.allowed) {
       return {
         providerTaskId,
         status: 'failed',
-        error: providerError,
-        cost: this.parseCost(data),
+        error: {
+          code: 'CIRCUIT_OPEN',
+          message: '小马AI接口暂时不可用，熔断器已打开，请稍后重试',
+        },
       };
     }
-    const status = extractString(data, ['state', 'status', 'data.state', 'data.status', 'status_group']) || 'running';
-    const normalized = this.mapStatus(status, {});
-    const result = this.parseResult(data, '');
-    const errorMessage = extractString(data, ['error.message', 'error', 'data.error.message', 'data.error', 'message']);
-    const isFinal = extractBoolean(data, ['is_final', 'data.is_final']) || ['completed', 'failed', 'cancelled'].includes(normalized);
+    const base = config.queryTaskUrl || config.baseUrl;
+    const url = joinUrl(base, `${MEDIA_STATUS_PATH}?task_id=${encodeURIComponent(providerTaskId)}`);
 
-    if (!isFinal && !['failed', 'cancelled'].includes(normalized)) {
+    try {
+      const resp = await axios.get<JsonObject>(url, {
+        headers: { Authorization: 'Bearer ' + config.apiKey },
+        timeout: config.timeout || 30000,
+      });
+
+      const data = resp.data;
+      const providerError = extractProviderError(data);
+      if (providerError) {
+        recordCircuitFailure(circuitKey);
+        return {
+          providerTaskId,
+          status: 'failed',
+          error: providerError,
+          cost: this.parseCost(data),
+        };
+      }
+      recordCircuitSuccess(circuitKey);
+      const status = extractString(data, ['state', 'status', 'data.state', 'data.status', 'status_group']) || 'running';
+      const normalized = this.mapStatus(status, {});
+      const result = this.parseResult(data, '');
+      const errorMessage = extractString(data, ['error.message', 'error', 'data.error.message', 'data.error', 'message']);
+      const isFinal = extractBoolean(data, ['is_final', 'data.is_final']) || ['completed', 'failed', 'cancelled'].includes(normalized);
+
+      if (!isFinal && !['failed', 'cancelled'].includes(normalized)) {
+        return {
+          providerTaskId,
+          status,
+          result: result.urls.length ? result : undefined,
+          cost: this.parseCost(data),
+        };
+      }
+
       return {
         providerTaskId,
-        status,
+        status: normalized === 'completed' && result.urls.length > 0 ? 'completed' : normalized === 'failed' ? 'failed' : status,
         result: result.urls.length ? result : undefined,
+        error: normalized === 'completed' && result.urls.length > 0 ? undefined : errorMessage ? { code: 'XIAOMA_FAILED', message: errorMessage } : undefined,
         cost: this.parseCost(data),
       };
+    } catch (err) {
+      recordCircuitFailure(circuitKey);
+      throw err;
     }
-
-    if (normalized === 'completed' && result.urls.length > 0) {
-      return {
-        providerTaskId,
-        status: 'completed',
-        result,
-        cost: this.parseCost(data),
-      };
-    }
-
-    return {
-      providerTaskId,
-      status: normalized === 'failed' ? 'failed' : status,
-      result: result.urls.length ? result : undefined,
-      error: errorMessage ? { code: 'XIAOMA_FAILED', message: errorMessage } : undefined,
-      cost: this.parseCost(data),
-    };
   }
 
   async cancelTask(_providerTaskId: string, _config: CancelTaskConfig): Promise<boolean> {
@@ -284,29 +344,104 @@ export class XiaomaAdapter implements IProviderAdapter {
   }
 }
 
+function circuitKeyFor(baseUrl: string): string {
+  return String(baseUrl || 'xiaoma').replace(/\/+$/, '').toLowerCase() || 'xiaoma';
+}
+
+function getCircuit(key: string): CircuitBreakerState {
+  let circuit = circuitByBaseUrl.get(key);
+  if (!circuit) {
+    circuit = { state: 'closed', failures: 0, openedAt: 0, halfOpenInFlight: false };
+    circuitByBaseUrl.set(key, circuit);
+  }
+  return circuit;
+}
+
+function beforeCircuitRequest(key: string): { allowed: boolean } {
+  const circuit = getCircuit(key);
+  if (circuit.state === 'closed') return { allowed: true };
+  if (circuit.state === 'open') {
+    if (Date.now() - circuit.openedAt < CIRCUIT_COOLDOWN_MS) return { allowed: false };
+    circuit.state = 'half_open';
+    circuit.halfOpenInFlight = false;
+  }
+  if (circuit.halfOpenInFlight) return { allowed: false };
+  circuit.halfOpenInFlight = true;
+  return { allowed: true };
+}
+
+function recordCircuitSuccess(key: string): void {
+  const circuit = getCircuit(key);
+  circuit.state = 'closed';
+  circuit.failures = 0;
+  circuit.openedAt = 0;
+  circuit.halfOpenInFlight = false;
+}
+
+function recordCircuitFailure(key: string): void {
+  const circuit = getCircuit(key);
+  circuit.halfOpenInFlight = false;
+  circuit.failures += 1;
+  if (circuit.failures >= CIRCUIT_FAILURE_THRESHOLD || circuit.state === 'half_open') {
+    circuit.state = 'open';
+    circuit.openedAt = Date.now();
+    console.warn(`[XiaomaAdapter] circuit opened for ${key}, failures=${circuit.failures}`);
+  }
+}
+
 function normalizeMediaParams(params: SubmitTaskParams): JsonObject {
   const input = params.params || {};
   const out: JsonObject = {};
   for (const [key, value] of Object.entries(input)) {
-    if (value === undefined || value === null || key === 'apiFormat') continue;
+    if (value === undefined || value === null || isInternalParamKey(key)) continue;
     if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') out[key] = value;
     else if (Array.isArray(value)) out[key] = value.map((item) => String(item)) as JsonValue;
   }
   if (params.images?.length) out.images = params.images;
 
-  const quality = String(input.quality || '').trim().toLowerCase();
-  if (!out.resolution && ['1k', '2k', '4k'].includes(quality)) out.resolution = quality;
-  if (!out.resolution && quality === 'standard') out.resolution = '1k';
+  const model = String(params.upstreamCode || '').toLowerCase();
+  if (isXiaomaVideoTaskType(params.taskType)) {
+    applyXiaomaVideoParams(out, input, model);
+    return out;
+  }
 
-  const ratio = trimString(input.aspect_ratio || input.aspectRatio || input.ratio);
-  if (ratio && !out.aspect_ratio) out.aspect_ratio = ratio;
-  const nativeSize = trimString(input.nativeSize || input.size || input.resolution);
-  if (nativeSize && /^\d+x\d+$/i.test(nativeSize) && !out.size) out.size = nativeSize;
-  if (!out.aspect_ratio && nativeSize && /^\d+x\d+$/i.test(nativeSize)) out.aspect_ratio = sizeToRatio(nativeSize);
-  if (!out.aspect_ratio && !nativeSize) out.aspect_ratio = '1:1';
-  if (!out.resolution) out.resolution = '1k';
+  const normalized = normalizeImageParams(input);
+
+  if (isGptImage2Model(model)) {
+    applyGptImage2Params(out, normalized);
+    return out;
+  }
+
+  if (isNanoBananaModel(model)) {
+    applyNanoBananaParams(out, normalized, model);
+    return out;
+  }
+
+  applyGenericImageParams(out, normalized);
 
   return out;
+}
+
+function isInternalParamKey(key: string): boolean {
+  return [
+    'apiFormat',
+    'ratio',
+    'aspect_ratio',
+    'aspectRatio',
+    'resolution',
+    'nativeSize',
+    'size',
+    'quality',
+    'sizePlan',
+    'sizeWarnings',
+    'sizeOption',
+    'sizeKey',
+    'resolutionPreset',
+    'resolutionLabel',
+    'qualityPreset',
+    'qualityLabel',
+    'imageCount',
+  ].includes(key);
 }
 
 function joinUrl(baseUrl: string, path: string): string {
@@ -378,18 +513,4 @@ function extractProviderError(data: unknown): { code: string; message: string } 
     code: codeText || 'XIAOMA_ERROR',
     message: message || `小马AI返回业务错误：${summarizeProviderResponse(data, 600)}`,
   };
-}
-
-function sizeToRatio(size: string): string {
-  const match = size.toLowerCase().match(/^(\d+)x(\d+)$/);
-  if (!match) return '1:1';
-  const width = Number(match[1]);
-  const height = Number(match[2]);
-  if (!width || !height) return '1:1';
-  const divisor = gcd(width, height);
-  return `${width / divisor}:${height / divisor}`;
-}
-
-function gcd(a: number, b: number): number {
-  return b === 0 ? a : gcd(b, a % b);
 }

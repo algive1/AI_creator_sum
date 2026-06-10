@@ -16,7 +16,7 @@ const DEFAULT_VIDEO_MAX = 200 * 1024 * 1024;
 
 const DEFAULT_ALLOWED_MIME: Record<string, string[]> = {
   image: ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/svg+xml'],
-  video: ['video/mp4', 'video/quicktime', 'video/x-msvideo'],
+  video: ['video/mp4', 'video/quicktime', 'video/webm', 'video/x-msvideo'],
 };
 
 const MAGIC_BYTES: Record<string, number[]> = {
@@ -27,6 +27,7 @@ const MAGIC_BYTES: Record<string, number[]> = {
   'image/svg+xml':   [0x3C],
   'video/mp4':       [0x00, 0x00, 0x00],
   'video/quicktime': [0x00, 0x00, 0x00],
+  'video/webm':      [0x1A, 0x45, 0xDF, 0xA3],
   'video/x-msvideo': [0x52, 0x49, 0x46, 0x46],
 };
 
@@ -42,11 +43,11 @@ export function validateFileSize(fileSize: number, mimeType: string, limits?: Pa
   const maxVideo = (limits && limits.video) ? limits.video : DEFAULT_VIDEO_MAX;
   if (mimeType.startsWith('video/')) {
     if (fileSize > maxVideo) {
-      return { valid: false, reason: 'Video too large, max ' + Math.round(maxVideo / 1024 / 1024) + 'MB' };
+      return { valid: false, reason: '视频大小超过限制，最大 ' + Math.round(maxVideo / 1024 / 1024) + 'MB' };
     }
   } else {
     if (fileSize > maxImage) {
-      return { valid: false, reason: 'Image too large, max ' + Math.round(maxImage / 1024 / 1024) + 'MB' };
+      return { valid: false, reason: '图片大小超过限制，最大 ' + Math.round(maxImage / 1024 / 1024) + 'MB' };
     }
   }
   return { valid: true };

@@ -36,12 +36,13 @@ const GROUPS: { title: string; intro?: string; items: ApiItem[] }[] = [
       { method: 'GET', path: '/points/transactions', label: '积分流水记录（分页，支持 type=earn/spend 和 source 筛选）', auth: true },
       { method: 'GET', path: '/checkin/status', label: '今日签到状态（是否已签、连续天数、规则配置）', auth: true },
       { method: 'POST', path: '/checkin', label: '普通签到（连续签到奖励递增）', auth: true },
-      { method: 'POST', path: '/checkin/super', label: '超级签到（需传入看完广告的 sessionId，奖励更高）', auth: true },
+      { method: 'POST', path: '/checkin/super/session', label: '创建超级签到专用广告会话（不发放广告积分，不占用广告积分次数）', auth: true },
+      { method: 'POST', path: '/checkin/super', label: '超级签到（传入 /checkin/super/session 的 sessionId，奖励更高）', auth: true },
       { method: 'POST', path: '/checkin/makeup', label: '补签（消耗积分，默认补昨天，可传 targetDate 指定日期）', auth: true },
     ],
   },
   {
-    title: '激励广告', intro: '观看激励视频广告换取积分奖励。',
+    title: '激励广告', intro: '观看激励视频广告换取积分奖励。与超级签到广告会话独立统计。',
     items: [
       { method: 'GET', path: '/ads/status', label: '今日广告观看状态（已看次数/剩余次数/单次奖励积分）', auth: true },
       { method: 'POST', path: '/ads/session', label: '创建广告观看会话（获取 sessionId 用于前端拉起广告）', auth: true },
@@ -64,13 +65,14 @@ const GROUPS: { title: string; intro?: string; items: ApiItem[] }[] = [
       { method: 'GET', path: '/templates', label: '模板列表（分页，支持 templateType/categoryId/keyword 筛选，sortBy=recommended/hot/new。返回含 usageType）', auth: false },
       { method: 'GET', path: '/templates/recommended', label: '推荐模板（前 8 条，按推荐和热度排序。返回含 usageType）', auth: false },
       { method: 'GET', path: '/templates/search?keyword=xxx', label: '搜索模板（匹配标题/描述/提示词。返回含 usageType）', auth: false },
-      { method: 'GET', path: '/templates/inspirations', label: '灵感广场模板列表（template_type=inspiration 的官方内容）', auth: false },
+      { method: 'GET', path: '/templates/inspirations', label: '灵感广场模板列表（含后台分类 categoryName/categoryKey）', auth: false },
       { method: 'GET', path: '/templates/:id', label: '模板详情（含会员权限校验、使用次数、收藏数、usageType）', auth: false },
       { method: 'POST', path: '/templates/:id/use', label: '记录模板使用（使用次数+1，返回 prompt/参数供创作使用）', auth: true },
       { method: 'POST', path: '/templates/share', label: '分享作品为公开模板（传入 taskId/outputId，需先完成合规确认）', auth: true },
       { method: 'POST', path: '/templates/:id/cancel-public', label: '取消自己分享的公开模板（改为私密）', auth: true },
       { method: 'GET', path: '/templates/my-templates', label: '我分享的模板列表（含审核状态）', auth: true },
       { method: 'GET', path: '/public/templates?type=image&feature=text_to_image', label: '公开模板（按 templateType 和 display_config 的 feature 筛选，置顶优先。返回含 usageType）', auth: false },
+      { method: 'PUT', path: '/admin/templates/batch/display-config', label: '后台批量设置官方模板展示位置（覆盖 displayConfig）', auth: true },
     ],
   },
   {
@@ -100,7 +102,7 @@ const GROUPS: { title: string; intro?: string; items: ApiItem[] }[] = [
     items: [
       { method: 'GET', path: '/files/upload-config', label: '获取上传配置（存储平台/文件大小限制/支持格式/上传模式）', auth: true },
       { method: 'GET', path: '/files/credential', label: '获取客户端直传临时凭证（直传模式使用，传入 fileCategory/originalName/fileSize/contentType）', auth: true },
-      { method: 'POST', path: '/files/upload', label: '服务端中转上传文件（multipart/form-data，字段 file + fileCategory/visibility）', auth: true },
+      { method: 'POST', path: '/files/upload', label: '服务端中转上传文件（multipart/form-data，字段 file + fileCategory/visibility，支持图片/视频）', auth: true },
       { method: 'POST', path: '/files/notify', label: '客户端直传完成后通知后端（传入 storageKey/provider/etag/fileSize）', auth: true },
       { method: 'GET', path: '/files/:fileNo', label: '获取文件信息（URL/尺寸/类型/大小）', auth: true },
       { method: 'GET', path: '/files/:fileNo/url', label: '获取文件访问 URL（公开文件无需登录，私密文件需 Token）', auth: false },
@@ -113,7 +115,7 @@ const GROUPS: { title: string; intro?: string; items: ApiItem[] }[] = [
   {
     title: '公告', intro: '弹窗公告、公告列表、标记已读。',
     items: [
-      { method: 'GET', path: '/announcements/popup', label: '获取弹窗公告（按 show_frequency 频率规则控制，每天/每次/仅一次）', auth: false },
+      { method: 'GET', path: '/announcements/popup', label: '获取当前用户可弹出的公告（按 show_frequency 控制 once/once_per_day/every_open/list_only）', auth: false },
       { method: 'GET', path: '/announcements', label: '公告列表（分页，page/pageSize 参数）', auth: false },
       { method: 'GET', path: '/announcements/:id', label: '公告详情', auth: false },
       { method: 'POST', path: '/announcements/:id/read', label: '标记公告已读', auth: true },
@@ -134,7 +136,7 @@ const GROUPS: { title: string; intro?: string; items: ApiItem[] }[] = [
     title: '应用配置与首页', intro: '全局配置（含所有功能档位完整信息）、首页聚合数据。推荐小程序启动时调一次 /public/app 并缓存。',
     items: [
       { method: 'GET', path: '/public/app', label: '应用全局配置。含 featureKeys、modelTiers、功能开关、客服配置、使用帮助 help、运营素材 visualAssets、底部导航栏、会员入口。切换Tab无需额外请求档位', auth: false },
-      { method: 'GET', path: '/app/home', label: '首页聚合数据（弹窗公告/首页公告/功能入口/推荐模板/热门模板/灵感分类/用户摘要/最近作品/积分中心/会员入口）', auth: false },
+      { method: 'GET', path: '/app/home', label: '首页聚合数据（弹窗公告按后台频率控制；首页公告条不因已读/关闭隐藏；含功能入口/模板/灵感/积分/会员入口）', auth: false },
     ],
   },
 ];

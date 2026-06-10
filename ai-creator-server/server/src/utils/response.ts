@@ -19,15 +19,19 @@ export function paginated<T>(res: Response, list: T[], total: number, page: numb
   });
 }
 
-export function error(res: Response, code: number, message: string, httpStatus = 200): void {
-  res.status(httpStatus).json({ code, message, data: null, requestId: uuidv4() } as ApiResponse);
+function normalizeErrorCode(code: unknown): number {
+  return typeof code === 'number' && Number.isFinite(code) ? code : ErrorCodes.SERVER_ERROR;
+}
+
+export function error(res: Response, code: unknown, message: string, httpStatus = 200): void {
+  res.status(httpStatus).json({ code: normalizeErrorCode(code), message, data: null, requestId: uuidv4() } as ApiResponse);
 }
 
 export function deprecated(res: Response, message: string): void {
   res.status(410).json({
-    code: 'DEPRECATED_ENDPOINT',
+    code: 410,
     message,
     data: null,
     requestId: uuidv4(),
-  } as any);
+  } as ApiResponse);
 }

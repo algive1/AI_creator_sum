@@ -15,7 +15,6 @@ router.post('/confirm', authMiddleware, async (req: Request, res: Response) => {
       error(res, ErrorCodes.PARAM_ERROR, '确认场景无效');
       return;
     }
-
     const requiredText = ['public_template', 'platform_watermark_off'].includes(scene) ? 'checked' : REQUIRED_TEXT;
     const text = String(confirmationText || '').trim();
     if (['public_template', 'platform_watermark_off'].includes(scene)) {

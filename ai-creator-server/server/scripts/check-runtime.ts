@@ -100,8 +100,9 @@ const REQUIRED_COLUMNS: Record<string, string[]> = {
     'canceled_at',
   ],
   files: ['metadata_sanitized', 'ai_implicit_label_kept', 'platform_watermark_removed'],
+  point_accounts: ['total_refunded'],
   signin_records: ['normal_signed_at', 'super_signed_at', 'super_streak_day', 'super_reward_points', 'normal_is_makeup'],
-  ad_reward_logs: ['expires_at', 'claimed_at'],
+  ad_reward_logs: ['ad_scene', 'expires_at', 'claimed_at'],
   templates: [
     'title',
     'template_type',
@@ -137,11 +138,15 @@ const REQUIRED_COLUMNS: Record<string, string[]> = {
 };
 
 const REQUIRED_INDEXES: Record<string, string[]> = {
-  ai_tasks: ['idx_video_poll'],
+  ad_reward_logs: ['idx_ad_reward_scene_user_date'],
+  ai_tasks: ['idx_video_poll', 'idx_user_status_created'],
+  ai_task_outputs: ['uk_task_output_index'],
+  point_logs: ['idx_user_created'],
   member_plan_rights: ['uk_plan_right', 'idx_icon_file'],
   member_benefit_icons: ['uk_icon_key', 'idx_status_sort'],
   templates: ['idx_templates_public', 'idx_templates_feature'],
-  member_orders: ['idx_order_pay_status', 'idx_order_type_created'],
+  member_orders: ['idx_order_pay_status', 'idx_order_type_created', 'idx_user_status_created'],
+  user_memberships: ['idx_user_status_expire'],
 };
 
 const TEXT_FEATURES = [

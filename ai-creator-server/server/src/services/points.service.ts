@@ -34,66 +34,80 @@ export async function executePointsTransaction(
   userId: number,
   operation: (account: { balance: number; frozenBalance: number; version: number }) => PointsOperation
 ): Promise<void> {
-  const conn = await getConnection();
-  try {
-    await conn.beginTransaction();
+  return retryPointVersionConflict(async () => {
+    const conn = await getConnection();
+    try {
+      await conn.beginTransaction();
 
-    const [rows] = await conn.execute(
-      'SELECT balance, frozen_balance, version FROM point_accounts WHERE user_id = ? FOR UPDATE',
-      [userId]
-    ) as any;
+      const [rows] = await conn.execute(
+        'SELECT balance, frozen_balance, version FROM point_accounts WHERE user_id = ? FOR UPDATE',
+        [userId]
+      ) as any;
 
-    if (!rows || rows.length === 0) {
-      throw Object.assign(new Error('积分账户不存在'), { code: 1005 });
-    }
+      if (!rows || rows.length === 0) {
+        throw Object.assign(new Error('积分账户不存在'), { code: 1005 });
+      }
 
-    const account = rows[0];
-    const result = operation(account);
+      const account = rows[0];
+      const result = operation(account);
 
-    if (!result.allowed) {
+      if (!result.allowed) {
+        await conn.rollback();
+        throw Object.assign(new Error(result.errorMessage || '操作失败'), { code: result.errorCode || 1002 });
+      }
+
+      const [updateResult] = await conn.execute(
+        `UPDATE point_accounts
+         SET balance = ?, frozen_balance = ?, total_earned = total_earned + ?,
+             total_spent = total_spent + ?, total_refunded = total_refunded + ?,
+             version = version + 1, updated_at = NOW(3)
+         WHERE user_id = ? AND version = ?`,
+        [
+          result.newBalance ?? account.balance,
+          result.newFrozen ?? account.frozen_balance,
+          result.earnedDelta ?? 0,
+          result.spentDelta ?? 0,
+          result.refundedDelta ?? 0,
+          userId,
+          account.version,
+        ]
+      );
+
+      if ((updateResult as any).affectedRows === 0) {
+        throw Object.assign(new Error('积分账户版本冲突'), { code: 'POINT_VERSION_CONFLICT' });
+      }
+
+      await conn.commit();
+    } catch (error) {
       await conn.rollback();
-      throw Object.assign(new Error(result.errorMessage || '操作失败'), { code: result.errorCode || 1002 });
+      throw error;
+    } finally {
+      conn.release();
     }
-
-    const [updateResult] = await conn.execute(
-      `UPDATE point_accounts
-       SET balance = ?, frozen_balance = ?, total_earned = total_earned + ?,
-           total_spent = total_spent + ?, total_refunded = total_refunded + ?,
-           version = version + 1, updated_at = NOW(3)
-       WHERE user_id = ? AND version = ?`,
-      [
-        result.newBalance ?? account.balance,
-        result.newFrozen ?? account.frozen_balance,
-        result.earnedDelta ?? 0,
-        result.spentDelta ?? 0,
-        result.refundedDelta ?? 0,
-        userId,
-        account.version,
-      ]
-    );
-
-    if ((updateResult as any).affectedRows === 0) {
-      await conn.rollback();
-    throw Object.assign(new Error("操作繁忙，请重试"), { code: 429 });
-    }
-
-    await conn.commit();
-  } catch (error) {
-    await conn.rollback();
-    throw error;
-  } finally {
-    conn.release();
-  }
+  });
 }
 
 export async function lockPointAccountTx(conn: PoolConnection, userId: number): Promise<LockedPointAccount> {
-  const [rows] = await conn.execute(
+  let [rows] = await conn.execute(
     'SELECT balance, frozen_balance, version FROM point_accounts WHERE user_id = ? FOR UPDATE',
     [userId],
   ) as any;
 
   if (!rows || rows.length === 0) {
+    await conn.execute(
+      `INSERT INTO point_accounts
+       (user_id, balance, total_earned, total_spent, total_refunded, frozen_balance, version, created_at, updated_at)
+       VALUES (?, 0, 0, 0, 0, 0, 1, NOW(3), NOW(3))
+       ON DUPLICATE KEY UPDATE updated_at = updated_at`,
+      [userId],
+    );
+    [rows] = await conn.execute(
+      'SELECT balance, frozen_balance, version FROM point_accounts WHERE user_id = ? FOR UPDATE',
+      [userId],
+    ) as any;
+    if (!rows || rows.length === 0) {
       throw Object.assign(new Error('积分账户不存在'), { code: 1005 });
+    }
   }
 
   return rows[0];
@@ -128,7 +142,7 @@ export async function applyPointChangeTx(
   );
 
   if ((updateResult as any).affectedRows === 0) {
-    throw Object.assign(new Error("操作繁忙，请重试"), { code: 429 });
+    throw Object.assign(new Error('积分账户版本冲突'), { code: 'POINT_VERSION_CONFLICT' });
   }
 
   const [pointLogResult] = await conn.execute(
@@ -272,4 +286,22 @@ export async function getPointsTransactions(
     createdAt: row.created_at,
   }));
   return { list, pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } };
+}
+
+async function retryPointVersionConflict<T>(fn: () => Promise<T>): Promise<T> {
+  const maxAttempts = 3;
+  let lastError: any = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      lastError = err;
+      if (err?.code !== 'POINT_VERSION_CONFLICT' || attempt >= maxAttempts) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
+  if (lastError?.code === 'POINT_VERSION_CONFLICT') {
+    throw Object.assign(new Error('操作繁忙，请重试'), { code: 429 });
+  }
+  throw lastError;
 }

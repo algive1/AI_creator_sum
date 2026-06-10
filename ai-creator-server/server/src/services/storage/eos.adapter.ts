@@ -3,7 +3,6 @@
 
 import * as crypto from 'crypto';
 import { IStorageAdapter, UploadResult, CredentialOptions, CredentialResult } from './adapter.interface';
-import { streamToBuffer } from './stream-helpers';
 
 interface EosConfig {
   accessKey: string;
@@ -141,8 +140,38 @@ export class EosAdapter implements IStorageAdapter {
   }
 
   async uploadLarge(key: string, stream: NodeJS.ReadableStream, contentType: string, _size: number): Promise<UploadResult> {
-    const buffer = await streamToBuffer(stream, contentType);
-    return this.upload(key, buffer, contentType);
+    const cfg = this.cfg;
+    const host = new URL(cfg.endpoint).host;
+    const signResult = awsSignRequest(cfg, 'PUT', key, null, contentType);
+    const url = cfg.endpoint.replace(/\/$/, '') + '/' + key;
+
+    const resp = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': contentType,
+        'Host': host,
+        'x-amz-content-sha256': signResult.contentSha256,
+        'x-amz-date': signResult.date,
+        'Authorization': signResult.authorization,
+      },
+      body: stream as any,
+      duplex: 'half',
+    } as any);
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error('EOS putObject failed: ' + resp.status + ' ' + text);
+    }
+
+    const etag = resp.headers.get('etag') || '';
+    const cdn = cfg.cdnDomain || cfg.endpoint;
+    const baseAccess = cfg.endpoint.replace(/\/$/, '');
+    const baseCdn = cdn.replace(/\/$/, '');
+    return {
+      url: baseAccess + '/' + key,
+      cdnUrl: baseCdn + '/' + key,
+      etag,
+    };
   }
 
   async delete(key: string): Promise<void> {

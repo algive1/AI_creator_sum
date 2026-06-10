@@ -6,6 +6,7 @@ import { applyPointChangeTx, lockPointAccountTx } from './points.service';
 const AD_SESSION_EXPIRE_MINUTES = 30;
 const DEFAULT_POINTS_PER_WATCH = 10;
 const DEFAULT_MAX_DAILY_COUNT = 5;
+const AD_REWARD_SCENE = 'reward';
 
 export interface AdRewardConfig {
   enabled: boolean;
@@ -88,8 +89,8 @@ export async function getAdRewardConfig(): Promise<AdRewardConfig> {
 export async function getAdRewardStatus(userId: number): Promise<AdRewardStatus> {
   const config = await getAdRewardConfig();
   const watchedRow = await queryOne<any>(
-    "SELECT COUNT(*) AS cnt FROM ad_reward_logs WHERE user_id = ? AND ad_date = CURDATE() AND reward_status = 'claimed'",
-    [userId],
+    "SELECT COUNT(*) AS cnt FROM ad_reward_logs WHERE user_id = ? AND ad_date = CURDATE() AND ad_scene = ? AND reward_status = 'claimed'",
+    [userId, AD_REWARD_SCENE],
   );
   const watchedToday = Number(watchedRow?.cnt || 0);
   const historyRows = await query<any>(
@@ -103,10 +104,10 @@ export async function getAdRewardStatus(userId: number): Promise<AdRewardStatus>
   const sessions = await query<any>(
     `SELECT id, session_id, ad_date, watch_order, reward_status, reward_points, created_at, expires_at, claimed_at
        FROM ad_reward_logs
-      WHERE user_id = ?
+      WHERE user_id = ? AND ad_scene = ?
       ORDER BY created_at DESC
       LIMIT 10`,
-    [userId],
+    [userId, AD_REWARD_SCENE],
   );
 
   return {
@@ -135,39 +136,53 @@ export async function createAdRewardSession(userId: number): Promise<AdRewardSes
   if (!config.enabled || config.maxDailyCount <= 0) {
     throw Object.assign(new Error('广告积分功能未开启'), { code: 1001 });
   }
-
-  const watchedRow = await queryOne<any>(
-    "SELECT COUNT(*) AS cnt FROM ad_reward_logs WHERE user_id = ? AND ad_date = CURDATE() AND reward_status = 'claimed'",
-    [userId],
-  );
-  const watchedToday = Number(watchedRow?.cnt || 0);
-  if (config.maxDailyCount > 0 && watchedToday >= config.maxDailyCount) {
-    throw Object.assign(new Error('今日广告次数已用完'), { code: 1004 });
+  if (!config.adUnitId) {
+    throw Object.assign(new Error('请先在后台配置微信激励视频广告位'), { code: 1001 });
   }
 
-  const sessionId = `ad_${Date.now()}_${uuidv4().replace(/-/g, '').slice(0, 12)}`;
-  const watchOrder = watchedToday + 1;
+  const conn = await getConnection();
+  try {
+    await conn.beginTransaction();
+    const [watchedRows] = await conn.execute(
+      "SELECT COUNT(*) AS cnt FROM ad_reward_logs WHERE user_id = ? AND ad_date = CURDATE() AND ad_scene = ? AND reward_status = 'claimed' FOR UPDATE",
+      [userId, AD_REWARD_SCENE],
+    ) as any;
+    const watchedToday = Number(watchedRows?.[0]?.cnt || 0);
+    if (config.maxDailyCount > 0 && watchedToday >= config.maxDailyCount) {
+      await conn.rollback();
+      throw Object.assign(new Error('今日广告次数已用完'), { code: 1004 });
+    }
 
-  await query(
-    `INSERT INTO ad_reward_logs
-     (user_id, ad_date, session_id, watch_order, reward_status, expires_at, created_at)
-     VALUES (?, CURDATE(), ?, ?, 'pending', DATE_ADD(NOW(3), INTERVAL ${AD_SESSION_EXPIRE_MINUTES} MINUTE), NOW(3))`,
-    [userId, sessionId, watchOrder],
-  );
+    const sessionId = `ad_${Date.now()}_${uuidv4().replace(/-/g, '').slice(0, 12)}`;
+    const watchOrder = watchedToday + 1;
 
-  const expiresAtRow = await queryOne<any>(
-    'SELECT expires_at FROM ad_reward_logs WHERE session_id = ? AND user_id = ? LIMIT 1',
-    [sessionId, userId],
-  );
+    await conn.execute(
+      `INSERT INTO ad_reward_logs
+       (user_id, ad_date, session_id, ad_scene, watch_order, reward_status, expires_at, created_at)
+       VALUES (?, CURDATE(), ?, ?, ?, 'pending', DATE_ADD(NOW(3), INTERVAL ${AD_SESSION_EXPIRE_MINUTES} MINUTE), NOW(3))`,
+      [userId, sessionId, AD_REWARD_SCENE, watchOrder],
+    );
+    await conn.commit();
 
-  return {
-    sessionId,
-    expiresAt: expiresAtRow?.expires_at || null,
-    watchOrder,
-    maxDailyCount: config.maxDailyCount,
-    watchedToday,
-    remainingToday: Math.max(0, config.maxDailyCount - watchedToday),
-  };
+    const expiresAtRow = await queryOne<any>(
+      'SELECT expires_at FROM ad_reward_logs WHERE session_id = ? AND user_id = ? AND ad_scene = ? LIMIT 1',
+      [sessionId, userId, AD_REWARD_SCENE],
+    );
+
+    return {
+      sessionId,
+      expiresAt: expiresAtRow?.expires_at || null,
+      watchOrder,
+      maxDailyCount: config.maxDailyCount,
+      watchedToday,
+      remainingToday: Math.max(0, config.maxDailyCount - watchedToday),
+    };
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
+  }
 }
 
 export async function claimAdReward(
@@ -179,6 +194,9 @@ export async function claimAdReward(
   if (!config.enabled || config.maxDailyCount <= 0) {
     throw Object.assign(new Error('广告积分功能未开启'), { code: 1001 });
   }
+  if (!config.adUnitId) {
+    throw Object.assign(new Error('请先在后台配置微信激励视频广告位'), { code: 1001 });
+  }
   if (!sessionId || !sessionId.trim()) {
     throw Object.assign(new Error('缺少sessionId'), { code: 1001 });
   }
@@ -189,8 +207,8 @@ export async function claimAdReward(
 
     const account = await lockPointAccountTx(conn, userId);
     const [sessionRows] = await conn.execute(
-      'SELECT id, user_id, ad_date, session_id, watch_order, reward_status, reward_points, created_at, expires_at, claimed_at FROM ad_reward_logs WHERE session_id = ? AND user_id = ? FOR UPDATE',
-      [sessionId, userId],
+      'SELECT id, user_id, ad_date, session_id, watch_order, reward_status, reward_points, created_at, expires_at, claimed_at FROM ad_reward_logs WHERE session_id = ? AND user_id = ? AND ad_scene = ? FOR UPDATE',
+      [sessionId, userId, AD_REWARD_SCENE],
     ) as any;
 
     if (!sessionRows || sessionRows.length === 0) {
@@ -219,8 +237,8 @@ export async function claimAdReward(
     }
 
     const watchedRow = await conn.execute(
-      "SELECT COUNT(*) AS cnt FROM ad_reward_logs WHERE user_id = ? AND ad_date = ? AND reward_status = 'claimed' FOR UPDATE",
-      [userId, session.ad_date],
+      "SELECT COUNT(*) AS cnt FROM ad_reward_logs WHERE user_id = ? AND ad_date = ? AND ad_scene = ? AND reward_status = 'claimed' FOR UPDATE",
+      [userId, session.ad_date, AD_REWARD_SCENE],
     ) as any;
     const watchedToday = Number(watchedRow[0]?.[0]?.cnt || 0);
 
@@ -296,8 +314,8 @@ export async function claimAdReward(
     await conn.commit();
 
     const claimedRow = await queryOne<any>(
-      "SELECT COUNT(*) AS cnt FROM ad_reward_logs WHERE user_id = ? AND ad_date = ? AND reward_status = 'claimed'",
-      [userId, session.ad_date],
+      "SELECT COUNT(*) AS cnt FROM ad_reward_logs WHERE user_id = ? AND ad_date = ? AND ad_scene = ? AND reward_status = 'claimed'",
+      [userId, session.ad_date, AD_REWARD_SCENE],
     );
     const claimedToday = Number(claimedRow?.cnt || 0);
 
@@ -317,4 +335,14 @@ export async function claimAdReward(
   } finally {
     conn.release();
   }
+}
+
+/** 清理过期的 pending 广告会话（超过 24 小时的标记为 expired） */
+export async function cleanupExpiredAdSessions(): Promise<number> {
+  const [result] = await query<any>(
+    "UPDATE ad_reward_logs SET reward_status = 'expired', reward_points = 0 WHERE reward_status = 'pending' AND created_at < DATE_SUB(NOW(3), INTERVAL 24 HOUR)",
+  );
+  const cleaned = (result as any)?.affectedRows || 0;
+  if (cleaned > 0) console.log(`[Ads] Cleaned ${cleaned} expired ad sessions`);
+  return cleaned;
 }

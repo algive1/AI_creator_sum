@@ -30,6 +30,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     }
 
     req.user = payload;
+    res.setHeader('Cache-Control', 'private, no-store');
     next();
   } catch (err: any) {
     if (err.name === 'TokenExpiredError') {
@@ -76,6 +77,7 @@ export function adminAuthMiddleware(req: Request, res: Response, next: NextFunct
     }
 
     req.user = payload;
+    res.setHeader('Cache-Control', 'private, no-store');
     next();
   } catch {
     error(res, ErrorCodes.UNAUTHORIZED, '无效的令牌', 401);

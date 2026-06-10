@@ -2,7 +2,10 @@ import { queryOne, query } from '../utils/db';
 import { parseJson } from '../utils/content-helpers';
 import { decryptApiKey } from './openai-adapter.service';
 import { getModelCapabilitySet, hasAnyCapability } from './model-capability.service';
-import { applyFeatureDiscount, resolveMemberFeatureDiscount } from './membership.service';
+import { resolveMemberFeatureDiscount } from './membership.service';
+import { ImageSizeOption, buildImageSizeCapabilities, findImageSizeOption, isResolutionPreset } from './image-size-options.service';
+import { buildVideoCapabilities } from './video-capabilities.service';
+import { PublicTierPricing, resolveTierPricing } from './tier-pricing.service';
 
 export interface TierCapabilities {
   ratios: string[];
@@ -28,6 +31,13 @@ export interface TierCapabilities {
   maxImages: number;
   maxReferenceImages: number;
   maxDurationSeconds: number;
+  resolutionPresets: string[];
+  sizeOptions: ImageSizeOption[];
+  defaultSizeKey: string;
+  inputMode?: string;
+  minReferenceImages?: number;
+  referenceUploadMode?: 'none' | 'first_frame' | 'first_last' | 'reference_images' | 'source_video';
+  requiredReference?: boolean;
 }
 
 export interface TierModelResult {
@@ -39,6 +49,12 @@ export interface TierModelResult {
   pointsCost: number;
   memberDiscountPercent: number;
   memberDiscountApplied: boolean;
+  unitBasePointsCost?: number;
+  unitPointsCost?: number;
+  imageCount?: number;
+  pricingMode?: string;
+  pricing?: PublicTierPricing;
+  pricingSnapshot?: any;
   capabilities: TierCapabilities;
   primaryModel: RealModelInfo;
   fallbackModels: RealModelInfo[];
@@ -66,6 +82,7 @@ export interface RealModelInfo {
   providerType: string;
   providerApiBaseUrl: string;
   providerApiKey: string;
+  config: any;
 }
 
 type CandidateModel = RealModelInfo & {
@@ -80,6 +97,8 @@ export async function selectTierModel(
   params: {
     ratio?: string;
     quality?: string;
+    resolutionPreset?: string;
+    sizeKey?: string;
     style?: string;
     duration?: string;
     cameraMove?: string;
@@ -106,14 +125,13 @@ export async function selectTierModel(
 
   const capsRow = await queryOne<any>('SELECT * FROM tier_capabilities WHERE tier_id = ?', [tier.id]);
   if (!capsRow) throw paramError('档位能力未配置：' + tier.tier_name);
-  const capabilities = mapCapabilities(capsRow);
-  validateCapabilities(tier.tier_name, capabilities, params);
+  const baseCapabilities = mapCapabilities(capsRow);
 
   const bindings = await query<any>(
     `SELECT tb.binding_type, tb.fallback_order,
             m.id as model_id, m.provider_id, m.name, m.model_type, m.sub_type, m.api_model_name,
             m.upstream_model_code, m.is_async, m.query_task_url, m.request_template, m.result_path,
-            m.status_mapping, m.error_mapping, m.priority, m.max_concurrency, m.retry_times,
+            m.status_mapping, m.error_mapping, m.priority, m.max_concurrency, m.retry_times, m.config,
             m.retry_delay_ms, m.timeout_seconds,
             p.provider_type, p.api_base_url as provider_api_base_url, p.api_key as provider_api_key
        FROM tier_model_bindings tb
@@ -132,23 +150,34 @@ export async function selectTierModel(
   const primaryModel = usableModels.find(model => model.bindingType === 'primary') || usableModels[0];
   if (!primaryModel) throw paramError('No usable model is configured for tier: ' + tier.tier_name);
 
-  for (const model of usableModels) {
-    await validateModelForFeature(feature.feature_key, model);
-  }
+  await Promise.all(usableModels.map(model => validateModelForFeature(feature.feature_key, model)));
 
-  const basePointsCost = Math.max(0, Number(tier.points_cost || 0));
+  const capabilities = enrichModelCapabilities(feature.feature_key, tier.tier_key, baseCapabilities, primaryModel);
+  validateCapabilities(tier.tier_name, capabilities, params);
+
   const discount = await resolveMemberFeatureDiscount(userId, feature.feature_key);
-  const pointsCost = applyFeatureDiscount(basePointsCost, discount.discountPercent);
+  const pricingResult = resolveTierPricing({
+    basePointsCost: Math.max(0, Number(tier.points_cost || 0)),
+    pricingMode: tier.pricing_mode,
+    pricingRules: tier.pricing_rules,
+    params,
+    discountPercent: discount.discountPercent,
+  });
 
   return {
     tierId: tier.id,
     tierName: tier.tier_name,
     tierKey: tier.tier_key,
     featureKey: feature.feature_key,
-    basePointsCost,
-    pointsCost,
-    memberDiscountPercent: discount.discountPercent,
-    memberDiscountApplied: discount.memberDiscountApplied,
+    basePointsCost: pricingResult.basePointsCost,
+    pointsCost: pricingResult.pointsCost,
+    memberDiscountPercent: pricingResult.memberDiscountPercent,
+    memberDiscountApplied: pricingResult.memberDiscountApplied,
+    unitBasePointsCost: pricingResult.unitBasePointsCost,
+    unitPointsCost: pricingResult.unitPointsCost,
+    pricingMode: pricingResult.pricingMode,
+    pricing: pricingResult.pricing,
+    pricingSnapshot: pricingResult.pricingSnapshot,
     capabilities,
     primaryModel,
     fallbackModels: usableModels.filter(model => model.id !== primaryModel.id),
@@ -180,6 +209,13 @@ export function mapCapabilities(row: any): TierCapabilities {
     maxImages: row.max_images || 1,
     maxReferenceImages: row.max_reference_images || 4,
     maxDurationSeconds: row.max_duration_seconds || 30,
+    resolutionPresets: [],
+    sizeOptions: [],
+    defaultSizeKey: '',
+    inputMode: row.input_mode || undefined,
+    minReferenceImages: row.min_reference_images ?? undefined,
+    referenceUploadMode: (row.reference_upload_mode || undefined) as TierCapabilities['referenceUploadMode'],
+    requiredReference: row.required_reference === null || row.required_reference === undefined ? undefined : !!row.required_reference,
   };
 }
 
@@ -206,8 +242,16 @@ function validateCapabilities(tierName: string, caps: TierCapabilities, params: 
   if (params.ratio && !params.fromCustomPixels && caps.ratios.length > 0 && !caps.ratios.includes(params.ratio)) {
     throw paramError(`当前档位不支持 ${params.ratio} 比例`);
   }
-  if (params.quality && caps.qualities.length > 0 && !caps.qualities.includes(params.quality)) {
+  const imageResolutionCapability = caps.sizeOptions.length > 0;
+  if (params.quality && caps.qualities.length > 0 && (!imageResolutionCapability || isResolutionPreset(params.quality)) && !qualityAllowed(params.quality, caps.qualities)) {
     throw paramError(`当前档位不支持 ${params.quality} 画质`);
+  }
+  if (params.resolutionPreset || params.sizeKey) {
+    const option = findImageSizeOption(caps.sizeOptions, params.sizeKey, params.ratio || (params.sizeMode === 'auto' ? 'auto' : ''), params.resolutionPreset);
+    if (!option) throw paramError('当前档位不支持所选比例和清晰度组合');
+  }
+  if (params.imageCount && Number(params.imageCount) > caps.maxImages) {
+    throw paramError(`当前档位一次最多生成 ${caps.maxImages} 张图片`);
   }
   if (params.style && caps.styles.length > 0 && !caps.styles.includes(params.style)) {
     throw paramError(`当前档位不支持 ${params.style} 风格`);
@@ -224,10 +268,31 @@ function validateCapabilities(tierName: string, caps: TierCapabilities, params: 
   if (params.postprocessMode && !caps.postprocessModes.includes(params.postprocessMode)) {
     throw paramError(`当前档位不支持 ${params.postprocessMode} 后处理方式`);
   }
-  if (params.referenceImageCount && params.referenceImageCount > caps.maxReferenceImages) {
+  const hasReferenceImageCount = params.referenceImageCount !== undefined && params.referenceImageCount !== null;
+  const referenceImageCount = hasReferenceImageCount ? Math.max(0, Number(params.referenceImageCount) || 0) : 0;
+  if (hasReferenceImageCount && referenceImageCount > caps.maxReferenceImages) {
     throw paramError(`当前档位最多支持 ${caps.maxReferenceImages} 张参考图`);
   }
+  const minReferenceImages = Math.max(0, Number(caps.minReferenceImages || 0));
+  const requiredReferenceCount = Math.max(minReferenceImages, caps.requiredReference ? 1 : 0);
+  if (hasReferenceImageCount && requiredReferenceCount > 0 && referenceImageCount < requiredReferenceCount) {
+    throw paramError(`当前档位至少需要 ${requiredReferenceCount} 张参考图`);
+  }
   if (!tierName) throw paramError('档位配置异常');
+}
+
+function qualityAllowed(inputQuality: string, supportedQualities: string[]): boolean {
+  const normalizedInput = normalizeQualityAlias(inputQuality);
+  return supportedQualities.some((item) => normalizeQualityAlias(item) === normalizedInput);
+}
+
+function normalizeQualityAlias(value: string): string {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return '';
+  if (['standard', 'normal', 'default', '1k'].includes(text)) return '1k';
+  if (['hd', '2k'].includes(text)) return '2k';
+  if (['4k'].includes(text)) return '4k';
+  return text;
 }
 
 function mapModel(b: any): RealModelInfo {
@@ -253,6 +318,68 @@ function mapModel(b: any): RealModelInfo {
     providerType: b.provider_type,
     providerApiBaseUrl: b.provider_api_base_url,
     providerApiKey: decryptApiKey(b.provider_api_key),
+    config: parseJson(b.config, {}),
+  };
+}
+
+function enrichModelCapabilities(featureKey: string, tierKey: string, caps: TierCapabilities, model: RealModelInfo): TierCapabilities {
+  if (['video_create', 'image_to_video', 'first_last_frame_video', 'video_edit'].includes(featureKey)) {
+    const videoCaps = buildVideoCapabilities({
+      featureKey,
+      modelName: model.name,
+      apiModelName: model.apiModelName,
+      upstreamModelCode: model.upstreamModelCode,
+      providerType: model.providerType,
+      modelConfig: model.config,
+      ratios: caps.ratios,
+      qualities: caps.qualities,
+      durations: caps.durations,
+      audioModes: caps.audioModes,
+      defaultAudioMode: caps.defaultAudioMode,
+      supportedSizeModes: caps.supportedSizeModes,
+      nativeSizes: caps.nativeSizes,
+      maxReferenceImages: caps.maxReferenceImages,
+      inputMode: caps.inputMode,
+      minReferenceImages: caps.minReferenceImages,
+      referenceUploadMode: caps.referenceUploadMode,
+      requiredReference: caps.requiredReference,
+    });
+    return {
+      ...caps,
+      ratios: videoCaps.ratios,
+      qualities: videoCaps.qualities,
+      durations: videoCaps.durations,
+      audioModes: videoCaps.audioModes,
+      defaultAudioMode: videoCaps.defaultAudioMode,
+      supportedSizeModes: videoCaps.supportedSizeModes,
+      nativeSizes: videoCaps.nativeSizes,
+      maxReferenceImages: videoCaps.maxReferenceImages,
+      inputMode: videoCaps.inputMode,
+      minReferenceImages: videoCaps.minReferenceImages,
+      referenceUploadMode: videoCaps.referenceUploadMode,
+      requiredReference: videoCaps.requiredReference,
+    };
+  }
+  if (!['image_create', 'image_to_image', 'image_edit'].includes(featureKey)) return caps;
+  const sizeCaps = buildImageSizeCapabilities({
+    tierKey,
+    modelName: model.name,
+    apiModelName: model.apiModelName,
+    upstreamModelCode: model.upstreamModelCode,
+    providerType: model.providerType,
+    modelConfig: model.config,
+    ratios: caps.ratios,
+    qualities: caps.qualities,
+    maxImages: caps.maxImages,
+  });
+  return {
+    ...caps,
+    ratios: sizeCaps.ratios,
+    qualities: sizeCaps.resolutionPresets,
+    resolutionPresets: sizeCaps.resolutionPresets,
+    sizeOptions: sizeCaps.sizeOptions,
+    defaultSizeKey: sizeCaps.defaultSizeKey,
+    maxImages: sizeCaps.maxImages,
   };
 }
 

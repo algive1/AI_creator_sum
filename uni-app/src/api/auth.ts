@@ -12,7 +12,7 @@ export interface LoginResponse {
 }
 
 export function wechatLogin(code: string, inviteCode?: string) {
-  return post<LoginResponse>('/auth/wechat-login', { code, inviteCode }, { loading: '登录中', dedupe: false });
+  return post<LoginResponse>('/auth/wechat-login', { code, inviteCode }, { loading: '登录中', dedupe: false, silent: true });
 }
 
 export function refreshToken(value: string) {

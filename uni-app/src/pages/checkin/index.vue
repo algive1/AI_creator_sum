@@ -25,7 +25,7 @@
 
     <view class="primary-action" :class="{ disabled: signedToday }" @tap="checkIn">{{ buttonText }}</view>
     <view v-if="showExtraActions" class="extra-actions">
-      <view v-if="showSuperAction" class="secondary-action" :class="{ disabled: superSignedToday }" @tap="checkInSuper">
+      <view v-if="showSuperAction" class="secondary-action" :class="{ disabled: superSignedToday || isLoadingSuperAd }" @tap="checkInSuper">
         {{ superButtonText }}
       </view>
       <view v-if="showMakeupAction" class="secondary-action" :class="{ disabled: !makeupAvailable }" @tap="makeupCheckIn">
@@ -54,8 +54,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { onShow } from '@dcloudio/uni-app';
-import { getSignInStatus, makeupSignIn, normalSignIn, superSignIn } from '@/api/sign-in';
-import { PAGE_ROUTES } from '@/utils/constants';
+import { createSuperSignInAdSession, getSignInStatus, makeupSignIn, normalSignIn, superSignIn } from '@/api/sign-in';
 interface RewardDay {
   day: number;
   reward: number;
@@ -70,6 +69,7 @@ const dayItems = ref<RewardDay[]>([]);
 const config = ref<Record<string, unknown>>({});
 const superInfo = ref<Record<string, unknown>>({});
 const makeupInfo = ref<Record<string, unknown>>({});
+const isLoadingSuperAd = ref(false);
 const buttonText = computed(() => signedToday.value ? '今日已签到' : `今日签到，领取 +${todayReward.value} 积分`);
 const days = computed<RewardDay[]>(() => dayItems.value);
 const showSuperAction = computed(() => Boolean(config.value.superEnabled || superInfo.value.enabled || superInfo.value.adRequired));
@@ -77,8 +77,9 @@ const superSignedToday = computed(() => Boolean(superInfo.value.signedToday));
 const superNeedsAd = computed(() => Boolean(superInfo.value.adRequired) && !Boolean(superInfo.value.adCompletedToday));
 const superReward = computed(() => Number(superInfo.value.todayReward || 0));
 const superButtonText = computed(() => {
+  if (isLoadingSuperAd.value) return '广告加载中...';
   if (superSignedToday.value) return '超级签到已完成';
-  if (superNeedsAd.value) return '看广告后可超级签到';
+  if (superNeedsAd.value) return '看广告并领取超级签到';
   return `超级签到，领取 +${superReward.value} 积分`;
 });
 const showMakeupAction = computed(() => Boolean(makeupInfo.value.enabled));
@@ -135,15 +136,72 @@ async function checkIn() {
 }
 
 async function checkInSuper() {
-  if (!showSuperAction.value || superSignedToday.value) return;
+  if (!showSuperAction.value || superSignedToday.value || isLoadingSuperAd.value) return;
+  let res: Record<string, unknown>;
   if (superNeedsAd.value) {
-    uni.navigateTo({ url: PAGE_ROUTES.pointsAd });
-    return;
+    isLoadingSuperAd.value = true;
+    try {
+      const session = await createSuperSignInAdSession<Record<string, unknown>>();
+      const sessionId = String(session.sessionId || '');
+      const adUnitId = String(session.adUnitId || superInfo.value.adUnitId || '');
+      if (!sessionId) throw new Error('广告会话创建失败');
+      if (!adUnitId) throw new Error('后台未配置微信激励视频广告位');
+
+      const completed = await playRewardedVideo(adUnitId);
+      if (!completed) {
+        uni.showToast({ title: '完整观看后才能领取超级签到奖励', icon: 'none' });
+        return;
+      }
+      res = await superSignIn<Record<string, unknown>>(sessionId);
+    } catch (error) {
+      const err = error as { name?: string; message?: string };
+      if (err?.name !== 'RequestError') {
+        uni.showToast({ title: err?.message || '广告暂不可用，请稍后再试', icon: 'none' });
+      }
+      return;
+    } finally {
+      isLoadingSuperAd.value = false;
+    }
+  } else {
+    res = await superSignIn<Record<string, unknown>>();
   }
-  const res = await superSignIn<Record<string, unknown>>();
   const reward = Number(res.rewardPoints || res.reward || superReward.value || 0);
   uni.showToast({ title: reward ? `+${reward} 积分` : '超级签到成功', icon: 'none' });
   loadStatus();
+}
+
+function playRewardedVideo(unitId: string): Promise<boolean> {
+  const wxApi = (globalThis as unknown as { wx?: any }).wx;
+  if (typeof wxApi?.createRewardedVideoAd !== 'function') {
+    return Promise.reject(new Error('当前平台不支持激励视频广告'));
+  }
+
+  const videoAd = wxApi.createRewardedVideoAd({ adUnitId: unitId });
+  return new Promise<boolean>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      if (typeof videoAd.offClose === 'function') videoAd.offClose(onClose);
+      if (typeof videoAd.offError === 'function') videoAd.offError(onError);
+    };
+    const finish = (handler: (value: any) => void, value: any) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      handler(value);
+    };
+    const onClose = (res: { isEnded?: boolean }) => {
+      finish(resolve, res?.isEnded !== false);
+    };
+    const onError = (err: { errMsg?: string }) => {
+      finish(reject, new Error(err?.errMsg || '激励视频广告加载失败'));
+    };
+
+    videoAd.onClose(onClose);
+    videoAd.onError(onError);
+    Promise.resolve(videoAd.load())
+      .then(() => Promise.resolve(videoAd.show()))
+      .catch((error) => finish(reject, error));
+  });
 }
 
 async function makeupCheckIn() {

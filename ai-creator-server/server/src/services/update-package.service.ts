@@ -147,7 +147,13 @@ const RELEASE_FILENAME = new RegExp(`^ai-creator-release-${SEMVER_PATTERN_TEXT}\
 const ZIP_PACKAGE_HINT = '检测到 zip 更新包，但当前仅支持 .tar.gz，请在 WSL 中重新运行 scripts/build-release.sh 生成 tar.gz。';
 const SENSITIVE_KEYS = /(password|secret|token|privatekey|api[-_]?key|apikey)/i;
 const ALLOWED_ENV_FILES = new Set(['server/.env.example', 'server/.env.production.example']);
-const DANGEROUS_DIR = /(^|\/)(node_modules|uploads|logs|backups|dist|\.git|\.release-staging|\.codex-qa|update-packages|codex[^/]*)(\/|$)/;
+const DANGEROUS_DIR = /(^|\/)(node_modules|uploads|logs|backups|\.git|\.release-staging|\.codex-qa|update-packages|codex[^/]*)(\/|$)/;
+const ALLOWED_ADMIN_DIST = 'admin-web/dist';
+const ASSET_REFERENCE_PATTERN = /(?:^|["'(\s])\/?assets\/([^"'()<>\s]+?\.(?:js|css|mjs))(?:\?[^"'()<>\s]*)?/gi;
+const JS_IMPORT_REFERENCE_PATTERN = /(?:from|import)\s*\(?\s*["']\.\/([^"']+?\.(?:js|css|mjs))(?:\?[^"']*)?["']/g;
+const HASHED_BUILD_ASSET = /-[A-Za-z0-9_-]{8,}\.(?:js|css|mjs)(?:\.gz)?$/i;
+const UNSUPPORTED_SQL_ROUTINE_PATTERN = /\bDELIMITER\b|\bCREATE\s+(PROCEDURE|FUNCTION|TRIGGER|EVENT)\b/i;
+const FORBIDDEN_SQL_PATTERN = /\b(DROP\s+DATABASE|TRUNCATE)\b|\bDROP\s+(?!TEMPORARY\s+TABLE\b)/i;
 const COMMAND_TIMEOUT_MS = {
   default: 5 * 60 * 1000,
   npmInstall: 10 * 60 * 1000,
@@ -175,7 +181,13 @@ function emptyReleaseInfo(): ReleaseInfo {
 }
 
 function safeError(err: any): string {
-  return err?.message ? String(err.message).slice(0, 4000) : 'unknown error';
+  const message = err?.message ? String(err.message) : 'unknown error';
+  if (!/Unreachable code/i.test(message)) return message.slice(0, 4000);
+  return [
+    'Node.js/PM2 运行环境异常：检测到 Node 内部错误 "Unreachable code"。',
+    '请切换到 Node.js 20 LTS 或稳定的 Node.js 22 LTS，重新执行 npm ci --include=dev && npm run build 后再重试。',
+    `原始错误：${message}`,
+  ].join(' ').slice(0, 4000);
 }
 
 function normalizeEntryPath(input: string): string {
@@ -210,6 +222,23 @@ function isDangerousFile(entryPath: string): boolean {
   if (['npm-debug.log', 'yarn-error.log', 'pnpm-debug.log', '.DS_Store'].includes(basename)) return true;
   if (/\.(log|tmp|temp|cache|bak|swp|zip|tar\.gz|pem|key|crt|cert|dump|sqlite|sqlite3|db|p12|pfx|jks|keystore|sql\.gz)$/i.test(basename)) return true;
   return basename.endsWith('~');
+}
+
+function isAllowedAdminDistPath(entryPath: string): boolean {
+  const normalized = normalizeEntryPath(entryPath).replace(/\/$/, '');
+  return normalized === ALLOWED_ADMIN_DIST || normalized.startsWith(`${ALLOWED_ADMIN_DIST}/`);
+}
+
+function isForbiddenDistPath(entryPath: string): boolean {
+  const normalized = normalizeEntryPath(entryPath);
+  return /(^|\/)dist(\/|$)/.test(normalized) && !isAllowedAdminDistPath(normalized);
+}
+
+function normalizeAssetRelativePath(value: string): string {
+  const raw = normalizeEntryPath(value).replace(/^\/+/, '').split('?')[0];
+  if (!raw.startsWith('assets/')) return '';
+  if (raw.split('/').includes('..')) return '';
+  return raw;
 }
 
 function collectReleaseInfo(raw: any): ReleaseInfo {
@@ -410,7 +439,7 @@ function checkArchiveSafety(result: PrecheckResult, entries: ArchiveEntryInfo[])
   const badType = entries.find(entry => !isAllowedEntryType(entry.type));
   addCheck(result, '压缩包条目类型', badType ? 'fail' : 'ok', badType ? `${badType.path}: unsupported type ${badType.type}` : '未发现软链、硬链或特殊文件');
 
-  const dangerous = entries.find(entry => isDangerousFile(entry.path) || DANGEROUS_DIR.test(entry.path));
+  const dangerous = entries.find(entry => isDangerousFile(entry.path) || isForbiddenDistPath(entry.path) || DANGEROUS_DIR.test(entry.path));
   addCheck(result, '危险运行时文件', dangerous ? 'fail' : 'ok', dangerous ? `发现禁止文件或目录: ${dangerous.path}` : '未发现 .env、node_modules、uploads、logs、backups、dist、.git、临时目录或本地压缩包');
 
   const dbBackup = entries.find(entry => {
@@ -449,6 +478,8 @@ function checkArchiveShape(result: PrecheckResult, entries: ArchiveEntryInfo[]) 
   addCheck(result, 'admin-web/vite.config.ts', hasFile(entries, 'admin-web/vite.config.ts') ? 'ok' : 'fail', hasFile(entries, 'admin-web/vite.config.ts') ? '存在' : '缺少 admin-web/vite.config.ts');
   addCheck(result, 'admin-web/index.html', hasFile(entries, 'admin-web/index.html') ? 'ok' : 'fail', hasFile(entries, 'admin-web/index.html') ? '存在' : '缺少 admin-web/index.html');
   addCheck(result, 'admin-web/src', hasPath(entries, 'admin-web/src') ? 'ok' : 'fail', hasPath(entries, 'admin-web/src') ? '存在' : '缺少 admin-web/src');
+  addCheck(result, 'admin-web/dist/index.html', hasFile(entries, 'admin-web/dist/index.html') ? 'ok' : 'fail', hasFile(entries, 'admin-web/dist/index.html') ? 'exists' : 'missing admin-web/dist/index.html');
+  addCheck(result, 'admin-web/dist/assets', hasPath(entries, 'admin-web/dist/assets') ? 'ok' : 'fail', hasPath(entries, 'admin-web/dist/assets') ? 'exists' : 'missing admin-web/dist/assets');
 }
 
 function checkReleaseJson(result: PrecheckResult, releaseJsonText: string): ReleaseInfo | null {
@@ -560,6 +591,23 @@ async function addEnvironmentChecks(result: PrecheckResult) {
   } catch (err: any) {
     addCheck(result, 'schema_migrations 表', 'warning', `schema_migrations 读取失败: ${safeError(err)}`);
   }
+
+  const mysqldumpOk = commandAvailable('mysqldump');
+  addCheck(result, 'mysqldump 依赖', mysqldumpOk ? 'ok' : 'fail', mysqldumpOk
+    ? 'mysqldump 可执行，更新前数据库备份可运行'
+    : '未找到 mysqldump，系统更新无法安全备份数据库；请安装 mysql-client 或 MariaDB client 后再更新');
+  const mysqlOk = commandAvailable('mysql');
+  addCheck(result, 'mysql 客户端', mysqlOk ? 'ok' : 'warning', mysqlOk
+    ? 'mysql 客户端可执行，数据库备份恢复功能可用'
+    : '未找到 mysql 客户端，更新失败后的数据库备份导入需要人工安装客户端后执行');
+  const curlOk = commandAvailable('curl');
+  addCheck(result, 'curl 依赖', curlOk ? 'ok' : 'fail', curlOk
+    ? 'curl 可执行，更新后的健康检查可运行'
+    : '未找到 curl，无法执行更新后的健康检查');
+  const pm2Ok = commandAvailable('pm2');
+  addCheck(result, 'pm2 依赖', pm2Ok ? 'ok' : 'fail', pm2Ok
+    ? 'pm2 可执行，更新后可重启 ai-creator'
+    : '未找到 pm2，无法在更新后重启服务');
 }
 
 function sortPackages(items: UpdatePackageSummary[]) {
@@ -780,7 +828,8 @@ function databaseRuntimeConfig() {
 
 function execCommand(command: string, args: string[], cwd: string, env?: NodeJS.ProcessEnv, timeoutMs = COMMAND_TIMEOUT_MS.default): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(command, args, { cwd, env: commandEnvironment(env), timeout: timeoutMs, killSignal: 'SIGTERM', maxBuffer: 1024 * 1024 * 10 }, (err, stdout, stderr) => {
+    const invocation = commandInvocation(command, args);
+    execFile(invocation.command, invocation.args, { cwd, env: commandEnvironment(env), timeout: timeoutMs, killSignal: 'SIGTERM', windowsHide: true, maxBuffer: 1024 * 1024 * 10 }, (err, stdout, stderr) => {
       const output = sanitizeLog(`${stdout || ''}${stderr || ''}`.trim());
       if (err) {
         const timedOut = (err as any).killed && (err as any).signal === 'SIGTERM';
@@ -790,6 +839,38 @@ function execCommand(command: string, args: string[], cwd: string, env?: NodeJS.
       resolve(output);
     });
   });
+}
+
+function commandInvocation(command: string, args: string[]): { command: string; args: string[] } {
+  const executable = commandName(command);
+  if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(executable)) {
+    return {
+      command: process.env.ComSpec || 'cmd.exe',
+      args: ['/d', '/c', executable, ...args],
+    };
+  }
+  return { command: executable, args };
+}
+
+function commandName(command: string): string {
+  if (process.platform !== 'win32') return command;
+  if (command === 'npm') return 'npm.cmd';
+  if (command === 'pm2') return 'pm2.cmd';
+  return command;
+}
+
+function commandAvailable(command: string): boolean {
+  const probeArgs = process.platform === 'win32'
+    ? ['/d', '/c', 'where', commandName(command)]
+    : ['-lc', `command -v ${shellQuote(command)}`];
+  const probeCommand = process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : 'sh';
+  const result = spawnSync(probeCommand, probeArgs, {
+    cwd: config.release.appRootDir,
+    env: commandEnvironment(),
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  return result.status === 0;
 }
 
 function readEnvFile(envPath: string): Record<string, string> {
@@ -868,10 +949,23 @@ function shouldCopyLegacyPath(sourcePath: string): boolean {
   const relative = path.relative(appRootPath(), sourcePath).replace(/\\/g, '/');
   if (!relative) return true;
   const segments = relative.split('/').filter(Boolean);
-  if (segments.some(segment => ['uploads', 'logs', 'backups', '.git', '.release-staging', '.codex-qa', 'update-packages'].includes(segment))) return false;
+  if (segments.includes('node_modules')) return false;
+  if (segments.some(segment => ['uploads', 'logs', 'backups', '.pm2', '.git', '.release-staging', '.codex-qa', 'update-packages'].includes(segment))) return false;
   if (segments.some(segment => /^codex[^/]*$/i.test(segment))) return false;
-  if (segments[0] === 'admin-web' && segments.includes('node_modules')) return false;
   return true;
+}
+
+function linkLegacyServerNodeModules(targetDir: string): void {
+  const source = path.join(appRootPath(), 'server/node_modules');
+  const target = path.join(targetDir, 'server/node_modules');
+  if (!fs.existsSync(source)) return;
+  if (pathExistsOrLink(target)) fs.rmSync(target, { recursive: true, force: true });
+  const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+  try {
+    fs.symlinkSync(path.resolve(source), target, linkType);
+  } catch (err: any) {
+    throw new Error(`无法为旧版本运行目录创建 server/node_modules 链接：${safeError(err)}。请在 server 目录执行 npm ci --include=dev 后重试。`);
+  }
 }
 
 function nextLegacyCurrentDir(): string {
@@ -898,6 +992,7 @@ function copyLegacyFlatDeployment(targetDir: string) {
       filter: shouldCopyLegacyPath,
     });
   }
+  linkLegacyServerNodeModules(targetDir);
   fs.writeFileSync(path.join(targetDir, 'release.json'), JSON.stringify({
     version: 'legacy-current',
     packageType: 'server-admin',
@@ -928,6 +1023,81 @@ function assertServerEntryExists(releaseDir: string) {
   const entry = path.join(releaseDir, 'server/dist/index.js');
   if (!fs.existsSync(entry)) throw new Error(`新版本启动文件不存在：${entry}`);
   return entry;
+}
+
+function addReferencedAsset(referenced: Set<string>, assetPath: string): void {
+  if (!assetPath) return;
+  referenced.add(assetPath);
+  referenced.add(`${assetPath}.gz`);
+}
+
+function trackReferencedAsset(referenced: Set<string>, pendingJs: string[], assetPath: string): void {
+  if (!assetPath || referenced.has(assetPath)) return;
+  addReferencedAsset(referenced, assetPath);
+  if (/\.(?:js|mjs)$/i.test(assetPath)) pendingJs.push(assetPath);
+}
+
+function collectAdminDistAssetReferences(indexHtml: string, assetsDir: string): Set<string> {
+  const referenced = new Set<string>();
+  const pendingJs: string[] = [];
+  for (const match of indexHtml.matchAll(ASSET_REFERENCE_PATTERN)) {
+    const assetPath = normalizeAssetRelativePath(match[1] ? `assets/${match[1]}` : '');
+    trackReferencedAsset(referenced, pendingJs, assetPath);
+  }
+
+  const distDir = path.dirname(assetsDir);
+  const processedJs = new Set<string>();
+  for (let index = 0; index < pendingJs.length; index += 1) {
+    const jsAssetPath = pendingJs[index];
+    if (processedJs.has(jsAssetPath)) continue;
+    processedJs.add(jsAssetPath);
+
+    const fullPath = path.join(distDir, jsAssetPath);
+    if (!fs.existsSync(fullPath)) continue;
+    const content = fs.readFileSync(fullPath, 'utf8');
+    for (const match of content.matchAll(ASSET_REFERENCE_PATTERN)) {
+      const assetPath = normalizeAssetRelativePath(match[1] ? `assets/${match[1]}` : '');
+      trackReferencedAsset(referenced, pendingJs, assetPath);
+    }
+    for (const match of content.matchAll(JS_IMPORT_REFERENCE_PATTERN)) {
+      const assetPath = normalizeAssetRelativePath(match[1] ? `assets/${match[1]}` : '');
+      trackReferencedAsset(referenced, pendingJs, assetPath);
+    }
+  }
+  return referenced;
+}
+
+export function cleanupOrphanAdminAssets(releaseDir: string): string[] {
+  const distDir = path.join(releaseDir, 'admin-web/dist');
+  const indexPath = path.join(distDir, 'index.html');
+  const assetsDir = path.join(distDir, 'assets');
+  if (!fs.existsSync(indexPath) || !fs.existsSync(assetsDir)) return [];
+
+  const referenced = collectAdminDistAssetReferences(fs.readFileSync(indexPath, 'utf8'), assetsDir);
+  const deleted: string[] = [];
+
+  for (const entry of fs.readdirSync(assetsDir, { withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const relativeAssetPath = normalizeAssetRelativePath(`assets/${entry.name}`);
+    if (!relativeAssetPath || referenced.has(relativeAssetPath)) continue;
+    if (!HASHED_BUILD_ASSET.test(entry.name)) continue;
+
+    fs.unlinkSync(path.join(assetsDir, entry.name));
+    deleted.push(relativeAssetPath);
+  }
+
+  return deleted;
+}
+
+function cleanupOrphanAdminAssetsBestEffort(ctx: InstallContext, step: InstallStep): void {
+  try {
+    const deleted = cleanupOrphanAdminAssets(ctx.releaseDir);
+    if (deleted.length > 0) {
+      appendInstallLog(ctx, 'info', step, `cleaned orphan admin assets: ${deleted.join(', ')}`);
+    }
+  } catch (err: any) {
+    appendInstallLog(ctx, 'warning', step, `cleanup orphan admin assets failed: ${safeError(err)}`);
+  }
 }
 
 function ensureReleaseRuntimeLayout(): { oldCurrentPath: string; warnings: string[] } {
@@ -965,7 +1135,7 @@ function ensureReleaseRuntimeLayout(): { oldCurrentPath: string; warnings: strin
 
   const legacyDir = nextLegacyCurrentDir();
   copyLegacyFlatDeployment(legacyDir);
-  fs.symlinkSync(legacyDir, currentPath, 'dir');
+  replaceCurrentLink(currentPath, legacyDir);
   warnings.push(`created current symlink from legacy deployment: ${relativeToAppRoot(legacyDir)}`);
   return { oldCurrentPath: fs.realpathSync(currentPath), warnings };
 }
@@ -1130,6 +1300,14 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+function powershellQuote(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function powershellArray(values: string[]): string {
+  return `@(${values.map(powershellQuote).join(', ')})`;
+}
+
 function startInstallWorker(ctx: InstallContext, contextPath: string): number {
   if (process.platform !== 'win32') {
     const command = `nohup ${shellQuote(process.execPath)} ${shellQuote(workerScriptPath())} ${shellQuote(contextPath)} >/dev/null 2>&1 & echo $!`;
@@ -1145,15 +1323,21 @@ function startInstallWorker(ctx: InstallContext, contextPath: string): number {
     return Number(String(result.stdout || '').trim()) || 0;
   }
 
-  const child = spawn(process.execPath, [workerScriptPath(), contextPath], {
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    `$p = Start-Process -FilePath ${powershellQuote(process.execPath)} -ArgumentList ${powershellArray([workerScriptPath(), contextPath])} -WorkingDirectory ${powershellQuote(config.release.appRootDir)} -WindowStyle Hidden -PassThru`,
+    'Write-Output $p.Id',
+  ].join('; ');
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
     cwd: config.release.appRootDir,
-    detached: true,
-    stdio: 'ignore',
     env: commandEnvironment(),
+    encoding: 'utf8',
     windowsHide: true,
   });
-  child.unref();
-  return child.pid || 0;
+  if (result.status !== 0 || result.error) {
+    throw new Error((result.stderr || result.stdout || result.error?.message || '启动安装工作进程失败').trim());
+  }
+  return Number(String(result.stdout || '').trim().split(/\r?\n/).pop()) || 0;
 }
 
 function appendInstallLog(ctx: InstallContext, level: InstallLogItem['level'], step: InstallStep, message: string) {
@@ -1321,6 +1505,7 @@ async function extractRelease(ctx: InstallContext) {
   fs.mkdirSync(ctx.releaseDir, { recursive: false });
   await tar.x({ file: ctx.packagePath, cwd: ctx.releaseDir });
   assertReleaseVersion(ctx.releaseDir, ctx.version);
+  cleanupOrphanAdminAssetsBestEffort(ctx, 'extract_release');
 }
 
 function prepareEnv(ctx: InstallContext) {
@@ -1328,7 +1513,11 @@ function prepareEnv(ctx: InstallContext) {
   const targetEnv = path.join(ctx.releaseDir, 'server/.env');
   if (!fs.existsSync(sharedEnv)) throw new Error('shared/.env not found');
   if (fs.existsSync(targetEnv)) throw new Error('release unexpectedly contains server/.env');
-  fs.symlinkSync(sharedEnv, targetEnv);
+  try {
+    fs.symlinkSync(sharedEnv, targetEnv, 'file');
+  } catch {
+    fs.copyFileSync(sharedEnv, targetEnv);
+  }
 }
 
 async function scanMigrationsForDanger(ctx: InstallContext) {
@@ -1341,15 +1530,110 @@ async function scanMigrationsForDanger(ctx: InstallContext) {
     const files = fs.readdirSync(sqlDir).filter(file => file.endsWith('.sql'));
     for (const file of files) {
       const text = fs.readFileSync(path.join(sqlDir, file), 'utf8');
-      if (/\b(DROP\s+DATABASE|DROP\s+TABLE|TRUNCATE)\b/i.test(text)) {
+      const executableSql = stripSqlLiteralsAndComments(text);
+      if (UNSUPPORTED_SQL_ROUTINE_PATTERN.test(executableSql)) {
+        throw new Error(`unsupported SQL routine/delimiter found in SQL source file: ${path.relative(ctx.releaseDir, path.join(sqlDir, file))}`);
+      }
+      if (FORBIDDEN_SQL_PATTERN.test(executableSql)) {
         throw new Error(`forbidden SQL statement found in SQL source file: ${path.relative(ctx.releaseDir, path.join(sqlDir, file))}`);
       }
     }
   }
 }
 
+function stripSqlLiteralsAndComments(sql: string): string {
+  let output = '';
+  let quote: "'" | '"' | '`' | null = null;
+  let inLineComment = false;
+  let inBlockComment = false;
+  let atLineStart = true;
+
+  for (let i = 0; i < sql.length; i += 1) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+
+    if (inLineComment) {
+      if (ch === '\n' || ch === '\r') {
+        inLineComment = false;
+        output += ch;
+        atLineStart = true;
+      }
+      continue;
+    }
+
+    if (inBlockComment) {
+      if (ch === '*' && next === '/') {
+        inBlockComment = false;
+        i += 1;
+      } else if (ch === '\n' || ch === '\r') {
+        output += ch;
+        atLineStart = true;
+      }
+      continue;
+    }
+
+    if (quote) {
+      if (ch === '\\') {
+        if (next) i += 1;
+        continue;
+      }
+      if (ch === quote) {
+        if (quote === "'" && next === "'") {
+          i += 1;
+          continue;
+        }
+        quote = null;
+      }
+      output += ' ';
+      continue;
+    }
+
+    if (ch === "'" || ch === '"' || ch === '`') {
+      quote = ch;
+      output += ' ';
+      atLineStart = false;
+      continue;
+    }
+
+    if (ch === '-' && next === '-' && (atLineStart || sql[i + 2] === undefined || /\s/.test(sql[i + 2]))) {
+      inLineComment = true;
+      i += 1;
+      continue;
+    }
+
+    if (ch === '#') {
+      inLineComment = true;
+      continue;
+    }
+
+    if (ch === '/' && next === '*') {
+      inBlockComment = true;
+      i += 1;
+      continue;
+    }
+
+    output += ch;
+    if (ch === '\n' || ch === '\r') {
+      atLineStart = true;
+    } else if (!/\s/.test(ch)) {
+      atLineStart = false;
+    }
+  }
+
+  return output;
+}
+
 function currentPath(): string {
   return ensureInsideAppRoot(path.join(config.release.appRootDir, 'current'));
+}
+
+function pathExistsOrLink(targetPath: string): boolean {
+  try {
+    fs.lstatSync(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function verifyCurrentTarget(expectedTarget: string): string {
@@ -1369,9 +1653,28 @@ async function switchCurrent(ctx: InstallContext, targetDir = ctx.releaseDir) {
   const currentPath = ensureInsideAppRoot(path.join(config.release.appRootDir, 'current'));
   const targetPath = ensureInsideAppRoot(targetDir);
   if (!fs.existsSync(targetPath)) throw new Error(`目标 release 目录不存在：${targetPath}`);
-  await execCommand('ln', ['-sfn', targetPath, currentPath], config.release.appRootDir);
+  replaceCurrentLink(currentPath, targetPath);
   ctx.switchedCurrent = true;
   return verifyCurrentTarget(targetPath);
+}
+
+function replaceCurrentLink(currentPath: string, targetPath: string): void {
+  const tempLink = ensureInsideAppRoot(`${currentPath}.next-${process.pid}-${Date.now()}`);
+  const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+  fs.symlinkSync(path.resolve(targetPath), tempLink, linkType);
+  try {
+    if (pathExistsOrLink(currentPath)) {
+      const stat = fs.lstatSync(currentPath);
+      if (!stat.isSymbolicLink()) {
+        throw new Error('current exists but is not a symbolic link; refusing to overwrite it');
+      }
+      fs.rmSync(currentPath, { recursive: true, force: true });
+    }
+    fs.renameSync(tempLink, currentPath);
+  } catch (err) {
+    try { fs.rmSync(tempLink, { recursive: true, force: true }); } catch {}
+    throw err;
+  }
 }
 
 function pm2CommandOptions(serverDir: string) {
@@ -1387,7 +1690,7 @@ function pm2CommandOptions(serverDir: string) {
 async function runPm2Checked(args: string[], serverDir: string) {
   const result = await runPm2Command(args, pm2CommandOptions(serverDir));
   if (result.code !== 0) {
-    const output = `${result.stdout}\n${result.stderr}`.trim();
+    const output = safeError(new Error(`${result.stdout}\n${result.stderr}`.trim()));
     throw new Error(`pm2 ${args.join(' ')} 执行失败，退出码 ${result.code}${output ? `：${output}` : ''}`);
   }
   return result;
@@ -1402,6 +1705,117 @@ function samePathOrReal(actual: string, expected: string): boolean {
     return fs.realpathSync(actualResolved) === fs.realpathSync(expectedResolved);
   } catch {
     return false;
+  }
+}
+
+interface PortListenerInfo {
+  pid: number;
+  command: string;
+  cwd: string;
+}
+
+function readLinuxProcText(pid: number, name: string): string {
+  if (process.platform === 'win32') return '';
+  try {
+    return fs.readFileSync(`/proc/${pid}/${name}`, 'utf8').replace(/\0/g, ' ').trim();
+  } catch {
+    return '';
+  }
+}
+
+function readLinuxProcCwd(pid: number): string {
+  if (process.platform === 'win32') return '';
+  try {
+    return fs.realpathSync(`/proc/${pid}/cwd`);
+  } catch {
+    return '';
+  }
+}
+
+function isPathInside(target: string, root: string): boolean {
+  if (!target) return false;
+  const resolvedTarget = path.resolve(target);
+  const resolvedRoot = path.resolve(root);
+  return resolvedTarget === resolvedRoot || resolvedTarget.startsWith(`${resolvedRoot}${path.sep}`);
+}
+
+function listPortListeners(port: number): PortListenerInfo[] {
+  if (process.platform === 'win32' || !Number.isInteger(port) || port <= 0) return [];
+  const result = spawnSync('ss', ['-ltnp'], { encoding: 'utf8', windowsHide: true });
+  if (result.status !== 0 || result.error) return [];
+
+  const listeners: PortListenerInfo[] = [];
+  for (const line of String(result.stdout || '').split(/\r?\n/)) {
+    const columns = line.trim().split(/\s+/);
+    const localAddress = columns[3] || '';
+    if (!localAddress.endsWith(`:${port}`)) continue;
+
+    for (const match of line.matchAll(/pid=(\d+)/g)) {
+      const pid = Number(match[1]);
+      if (!Number.isInteger(pid) || pid <= 0) continue;
+      listeners.push({
+        pid,
+        command: readLinuxProcText(pid, 'cmdline') || readLinuxProcText(pid, 'comm'),
+        cwd: readLinuxProcCwd(pid),
+      });
+    }
+  }
+
+  return listeners.filter((item, index, all) => all.findIndex(other => other.pid === item.pid) === index);
+}
+
+function portListenerSummary(listener: PortListenerInfo): string {
+  return `pid=${listener.pid}, cwd=${listener.cwd || '-'}, command=${listener.command || '-'}`;
+}
+
+function isManagedAppRootListener(listener: PortListenerInfo): boolean {
+  if (listener.pid === process.pid) return false;
+  const appRoot = appRootPath();
+  return isPathInside(listener.cwd, appRoot) || listener.command.includes(appRoot);
+}
+
+async function waitForPortFree(port: number, timeoutMs: number): Promise<boolean> {
+  const startedAt = Date.now();
+  do {
+    if (listPortListeners(port).length === 0) return true;
+    await sleep(500);
+  } while (Date.now() - startedAt < timeoutMs);
+  return listPortListeners(port).length === 0;
+}
+
+async function terminatePortListener(listener: PortListenerInfo, port: number): Promise<void> {
+  try {
+    process.kill(listener.pid, 'SIGTERM');
+  } catch {
+    return;
+  }
+  if (await waitForPortFree(port, 5000)) return;
+  try {
+    process.kill(listener.pid, 'SIGKILL');
+  } catch {
+    // The process may have exited after the last check.
+  }
+  await waitForPortFree(port, 2000);
+}
+
+async function ensureReleasePortAvailable(ctx: InstallContext | undefined, step: InstallStep, port: number) {
+  if (process.platform === 'win32') return;
+  if (await waitForPortFree(port, 5000)) return;
+
+  const listeners = listPortListeners(port);
+  const external = listeners.filter(listener => !isManagedAppRootListener(listener));
+  if (external.length > 0) {
+    throw new Error(`PORT ${port} is already used by non-release process: ${external.map(portListenerSummary).join('; ')}`);
+  }
+
+  for (const listener of listeners) {
+    if (ctx) appendInstallLog(ctx, 'warning', step, `发现旧版本进程仍占用端口 ${port}，准备结束：${portListenerSummary(listener)}`);
+    await terminatePortListener(listener, port);
+  }
+
+  const remaining = listPortListeners(port);
+  if (remaining.length > 0) {
+    throw new Error(`PORT ${port} is still occupied after cleanup: ${remaining.map(portListenerSummary).join('; ')}`);
   }
 }
 
@@ -1452,36 +1866,22 @@ async function restartPm2Current(ctx?: InstallContext, step: InstallStep = 'pm2_
   if (!fs.existsSync(entry)) throw new Error(`新版本启动文件不存在：${entry}`);
   const appName = releasePm2AppName();
 
-  const restarted = await runPm2Command(['restart', appName, '--update-env'], pm2CommandOptions(currentServerDir));
-  const restartOutput = `${restarted.stdout}\n${restarted.stderr}`.trim();
-  if (restarted.code !== 0) {
-    if (!isPm2AppNotFound(restartOutput)) {
-      throw new Error(`pm2 restart ${appName} --update-env 执行失败，退出码 ${restarted.code}${restartOutput ? `：${restartOutput}` : ''}`);
+  const before = await getPm2CurrentProcess(currentServerDir);
+  if (ctx) appendInstallLog(ctx, 'info', step, `PM2 重新绑定到 current/server，旧状态：${pm2ProcessSummary(before)}`);
+
+  const deleted = await runPm2Command(['delete', appName], pm2CommandOptions(currentServerDir));
+  if (deleted.code !== 0) {
+    const output = `${deleted.stdout}\n${deleted.stderr}`.trim();
+    if (output && !isPm2AppNotFound(output)) {
+      throw new Error(`pm2 delete ${appName} 执行失败，退出码 ${deleted.code}：${output}`);
     }
     if (ctx) appendInstallLog(ctx, 'warning', step, `PM2 进程不存在，改为启动新进程：${appName}`);
-    await runPm2Checked(['start', 'dist/index.js', '--name', appName, '--update-env'], currentServerDir);
   }
 
+  await ensureReleasePortAvailable(ctx, step, releasePort());
+  await runPm2Checked(['start', 'dist/index.js', '--name', appName, '--update-env', '--max-restarts', '30', '--restart-delay', '3000'], currentServerDir);
   await runPm2Checked(['save'], currentServerDir);
-
-  try {
-    await waitForPm2Current(currentServerDir);
-  } catch (err: any) {
-    if (ctx) {
-      const processInfo = await getPm2CurrentProcess(currentServerDir);
-      appendInstallLog(ctx, 'warning', step, `PM2 restart 后进程路径未指向 current/server，尝试重新绑定：${pm2ProcessSummary(processInfo)}；原因：${safeError(err)}`);
-    }
-    const deleted = await runPm2Command(['delete', appName], pm2CommandOptions(currentServerDir));
-    if (deleted.code !== 0) {
-      const output = `${deleted.stdout}\n${deleted.stderr}`.trim();
-      if (output && !isPm2AppNotFound(output)) {
-        throw new Error(`pm2 delete ${appName} 执行失败，退出码 ${deleted.code}：${output}`, { cause: err });
-      }
-    }
-    await runPm2Checked(['start', 'dist/index.js', '--name', appName, '--update-env'], currentServerDir);
-    await runPm2Checked(['save'], currentServerDir);
-    await waitForPm2Current(currentServerDir);
-  }
+  await waitForPm2Current(currentServerDir);
 
   if (ctx) {
     const processInfo = await getPm2CurrentProcess(currentServerDir);
@@ -1651,12 +2051,17 @@ async function runInstall(ctx: InstallContext) {
 
     appendInstallLog(ctx, 'info', 'build_or_check', 'running admin-web build');
     await execCommand('npm', ['run', 'build'], path.join(ctx.releaseDir, 'admin-web'), undefined, COMMAND_TIMEOUT_MS.build);
+    cleanupOrphanAdminAssetsBestEffort(ctx, 'build_or_check');
     assertReleaseVersion(ctx.releaseDir, ctx.version);
     assertServerEntryExists(ctx.releaseDir);
     appendInstallLog(ctx, 'info', 'build_or_check', '构建完成：server/dist/index.js 已生成，release.json 版本已确认');
 
-    appendInstallLog(ctx, 'info', 'build_or_check', 'running deploy self-check');
-    await execCommand('npm', ['run', 'check:deploy'], path.join(ctx.releaseDir, 'server'));
+    if (process.platform === 'linux') {
+      appendInstallLog(ctx, 'info', 'build_or_check', 'running deploy self-check');
+      await execCommand('npm', ['run', 'check:deploy'], path.join(ctx.releaseDir, 'server'));
+    } else {
+      appendInstallLog(ctx, 'warning', 'build_or_check', `skipped Linux deploy self-check on ${process.platform}; production Linux updates still run check:deploy`);
+    }
 
     appendInstallLog(ctx, 'info', 'run_migration', 'checking migrations');
     await scanMigrationsForDanger(ctx);
@@ -1711,7 +2116,10 @@ async function runInstall(ctx: InstallContext) {
       try {
         await rollbackCurrent(ctx);
         ctx.status = 'rollback_success';
-        appendInstallLog(ctx, 'warning', 'rollback', 'code rollback completed; database was not restored automatically');
+        const dbNote = ctx.dbMigrated
+          ? ` 数据库已迁移且未自动回滚。若需恢复，请使用数据库备份：${ctx.dbBackupPath || '备份路径未记录'}，通过后台"数据库备份恢复"功能手动导入。`
+          : '';
+        appendInstallLog(ctx, 'warning', 'rollback', `code rollback completed; database was not restored automatically.${dbNote}`);
       } catch (rollbackErr: any) {
         ctx.status = 'rollback_failed';
         appendInstallLog(ctx, 'error', 'rollback', `code rollback failed: ${safeError(rollbackErr)}`);

@@ -1,38 +1,74 @@
 import { Router, Request, Response } from 'express';
 import { authMiddleware } from '../middleware/auth';
-import { cancelTask, createImageTask, createVideoTask, getTaskById, getTasksList } from '../services/task.service';
+import { cancelTask, createImageTask, createVideoTask, getTaskById, getTasksByIds, getTasksList } from '../services/task.service';
 import { generateScript, generatePrompt, generateStoryboard, optimizePrompt } from '../services/ai-feature.service';
 import { success, error } from '../utils/response';
+import { query } from '../utils/db';
 import { ErrorCodes } from '../types';
 import { checkSensitiveWords } from '../services/content-check.service';
+import { SettingsService } from '../services/settings.service';
+import { pollProviderTaskIfDue } from '../services/video-polling.service';
+import rateLimit from 'express-rate-limit';
 
 const router = Router();
 const SENSITIVE_CONTENT_MESSAGE = '生成内容敏感，请勿生成违规内容。请修改后再次生成。';
+const aiTaskCreateLimiter = rateLimit({
+  windowMs: 60_000,
+  max: positiveInt(process.env.AI_TASK_CREATE_RATE_LIMIT_PER_MINUTE, 10),
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => String(req.user!.userId),
+  message: { code: 429, message: 'AI 任务提交过于频繁，请稍后重试', data: null },
+});
 
-async function hasSensitiveContent(...values: unknown[]): Promise<boolean> {
+function positiveInt(value: any, fallback: number): number {
+  const parsed = parseInt(String(value || ''), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+async function hasSensitiveContent(...values: unknown[]): Promise<{ blocked: boolean; hitWord?: string; promptText?: string }> {
   const texts = values
     .map((value) => String(value || '').trim())
     .filter(Boolean);
   for (const text of texts) {
     const check = await checkSensitiveWords(text);
-    if (!check.passed) return true;
+    if (!check.passed) return { blocked: true, hitWord: check.hitWord, promptText: text };
   }
-  return false;
+  return { blocked: false };
+}
+
+async function rejectSensitiveContentIfNeeded(res: Response, ...values: unknown[]): Promise<boolean> {
+  const filterEnabled = await SettingsService.getBoolean('content.filter_enabled', true);
+  if (!filterEnabled) return false;
+  const sensitiveCheck = await hasSensitiveContent(...values);
+  if (!sensitiveCheck.blocked) return false;
+  await query(
+    "INSERT INTO audit_logs (task_id, audit_type, audit_result, risk_level, risk_label, created_at) VALUES (0, 'content_review', 'pending', 'high', ?, NOW(3))",
+    [`敏感词命中: ${sensitiveCheck.hitWord || 'unknown'} | prompt: ${(sensitiveCheck.promptText || '').substring(0, 200)}`],
+  ).catch(() => undefined);
+  error(res, ErrorCodes.CONTENT_REVIEW_FAILED, SENSITIVE_CONTENT_MESSAGE);
+  return true;
 }
 
 router.get('/', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const { type, status, keyword, page, pageSize } = req.query as any;
+    const { type, status, keyword, page, pageSize, lastId, ids } = req.query as any;
+    if (ids) {
+      const taskIds = String(ids).split(',').map(item => Number(item.trim())).filter(item => Number.isInteger(item) && item > 0);
+      success(res, await getTasksByIds(req.user!.userId, taskIds));
+      return;
+    }
     const result = await getTasksList(req.user!.userId, {
       type,
       status,
       keyword,
       page: page ? parseInt(page) : 1,
       pageSize: pageSize ? parseInt(pageSize) : 20,
+      lastId: lastId ? parseInt(lastId) : undefined,
     });
     success(res, result);
   } catch {
-    error(res, ErrorCodes.SERVER_ERROR, 'Failed to get task list');
+    error(res, ErrorCodes.SERVER_ERROR, '获取任务列表失败');
   }
 });
 
@@ -40,7 +76,7 @@ router.post('/optimize-prompt', authMiddleware, async (req: Request, res: Respon
   try {
     const { prompt, scene, featureKey, style, ratio, usage, negativePrompt, negative_prompt, context } = req.body;
     if (!prompt) {
-      error(res, ErrorCodes.PARAM_ERROR, 'prompt is required');
+      error(res, ErrorCodes.PARAM_ERROR, '请输入提示词');
       return;
     }
 
@@ -62,7 +98,7 @@ router.post('/optimize-prompt', authMiddleware, async (req: Request, res: Respon
       pointsCost: result.pointsCost,
     });
   } catch (err: any) {
-    error(res, err.code && err.code < 5000 ? err.code : ErrorCodes.SERVER_ERROR, err.message || 'Failed to optimize prompt');
+    error(res, err.code && err.code < 5000 ? err.code : ErrorCodes.SERVER_ERROR, err.message || '优化提示词失败');
   }
 });
 
@@ -70,7 +106,7 @@ router.post('/script', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { topic, style, duration, characters } = req.body;
     if (!topic) {
-      error(res, ErrorCodes.PARAM_ERROR, 'topic is required');
+      error(res, ErrorCodes.PARAM_ERROR, '请输入脚本主题');
       return;
     }
     const result = await generateScript({
@@ -90,7 +126,7 @@ router.post('/prompt', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { idea, scene, style, count } = req.body;
     if (!idea) {
-      error(res, ErrorCodes.PARAM_ERROR, 'idea is required');
+      error(res, ErrorCodes.PARAM_ERROR, '请输入创意想法');
       return;
     }
     const result = await generatePrompt({
@@ -110,7 +146,7 @@ router.post('/storyboard', authMiddleware, async (req: Request, res: Response) =
   try {
     const { script, style, ratio } = req.body;
     if (!script) {
-      error(res, ErrorCodes.PARAM_ERROR, 'script is required');
+      error(res, ErrorCodes.PARAM_ERROR, '请输入脚本内容');
       return;
     }
     const result = await generateStoryboard({
@@ -125,33 +161,31 @@ router.post('/storyboard', authMiddleware, async (req: Request, res: Response) =
   }
 });
 
-router.post('/image', authMiddleware, async (req: Request, res: Response) => {
+router.post('/image', authMiddleware, aiTaskCreateLimiter, async (req: Request, res: Response) => {
   try {
     const {
       subType, prompt, featureKey, tierKey, tierId, modelId, sizeMode, ratio, customWidth, customHeight,
+      resolutionPreset, resolution_preset, sizeKey, size_key,
       postprocessMode, aiOptimize, formData, params, editTool, uploadKeys, referenceKeys,
       maskFileId, mask_file_id, maskImage, maskUrl, mask_url, backgroundFileId, background_file_id, backgroundImage, backgroundUrl, background_url,
       scene, style, quality, imageType, optimizedPrompt, optimized_prompt, negativePrompt, negative_prompt, platformWatermarkEnabled,
     } = req.body;
     const finalSubType = subType || 'text2img';
     if (!prompt || typeof prompt !== 'string' || prompt.trim().length === 0) {
-      error(res, ErrorCodes.PARAM_ERROR, 'prompt is required');
+      error(res, ErrorCodes.PARAM_ERROR, '请输入提示词');
       return;
     }
-    if (await hasSensitiveContent(prompt, optimizedPrompt || optimized_prompt, negativePrompt || negative_prompt)) {
-      error(res, ErrorCodes.CONTENT_REVIEW_FAILED, SENSITIVE_CONTENT_MESSAGE);
-      return;
-    }
+    if (await rejectSensitiveContentIfNeeded(res, prompt, optimizedPrompt || optimized_prompt, negativePrompt || negative_prompt)) return;
     if (!['text2img', 'img2img', 'edit'].includes(finalSubType)) {
-      error(res, ErrorCodes.PARAM_ERROR, 'Unsupported image task type');
+      error(res, ErrorCodes.PARAM_ERROR, '不支持的图片任务类型');
       return;
     }
     if (modelId) {
-      error(res, ErrorCodes.PARAM_ERROR, 'modelId is not allowed; use tierKey or tierId');
+      error(res, ErrorCodes.PARAM_ERROR, '请使用模型档位 tierKey 或 tierId');
       return;
     }
     if (!tierKey && !tierId) {
-      error(res, ErrorCodes.PARAM_ERROR, 'tierKey or tierId is required');
+      error(res, ErrorCodes.PARAM_ERROR, '请先选择模型档位');
       return;
     }
     // img2img: uploadKeys = 主图（必填1张），referenceKeys = 风格参考图（可选1-3张）
@@ -182,6 +216,8 @@ router.post('/image', authMiddleware, async (req: Request, res: Response) => {
       ratio,
       customWidth,
       customHeight,
+      resolutionPreset: resolutionPreset || resolution_preset,
+      sizeKey: sizeKey || size_key,
       postprocessMode,
       optimizedPrompt: optimizedPrompt || optimized_prompt,
       negativePrompt: negativePrompt || negative_prompt,
@@ -191,6 +227,8 @@ router.post('/image', authMiddleware, async (req: Request, res: Response) => {
         ...(params || {}),
         scene,
         style,
+        resolutionPreset: resolutionPreset || resolution_preset,
+        sizeKey: sizeKey || size_key,
         quality,
         imageType,
         maskFileId: maskFileId || mask_file_id,
@@ -208,11 +246,12 @@ router.post('/image', authMiddleware, async (req: Request, res: Response) => {
     });
     success(res, result);
   } catch (err: any) {
-    error(res, err.code && err.code < 5000 ? err.code : ErrorCodes.SERVER_ERROR, err.message || 'Failed to create image task');
+    const code = err.code && err.code < 5000 ? err.code : ErrorCodes.SERVER_ERROR;
+    error(res, code, err.message || '创建图片任务失败', code === ErrorCodes.RATE_LIMITED ? 429 : 200);
   }
 });
 
-router.post('/video', authMiddleware, async (req: Request, res: Response) => {
+router.post('/video', authMiddleware, aiTaskCreateLimiter, async (req: Request, res: Response) => {
   try {
     const {
       subType, videoMode, generationType, mode, prompt, featureKey, tierKey, tierId, modelId,
@@ -222,19 +261,16 @@ router.post('/video', authMiddleware, async (req: Request, res: Response) => {
       optimizedPrompt, optimized_prompt, negativePrompt, negative_prompt,
     } = req.body;
     if (!prompt || typeof prompt !== 'string' || prompt.trim().length === 0) {
-      error(res, ErrorCodes.PARAM_ERROR, 'prompt is required');
+      error(res, ErrorCodes.PARAM_ERROR, '请输入提示词');
       return;
     }
-    if (await hasSensitiveContent(prompt, optimizedPrompt || optimized_prompt, negativePrompt || negative_prompt)) {
-      error(res, ErrorCodes.CONTENT_REVIEW_FAILED, SENSITIVE_CONTENT_MESSAGE);
-      return;
-    }
+    if (await rejectSensitiveContentIfNeeded(res, prompt, optimizedPrompt || optimized_prompt, negativePrompt || negative_prompt)) return;
     if (modelId) {
-      error(res, ErrorCodes.PARAM_ERROR, 'modelId is not allowed; use tierKey or tierId');
+      error(res, ErrorCodes.PARAM_ERROR, '请使用模型档位 tierKey 或 tierId');
       return;
     }
     if (!tierKey && !tierId) {
-      error(res, ErrorCodes.PARAM_ERROR, 'tierKey or tierId is required');
+      error(res, ErrorCodes.PARAM_ERROR, '请先选择模型档位');
       return;
     }
 
@@ -288,20 +324,23 @@ router.post('/video', authMiddleware, async (req: Request, res: Response) => {
     });
     success(res, result);
   } catch (err: any) {
-    error(res, err.code && err.code < 5000 ? err.code : ErrorCodes.SERVER_ERROR, err.message || 'Failed to create video task');
+    const code = err.code && err.code < 5000 ? err.code : ErrorCodes.SERVER_ERROR;
+    error(res, code, err.message || '创建视频任务失败', code === ErrorCodes.RATE_LIMITED ? 429 : 200);
   }
 });
 
 router.get('/:id(\\d+)', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const task = await getTaskById(parseInt(req.params.id), req.user!.userId);
+    const taskId = parseInt(req.params.id, 10);
+    pollProviderTaskIfDue(taskId, req.user!.userId).catch(() => undefined);
+    const task = await getTaskById(taskId, req.user!.userId);
     if (!task) {
-      error(res, ErrorCodes.NOT_FOUND, 'Task not found', 404);
+      error(res, ErrorCodes.NOT_FOUND, '任务不存在', 404);
       return;
     }
     success(res, task);
   } catch {
-    error(res, ErrorCodes.SERVER_ERROR, 'Failed to get task detail');
+    error(res, ErrorCodes.SERVER_ERROR, '获取任务详情失败');
   }
 });
 

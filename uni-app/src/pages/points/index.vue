@@ -643,7 +643,7 @@ function closeServiceConfirm() {
 
 .package-price {
   margin-top: 8rpx;
-  color: #20263a;
+  color: #ff5eaa;
   font-size: 32rpx;
   font-weight: 900;
   line-height: 1.1;

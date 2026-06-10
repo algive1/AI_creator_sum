@@ -34,7 +34,7 @@ const PLATFORMS: Record<string, { label: string; provider: string; intro: string
     ],
   },
   '/storage/qiniu': {
-    label: '七牛云 Kodo', provider: 'qiniu',
+    label: '七牛云 Kodo', provider: 'qiniu_kodo',
     intro: '七牛云对象存储。配置前需在七牛云控制台创建存储空间，并在「密钥管理」中获取 AccessKey 和 SecretKey。',
     keys: [
       { key: 'storage.qiniu.access_key', label: 'AccessKey', hint: '七牛云 AccessKey，在 https://portal.qiniu.com/user/key 获取。' },
@@ -45,7 +45,7 @@ const PLATFORMS: Record<string, { label: string; provider: string; intro: string
     ],
   },
   '/storage/upyun': {
-    label: '又拍云 USS', provider: 'upyun',
+    label: '又拍云 USS', provider: 'upyun_uss',
     intro: '又拍云对象存储。配置前需在又拍云控制台创建云存储服务，并创建操作员账号及授权。',
     keys: [
       { key: 'storage.upyun.bucket', label: 'Bucket（服务名称）', hint: '又拍云「云存储」中创建的服务名称，如 my-app-images。' },
@@ -55,7 +55,7 @@ const PLATFORMS: Record<string, { label: string; provider: string; intro: string
     ],
   },
   '/storage/eos': {
-    label: '移动云 EOS', provider: 'eos',
+    label: '移动云 EOS', provider: 'chinamobile_eos',
     intro: '中国移动云对象存储。配置前需在移动云控制台开通 EOS 服务，创建存储桶，并获取 AccessKey。',
     keys: [
       { key: 'storage.eos.access_key', label: 'AccessKey', hint: '移动云 AccessKey，在移动云控制台「访问管理」中创建。' },

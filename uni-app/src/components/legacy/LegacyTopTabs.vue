@@ -1,14 +1,14 @@
 <template>
   <view class="top-tabs" :class="`top-tabs-${items.length}`">
-    <button
+    <view
       v-for="item in items"
       :key="item"
       class="top-tab"
       :class="{ active: modelValue === item }"
-      @tap="$emit('update:modelValue', item)"
+      @tap="select(item)"
     >
-      {{ item }}
-    </button>
+      {{ labels?.[item] || item }}
+    </view>
   </view>
 </template>
 
@@ -16,9 +16,16 @@
 defineProps<{
   items: string[];
   modelValue: string;
+  labels?: Record<string, string>;
 }>();
 
-defineEmits<{ 'update:modelValue': [value: string] }>();
+const emit = defineEmits<{
+  select: [value: string];
+}>();
+
+function select(value: string) {
+  emit('select', value);
+}
 </script>
 
 <style scoped lang="scss">

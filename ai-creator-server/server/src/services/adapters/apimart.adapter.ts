@@ -16,6 +16,14 @@ import {
   joinBasePath,
   providerNoResultMessage,
 } from './adapter.interface';
+import {
+  applyGenericImageParams,
+  applyGptImage2Params,
+  applyNanoBananaParams,
+  isGptImage2Model,
+  isNanoBananaModel,
+  normalizeImageParams,
+} from './image-param-mapper';
 
 type JsonObject = Record<string, any>;
 
@@ -136,13 +144,21 @@ export class ApimartAdapter implements IProviderAdapter {
 
 function buildImageBody(params: SubmitTaskParams): JsonObject {
   const input = params.params || {};
+  const normalized = normalizeImageParams(input);
   const body: JsonObject = {
     model: params.upstreamCode,
     prompt: params.prompt,
-    n: normalizeImageCount(input.imageCount),
-    size: resolveImageSize(input),
-    resolution: normalizeImageResolution(input.resolution || input.quality, params.upstreamCode),
   };
+  if (isGptImage2Model(params.upstreamCode)) {
+    applyGptImage2Params(body, normalized);
+  } else if (isNanoBananaModel(params.upstreamCode)) {
+    applyNanoBananaParams(body, normalized);
+  } else {
+    body.size = resolveImageSize(input);
+    applyGenericImageParams(body, normalized);
+    body.resolution = normalizeImageResolution(body.resolution || input.resolution || input.quality, params.upstreamCode);
+    body.n = normalizeImageCount(input.imageCount);
+  }
   const images = normalizeImages(params.images || input.images || input.image_urls || input.image_url);
   if (images.length > 0) body.image_urls = images;
   copyDefined(body, 'mask_url', input.maskUrl || input.mask_url);

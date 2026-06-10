@@ -32,6 +32,7 @@ export interface ListOrderQuery {
   payStatus?: string;
   page?: number;
   pageSize?: number;
+  lastId?: number;
 }
 
 export interface PaymentLogInput {
@@ -197,6 +198,7 @@ function normalizeOrderRow(row: any): OrderRecord {
 
 function formatOrderForApi(order: OrderRecord, extra?: Record<string, any>) {
   return {
+    id: order.id,
     orderNo: order.orderNo,
     userId: order.userId,
     orderType: order.orderType,
@@ -568,6 +570,10 @@ export async function createOrder(input: CreateOrderInput) {
     pointsBonusType = normalizeFirstPurchaseBonusType(packageRow.first_purchase_bonus_type);
     pointsBonusAmount = configuredBonusPoints(pointsBonusType, basePointsAmount, Number(packageRow.first_purchase_bonus_points || 0));
   } else {
+    const membershipEnabled = await SettingsService.getBoolean('membership.enabled', true);
+    if (!membershipEnabled) {
+      throw Object.assign(new Error('会员功能已关闭，暂不能购买会员套餐'), { code: ErrorCodes.FORBIDDEN });
+    }
     const plan = await resolveMemberPlan(input.productId);
     if (!plan) {
       throw Object.assign(new Error('会员套餐不存在或已下架'), { code: ErrorCodes.ORDER_NOT_FOUND });
@@ -636,7 +642,9 @@ export async function createOrder(input: CreateOrderInput) {
 export async function listOrders(input: ListOrderQuery) {
   const page = Math.max(1, Math.trunc(input.page || 1));
   const pageSize = Math.min(Math.max(1, Math.trunc(input.pageSize || 20)), 100);
-  const offset = (page - 1) * pageSize;
+  const lastId = Number(input.lastId || 0);
+  const useCursor = Number.isFinite(lastId) && lastId > 0;
+  const offset = useCursor ? 0 : (page - 1) * pageSize;
   let where = 'o.user_id = ?';
   const params: any[] = [input.userId];
   if (input.orderType) {
@@ -651,6 +659,10 @@ export async function listOrders(input: ListOrderQuery) {
     where += ' AND o.pay_status = ?';
     params.push(input.payStatus);
   }
+  if (useCursor) {
+    where += ' AND o.id < ?';
+    params.push(lastId);
+  }
 
   const rows = await query<any>(
     `SELECT o.*, mp.name AS member_plan_name, pp.name AS point_package_name
@@ -658,7 +670,7 @@ export async function listOrders(input: ListOrderQuery) {
        LEFT JOIN member_plans mp ON mp.id = o.member_plan_id
        LEFT JOIN point_packages pp ON pp.id = o.product_id
       WHERE ${where}
-      ORDER BY o.created_at DESC
+      ORDER BY o.id DESC
       LIMIT ? OFFSET ?`,
     [...params, pageSize, offset],
   );
@@ -677,6 +689,8 @@ export async function listOrders(input: ListOrderQuery) {
       pageSize,
       total: Number(countRow?.total || 0),
       totalPages: Math.ceil(Number(countRow?.total || 0) / pageSize),
+      nextCursor: list.length ? Number(list[list.length - 1]?.id || 0) : null,
+      hasMore: useCursor ? list.length >= pageSize : page * pageSize < Number(countRow?.total || 0),
     },
   };
 }
@@ -826,21 +840,24 @@ export async function handleWechatNotify(input: PaymentNotifyInput): Promise<{ s
     if (!input.payload || !input.payload.resource) {
       return { success: false, message: '回调体不完整' };
     }
-    const verified = await verifyNotifySignature(input.headers, input.rawBody, await requireWechatPayConfig());
-    if (!verified) {
-      await writePaymentLog(null, {
-        orderNo: String(input.payload?.resource?.out_trade_no || ''),
-        userId: Number(input.payload?.resource?.user_id || 0),
-        channel: 'wechat_jsapi',
-        eventType: 'notify_verified',
-        status: 'failed',
-        message: '微信回调验签失败',
-        rawSummary: { headerSummary, payload: rawSummary },
-      });
-      return { success: false, message: '微信回调验签失败' };
+    const cfg = await requireWechatPayConfig();
+    if (cfg.verifySignature) {
+      const verified = await verifyNotifySignature(input.headers, input.rawBody, cfg);
+      if (!verified) {
+        await writePaymentLog(null, {
+          orderNo: String(input.payload?.resource?.out_trade_no || ''),
+          userId: Number(input.payload?.resource?.user_id || 0),
+          channel: 'wechat_jsapi',
+          eventType: 'notify_verified',
+          status: 'failed',
+          message: '微信回调验签失败',
+          rawSummary: { headerSummary, payload: rawSummary },
+        });
+        return { success: false, message: '微信回调验签失败' };
+      }
     }
 
-    const notifyData = decryptNotifyResource(input.payload.resource, (await requireWechatPayConfig()).apiV3Key);
+    const notifyData = decryptNotifyResource(input.payload.resource, cfg.apiV3Key);
     orderNo = String(notifyData.out_trade_no || '');
     tradeState = String(notifyData.trade_state || '');
     transactionId = String(notifyData.transaction_id || '');
@@ -898,7 +915,23 @@ export async function handleWechatNotify(input: PaymentNotifyInput): Promise<{ s
         return { success: true, message: '重复回调已处理' };
       }
 
-      const cfg = await requireWechatPayConfig();
+      // 如果 pay_status 已经是 paid（正在等待 grant 完成或已由主动查单处理），直接跳过
+      if (order.payStatus === 'paid') {
+        await writePaymentLog(conn, {
+          orderNo,
+          userId: order.userId,
+          channel: 'wechat_jsapi',
+          eventType: 'duplicate_notify',
+          status: 'success',
+          message: `支付已确认（grantStatus=${order.grantStatus}），跳过重复回调`,
+          wxTransactionId: transactionId || order.wxTransactionId || '',
+          wxTradeState: tradeState || order.wxTradeState || '',
+          rawSummary: { headerSummary, notify: summarizeNotifyData(notifyData) },
+        });
+        await conn.commit();
+        return { success: true, message: '支付已确认，跳过重复回调' };
+      }
+
       if (order.amountTotal !== Number(notifyData?.amount?.total || 0)) {
         await updateOrderByNo(conn, orderNo, {
           status: 'failed',
@@ -1022,37 +1055,51 @@ export async function handleWechatNotify(input: PaymentNotifyInput): Promise<{ s
     }
 
     const grantResult = await grantOrderBenefits(orderNo);
-    if (!grantResult.success) {
-      // 款项已收到但权益发放失败：标记 status=paid（款项已收）并记录 grant 失败原因
-      await updateOrderByNo(null, orderNo, { status: 'paid', grant_status: 'failed', grant_message: grantResult.message });
-      await writePaymentLog(null, {
+
+    // 使用独立事务更新权益发放结果，确保状态不丢失
+    const statusConn = await getConnection();
+    try {
+      await statusConn.beginTransaction();
+      if (!grantResult.success) {
+        await updateOrderByNo(statusConn, orderNo, { status: 'paid', grant_status: 'failed', grant_message: grantResult.message });
+        await writePaymentLog(statusConn, {
+          orderNo,
+          userId,
+          channel: 'wechat_jsapi',
+          eventType: 'grant_failed',
+          status: 'failed',
+          message: grantResult.message,
+          wxTransactionId: transactionId,
+          wxTradeState: tradeState,
+          rawSummary: { headerSummary, notify: summarizeNotifyData(notifyData) },
+        });
+        await statusConn.commit();
+        return { success: false, message: grantResult.message };
+      }
+
+      // 权益发放成功，标记订单完成
+      await updateOrderByNo(statusConn, orderNo, { status: 'paid', grant_status: 'granted', grant_at: new Date(), grant_message: '发放成功' });
+      await writePaymentLog(statusConn, {
         orderNo,
         userId,
         channel: 'wechat_jsapi',
-        eventType: 'grant_failed',
-        status: 'failed',
-        message: grantResult.message,
+        eventType: 'grant_success',
+        status: 'success',
+        message: '权益发放成功',
         wxTransactionId: transactionId,
         wxTradeState: tradeState,
         rawSummary: { headerSummary, notify: summarizeNotifyData(notifyData) },
       });
-      return { success: false, message: grantResult.message };
+      await statusConn.commit();
+      return { success: true, message: 'success' };
+    } catch (statusErr: any) {
+      try { await statusConn.rollback(); } catch {}
+      // 状态更新失败但不影响主流程——grantOrderBenefits 已成功，recoverPendingGrants 会补标记
+      console.error(`[Payment] Failed to update grant status for order ${orderNo}:`, statusErr?.message || statusErr);
+      return { success: true, message: 'granted-but-status-update-failed' };
+    } finally {
+      statusConn.release();
     }
-
-    // 权益发放成功，标记订单完成
-    await updateOrderByNo(null, orderNo, { status: 'paid', grant_status: 'granted', grant_at: new Date(), grant_message: '发放成功' });
-    await writePaymentLog(null, {
-      orderNo,
-      userId,
-      channel: 'wechat_jsapi',
-      eventType: 'grant_success',
-      status: 'success',
-      message: '权益发放成功',
-      wxTransactionId: transactionId,
-      wxTradeState: tradeState,
-      rawSummary: { headerSummary, notify: summarizeNotifyData(notifyData) },
-    });
-    return { success: true, message: 'success' };
   } catch (error: any) {
     if (orderNo) {
       await writePaymentLog(null, {
@@ -1132,29 +1179,44 @@ export async function queryAndSyncWechatOrder(orderNo: string, userId: number, i
 }
 
 export async function cancelOrder(orderNo: string, userId: number) {
-  const order = await getOwnedOrder(orderNo, userId);
-  if (!order) {
-    throw Object.assign(new Error('订单不存在'), { code: ErrorCodes.ORDER_NOT_FOUND });
+  const conn = await getConnection();
+  try {
+    await conn.beginTransaction();
+    const [orderRow] = await conn.execute('SELECT * FROM member_orders WHERE order_no = ? AND user_id = ? FOR UPDATE', [orderNo, userId]) as any;
+    const order = orderRow?.[0] ? normalizeOrderRow(orderRow[0]) : null;
+    if (!order) {
+      await conn.rollback();
+      throw Object.assign(new Error('订单不存在'), { code: ErrorCodes.ORDER_NOT_FOUND });
+    }
+    if (order.status === 'paid' || order.payStatus === 'paid') {
+      await conn.rollback();
+      throw Object.assign(new Error('订单已支付，不能取消'), { code: ErrorCodes.ORDER_ALREADY_PAID });
+    }
+    if (['cancelled', 'closed', 'expired', 'failed'].includes(order.status)) {
+      await conn.rollback();
+      return { order: formatOrderForApi(order), cancelled: false };
+    }
+    await updateOrderByNo(conn, orderNo, {
+      status: 'cancelled',
+      pay_status: 'closed',
+    });
+    await writePaymentLog(conn, {
+      orderNo,
+      userId,
+      channel: 'wechat_jsapi',
+      eventType: 'failed',
+      status: 'success',
+      message: '订单已取消',
+    });
+    await conn.commit();
+    const updated = await getOrderForUpdate(conn, orderNo);
+    return { order: updated ? formatOrderForApi(updated) : formatOrderForApi(order), cancelled: true };
+  } catch (error) {
+    try { await conn.rollback(); } catch {}
+    throw error;
+  } finally {
+    conn.release();
   }
-  if (order.status === 'paid') {
-    throw Object.assign(new Error('订单已支付，不能取消'), { code: ErrorCodes.ORDER_ALREADY_PAID });
-  }
-  if (['cancelled', 'closed', 'expired', 'failed'].includes(order.status)) {
-    return { order: await getOwnOrder(orderNo, userId), cancelled: false };
-  }
-  await updateOrderByNo(null, orderNo, {
-    status: 'cancelled',
-    pay_status: 'closed',
-  });
-  await writePaymentLog(null, {
-    orderNo,
-    userId,
-    channel: 'wechat_jsapi',
-    eventType: 'failed',
-    status: 'success',
-    message: '订单已取消',
-  });
-  return { order: await getOwnOrder(orderNo, userId), cancelled: true };
 }
 
 export async function listPaymentLogs(orderNo: string, options: { page?: number; pageSize?: number } = {}) {
@@ -1468,14 +1530,16 @@ async function grantOrderBenefits(orderNo: string): Promise<{ success: boolean; 
         return { success: false, message: '会员套餐不存在' };
       }
 
-      const currentMembership = await queryOne<any>(
+      const [membershipRows] = await conn.execute(
         `SELECT id, level_after, expire_at
            FROM user_memberships
           WHERE user_id = ? AND status = 'active' AND expire_at > NOW(3)
           ORDER BY expire_at DESC
-          LIMIT 1`,
+          LIMIT 1
+          FOR UPDATE`,
         [order.userId],
-      );
+      ) as any;
+      const currentMembership = membershipRows?.[0] || null;
       const startFrom = currentMembership?.expire_at && new Date(currentMembership.expire_at).getTime() > Date.now()
         ? new Date(currentMembership.expire_at)
         : new Date();
@@ -1554,7 +1618,18 @@ async function grantOrderBenefits(orderNo: string): Promise<{ success: boolean; 
       try {
         await grantInviteMemberPurchaseReward(order.userId, order.id);
       } catch (error) {
-        console.warn('[payment-order] invite reward failed:', (error as any)?.message || error);
+        const errMsg = (error as any)?.message || '未知错误';
+        console.error(`[payment-order] Invite reward failed for order ${order.orderNo}, user ${order.userId}:`, errMsg);
+        // 记录失败日志，供后续人工或自动补发
+        await writePaymentLog(null, {
+          orderNo,
+          userId: order.userId,
+          channel: 'wechat_jsapi',
+          eventType: 'invite_reward_failed',
+          status: 'failed',
+          message: `邀请奖励发放失败: ${errMsg}`,
+          rawSummary: { orderId: order.id },
+        });
       }
     }
 

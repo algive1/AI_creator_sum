@@ -1,5 +1,6 @@
 // routes/admin-tiers.ts
 import { Router, Request, Response } from 'express';
+import rateLimit from 'express-rate-limit';
 import { adminAuthMiddleware } from '../middleware/auth';
 import { queryOne, query, getConnection } from '../utils/db';
 import { success, error } from '../utils/response';
@@ -7,9 +8,232 @@ import { parseJson } from '../utils/content-helpers';
 import { ErrorCodes } from '../types';
 import { decryptApiKey, encryptApiKey } from '../services/openai-adapter.service';
 import { AdapterRegistry } from '../services/adapters/adapter.registry';
-import { normalizeCapabilityKey } from '../services/model-capability.service';
+import { getModelFeaturesList, modelSupportsFeature, normalizeCapabilityKey } from '../services/model-capability.service';
+import { buildImageSizeCapabilities, findImageSizeOption, normalizeRatioPreset, normalizeResolutionPreset } from '../services/image-size-options.service';
 
 const router = Router();
+const MAX_PAGE_SIZE = 100;
+const realModelTestLimiter = rateLimit({
+  windowMs: 60_000,
+  max: positiveInt(process.env.ADMIN_AI_TEST_RATE_LIMIT_PER_MINUTE, 3),
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => String(req.user!.userId),
+  message: { code: 429, message: '后台真实 AI 测试过于频繁，请稍后重试', data: null },
+});
+
+function positiveInt(value: any, fallback: number): number {
+  const parsed = parseInt(String(value || ''), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function normalizeTierPricingMode(value: any): string {
+  const mode = String(value || 'fixed').trim();
+  return ['fixed', 'matrix', 'per_second_matrix', 'token_preauth'].includes(mode) ? mode : 'fixed';
+}
+
+function normalizeTierPricingRules(value: any): any {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return null;
+  const parsed = parseJson(value, {});
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+}
+
+const VIDEO_INPUT_MODES = ['text', 'first_frame', 'reference_images', 'first_last', 'source_video'];
+const VIDEO_REFERENCE_UPLOAD_MODES = ['none', 'first_frame', 'reference_images', 'first_last', 'source_video'];
+
+function optionalStringOption(value: any, allowed: string[]): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  const text = String(value).trim();
+  return allowed.includes(text) ? text : null;
+}
+
+function optionalNonNegativeInt(value: any): number | null {
+  if (value === undefined || value === null || value === '') return null;
+  const parsed = Math.floor(Number(value));
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function optionalBoolean(value: any): number | null {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value === 'boolean') return value ? 1 : 0;
+  if (typeof value === 'number') return value ? 1 : 0;
+  const text = String(value).trim().toLowerCase();
+  if (['true', '1', 'yes', 'on'].includes(text)) return 1;
+  if (['false', '0', 'no', 'off'].includes(text)) return 0;
+  return null;
+}
+
+function requireRealModelTestConfirmation(req: Request, res: Response): boolean {
+  if (req.body?.confirmRealCost === true || req.body?.confirm_real_cost === true) return true;
+  error(res, ErrorCodes.PARAM_ERROR, 'Real model test may call provider APIs and consume quota. Confirm before running.');
+  return false;
+}
+
+function shouldPaginate(req: Request): boolean {
+  return String(req.query.paginate || '') === '1' || req.query.page !== undefined || req.query.pageSize !== undefined;
+}
+
+function readPagination(req: Request) {
+  const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+  const pageSize = Math.min(MAX_PAGE_SIZE, Math.max(1, parseInt(String(req.query.pageSize || '20'), 10) || 20));
+  return { page, pageSize, offset: (page - 1) * pageSize };
+}
+
+function mapRealModelRow(r: any) {
+  const config = parseJson(r.config, {});
+  const tableCapabilities = normalizeCapabilitiesForAdmin(String(r.capability_keys || '').split(',').filter(Boolean));
+  const configCapabilities = normalizeCapabilitiesForAdmin(config.capabilities);
+  const capabilities = tableCapabilities.length ? tableCapabilities : configCapabilities;
+  return {
+    id: r.id, name: r.name, providerId: r.provider_id, providerName: r.provider_name, providerType: r.provider_type,
+    displayName: r.display_name || r.name,
+    modelType: r.model_type, subType: r.sub_type, apiModelName: r.api_model_name,
+    modelCode: r.api_model_name,
+    upstreamModelCode: r.upstream_model_code || "",
+    isAsync: !!r.is_async,
+    pointsCost: r.points_cost,
+    apiCostCents: r.api_cost_cents || 0,
+    queryTaskUrl: r.query_task_url || "",
+    requestTemplate: typeof r.request_template === "string" ? JSON.parse(r.request_template) : (r.request_template || {}),
+    resultPath: r.result_path || "",
+    statusMapping: typeof r.status_mapping === "string" ? JSON.parse(r.status_mapping) : (r.status_mapping || {}),
+    errorMapping: typeof r.error_mapping === "string" ? JSON.parse(r.error_mapping) : (r.error_mapping || {}),
+    timeoutSeconds: r.timeout_seconds || 120,
+    retryTimes: r.retry_times || 3,
+    retryDelayMs: r.retry_delay_ms || 1000,
+    dailyLimit: r.daily_limit || 0,
+    dailyLimitPerUser: r.daily_limit_per_user || 0,
+    maxConcurrency: r.max_concurrency || 5,
+    priority: r.priority || 0,
+    status: r.status, sortOrder: r.sort_order, remark: r.remark || "", createdAt: r.created_at,
+    config,
+    capabilities,
+    lastTestStatus: r.last_test_status || 'untested',
+    lastTestAt: r.last_test_at || null,
+    lastTestMessage: r.last_test_message || '',
+  };
+}
+
+function positiveModelId(value: any): number {
+  const id = Number(value);
+  return Number.isInteger(id) && id > 0 ? id : 0;
+}
+
+function normalizeBindingPayload(bindings: any[]) {
+  const seen = new Set<number>();
+  const result = bindings.map((binding, index) => {
+    const modelId = positiveModelId(binding?.modelId ?? binding?.model_id);
+    if (!modelId) throw Object.assign(new Error('请选择有效模型'), { code: ErrorCodes.PARAM_ERROR });
+    if (seen.has(modelId)) throw Object.assign(new Error('Duplicate model binding is not allowed'), { code: ErrorCodes.PARAM_ERROR });
+    seen.add(modelId);
+    return {
+      modelId,
+      bindingType: binding?.bindingType === 'fallback' || binding?.binding_type === 'fallback' || index > 0 ? 'fallback' : 'primary',
+      fallbackOrder: Math.max(0, parseInt(String(binding?.fallbackOrder ?? binding?.fallback_order ?? index), 10) || 0),
+      failoverOnError: binding?.failoverOnError !== false && binding?.failover_on_error !== false,
+      failoverOnTimeout: binding?.failoverOnTimeout !== false && binding?.failover_on_timeout !== false,
+      failoverOnRateLimit: binding?.failoverOnRateLimit !== false && binding?.failover_on_rate_limit !== false,
+    };
+  });
+  if (result.length && !result.some((binding) => binding.bindingType === 'primary')) {
+    result[0].bindingType = 'primary';
+    result[0].fallbackOrder = 0;
+  }
+  if (result.filter((binding) => binding.bindingType === 'primary').length > 1) {
+    throw Object.assign(new Error('只能设置一个主模型'), { code: ErrorCodes.PARAM_ERROR });
+  }
+  return result;
+}
+
+async function assertBindingsSupportTier(tierId: number, bindings: ReturnType<typeof normalizeBindingPayload>) {
+  const tier = await queryOne<any>(
+    `SELECT t.id, mf.feature_key, mf.feature_name
+       FROM model_tiers t
+       JOIN model_features mf ON mf.id = t.feature_id
+      WHERE t.id = ?`,
+    [tierId],
+  );
+  if (!tier) throw Object.assign(new Error('Feature entry not found'), { code: ErrorCodes.NOT_FOUND, status: 404 });
+
+  for (const binding of bindings) {
+    const model = await queryOne<any>(
+      `SELECT m.id, m.name, m.model_type, m.status, m.deleted_at,
+              p.status AS provider_status, p.deleted_at AS provider_deleted_at
+         FROM ai_models m
+         JOIN ai_model_providers p ON p.id = m.provider_id
+        WHERE m.id = ?
+        LIMIT 1`,
+      [binding.modelId],
+    );
+    if (!model || model.deleted_at || model.provider_deleted_at) {
+      throw Object.assign(new Error(`模型不存在或已删除：${binding.modelId}`), { code: ErrorCodes.PARAM_ERROR });
+    }
+    if (model.status !== 'active') {
+      throw Object.assign(new Error(`模型未启用：${model.name || binding.modelId}`), { code: ErrorCodes.PARAM_ERROR });
+    }
+    if (model.provider_status !== 'active') {
+      throw Object.assign(new Error(`Model provider is not active: ${model.name || binding.modelId}`), { code: ErrorCodes.PARAM_ERROR });
+    }
+    const compatible = await modelSupportsFeature(binding.modelId, tier.feature_key, model.model_type);
+    if (!compatible) {
+      throw Object.assign(new Error(`Model ${model.name || binding.modelId} does not support ${tier.feature_name || tier.feature_key}; choose another model.`), { code: ErrorCodes.PARAM_ERROR });
+    }
+  }
+}
+
+async function mapTierBindings(rows: any[], featureKey: string) {
+  const mapped = [];
+  for (const b of rows) {
+    const providerConfigured = Boolean(String(b.provider_api_base_url || '').trim() && String(b.provider_api_key || '').trim());
+    const capabilityOk = await modelSupportsFeature(Number(b.model_id), featureKey, b.model_type).catch(() => false);
+    const modelActive = b.model_status === 'active';
+    const providerActive = b.provider_status === 'active';
+    const canUse = modelActive && providerActive && providerConfigured && capabilityOk;
+    const unusableReason = !modelActive
+      ? 'Model is inactive'
+      : !providerActive
+        ? '供应商未启用'
+        : !capabilityOk
+          ? 'Capability mismatch'
+          : !providerConfigured
+            ? 'Provider is missing Base URL or API Key'
+            : '';
+    mapped.push({
+      id: b.id,
+      modelId: b.model_id,
+      modelName: b.model_name,
+      providerName: b.provider_name,
+      bindingType: b.binding_type,
+      fallbackOrder: b.fallback_order,
+      failoverOnError: !!b.failover_on_error,
+      failoverOnTimeout: !!b.failover_on_timeout,
+      failoverOnRateLimit: !!b.failover_on_rate_limit,
+      modelStatus: b.model_status,
+      providerStatus: b.provider_status,
+      providerConfigured,
+      capabilityOk,
+      canUse,
+      unusableReason,
+    });
+  }
+  return mapped;
+}
+
+async function getTierBindings(tierId: number, featureKey: string) {
+  const rows = await query<any>(
+    `SELECT tb.*, m.name as model_name, m.model_type, m.status AS model_status,
+            p.name as provider_name, p.status AS provider_status,
+            p.api_base_url AS provider_api_base_url, p.api_key AS provider_api_key
+       FROM tier_model_bindings tb
+       JOIN ai_models m ON m.id = tb.model_id AND m.deleted_at IS NULL
+       JOIN ai_model_providers p ON p.id = m.provider_id AND p.deleted_at IS NULL
+      WHERE tb.tier_id = ?
+      ORDER BY CASE tb.binding_type WHEN 'primary' THEN 0 ELSE 1 END, tb.fallback_order`,
+    [tierId],
+  );
+  return mapTierBindings(rows, featureKey);
+}
 
 // GET /model-tiers?feature=xxx
 router.get('/model-tiers', adminAuthMiddleware, async (req: Request, res: Response) => {
@@ -31,23 +255,17 @@ router.get('/model-tiers', adminAuthMiddleware, async (req: Request, res: Respon
     );
     const result = [];
     for (const r of rows) {
-      const binds = await query<any>(
-        'SELECT tb.*, m.name as model_name, p.name as provider_name FROM tier_model_bindings tb JOIN ai_models m ON m.id = tb.model_id JOIN ai_model_providers p ON p.id = m.provider_id WHERE tb.tier_id = ? ORDER BY tb.binding_type, tb.fallback_order',
-        [r.id]
-      );
+      const binds = await getTierBindings(r.id, r.feature_key);
       const cap = await queryOne<any>('SELECT * FROM tier_capabilities WHERE tier_id = ?', [r.id]);
       result.push({
         id: r.id, featureId: r.feature_id, featureKey: r.feature_key, featureName: r.feature_name,
         tierName: r.tier_name, tierKey: r.tier_key, description: r.description, tag: r.tag,
         iconUrl: r.icon_url || '', iconFileId: r.icon_file_id || null, pointsCost: r.points_cost, isDefault: !!r.is_default,
         isRecommended: !!r.is_recommended, sortOrder: r.sort_order, status: r.status,
+        pricingMode: r.pricing_mode || 'fixed',
+        pricingRules: parseJson(r.pricing_rules, null),
         qualityMultipliers: typeof r.quality_multipliers === 'string' ? JSON.parse(r.quality_multipliers) : (r.quality_multipliers || {}),
-        bindings: binds.map((b: any) => ({
-          id: b.id, modelId: b.model_id, modelName: b.model_name, providerName: b.provider_name,
-          bindingType: b.binding_type, fallbackOrder: b.fallback_order,
-          failoverOnError: !!b.failover_on_error, failoverOnTimeout: !!b.failover_on_timeout,
-          failoverOnRateLimit: !!b.failover_on_rate_limit,
-        })),
+        bindings: binds,
         capabilities: cap ? {
           supportedRatios: parseJson(cap.supported_ratios, []),
           supportedQualities: parseJson(cap.supported_qualities, []),
@@ -69,7 +287,13 @@ router.get('/model-tiers', adminAuthMiddleware, async (req: Request, res: Respon
           allowPostprocess: !!cap.allow_postprocess,
           postprocessModes: parseJson(cap.postprocess_modes, ['cover', 'contain', 'resize']),
           allowUpscale: !!cap.allow_upscale,
-          maxImages: cap.max_images, maxReferenceImages: cap.max_reference_images || 4, maxDurationSeconds: cap.max_duration_seconds,
+          maxImages: cap.max_images,
+          maxReferenceImages: cap.max_reference_images || 4,
+          inputMode: cap.input_mode || null,
+          minReferenceImages: cap.min_reference_images ?? null,
+          referenceUploadMode: cap.reference_upload_mode || null,
+          requiredReference: cap.required_reference === null || cap.required_reference === undefined ? null : !!cap.required_reference,
+          maxDurationSeconds: cap.max_duration_seconds,
         } : null,
       });
     }
@@ -80,19 +304,29 @@ router.get('/model-tiers', adminAuthMiddleware, async (req: Request, res: Respon
 // POST /model-tiers
 router.post('/model-tiers', adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
-    const { featureId, tierName, tierKey, description, tag, pointsCost, isDefault, isRecommended, sortOrder, iconFileId, qualityMultipliers } = req.body;
+    const { featureId, tierName, tierKey, description, tag, pointsCost, isDefault, isRecommended, sortOrder, iconFileId, qualityMultipliers, pricingMode, pricingRules } = req.body;
     if (!featureId || !tierName || !tierKey || pointsCost === undefined) { error(res, ErrorCodes.PARAM_ERROR, '缺少必要参数'); return; }
-    const [r] = await query<any>(
-      'INSERT INTO model_tiers (feature_id, tier_name, tier_key, description, tag, icon_file_id, points_cost, is_default, is_recommended, sort_order, status, quality_multipliers) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [featureId, tierName, tierKey, description || '', tag || '', iconFileId || null, pointsCost, isDefault ? 1 : 0, isRecommended ? 1 : 0, sortOrder || 0, 'active', JSON.stringify(qualityMultipliers || {})]
-    );
-    const tierId = (r as any).insertId;
-    // Auto-create empty capabilities
-    await query(
-      'INSERT IGNORE INTO tier_capabilities (tier_id, supported_ratios, supported_qualities, supported_styles, supported_size_modes, native_sizes, postprocess_modes) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [tierId, '[]', '[]', '[]', '["auto","ratio"]', '[]', '["cover","contain","resize"]']
-    );
-    success(res, { id: tierId });
+    const conn = await getConnection();
+    try {
+      await conn.beginTransaction();
+      const normalizedPricingRules = normalizeTierPricingRules(pricingRules);
+      const [r] = await conn.execute(
+        'INSERT INTO model_tiers (feature_id, tier_name, tier_key, description, tag, icon_file_id, points_cost, pricing_mode, pricing_rules, is_default, is_recommended, sort_order, status, quality_multipliers) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [featureId, tierName, tierKey, description || '', tag || '', iconFileId || null, pointsCost, normalizeTierPricingMode(pricingMode), normalizedPricingRules === undefined ? null : JSON.stringify(normalizedPricingRules), isDefault ? 1 : 0, isRecommended ? 1 : 0, sortOrder || 0, 'active', JSON.stringify(qualityMultipliers || {})]
+      );
+      const tierId = (r as any).insertId;
+      await conn.execute(
+        'INSERT INTO tier_capabilities (tier_id, supported_ratios, supported_qualities, supported_styles, supported_size_modes, native_sizes, postprocess_modes) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [tierId, '[]', '[]', '[]', '["auto","ratio"]', '[]', '["cover","contain","resize"]']
+      );
+      await conn.commit();
+      success(res, { id: tierId });
+    } catch (e: any) {
+      await conn.rollback();
+      throw e;
+    } finally {
+      conn.release();
+    }
   } catch (e: any) { error(res, ErrorCodes.SERVER_ERROR, '创建档位失败: ' + (e.message || '')); }
 });
 
@@ -100,7 +334,7 @@ router.post('/model-tiers', adminAuthMiddleware, async (req: Request, res: Respo
 router.put('/model-tiers/:id(\\d+)', adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id);
-    const { tierName, description, tag, pointsCost, isDefault, isRecommended, sortOrder, status, iconFileId, qualityMultipliers } = req.body;
+    const { tierName, description, tag, pointsCost, isDefault, isRecommended, sortOrder, status, iconFileId, qualityMultipliers, pricingMode, pricingRules } = req.body;
     const sets: string[] = []; const vals: any[] = [];
     if (tierName !== undefined) { sets.push('tier_name = ?'); vals.push(tierName); }
     if (description !== undefined) { sets.push('description = ?'); vals.push(description); }
@@ -112,22 +346,60 @@ router.put('/model-tiers/:id(\\d+)', adminAuthMiddleware, async (req: Request, r
     if (status) { sets.push('status = ?'); vals.push(status); }
     if (iconFileId !== undefined) { sets.push('icon_file_id = ?'); vals.push(iconFileId || null); }
     if (qualityMultipliers !== undefined) { sets.push('quality_multipliers = ?'); vals.push(JSON.stringify(qualityMultipliers || {})); }
-    if (sets.length === 0) { error(res, ErrorCodes.PARAM_ERROR, '没有可更新字段'); return; }
+    if (pricingMode !== undefined) { sets.push('pricing_mode = ?'); vals.push(normalizeTierPricingMode(pricingMode)); }
+    if (pricingRules !== undefined) {
+      const normalizedPricingRules = normalizeTierPricingRules(pricingRules);
+      sets.push('pricing_rules = ?');
+      vals.push(normalizedPricingRules === null ? null : JSON.stringify(normalizedPricingRules || {}));
+    }
+    if (sets.length === 0) { error(res, ErrorCodes.PARAM_ERROR, 'No fields to update'); return; }
     vals.push(id);
     await query('UPDATE model_tiers SET ' + sets.join(', ') + ' WHERE id = ?', vals);
     success(res, { updated: true });
   } catch { error(res, ErrorCodes.SERVER_ERROR, '更新档位失败'); }
 });
 
+router.delete('/model-tiers/:id(\\d+)', adminAuthMiddleware, async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id);
+  const conn = await getConnection();
+  try {
+    await conn.beginTransaction();
+    const [rows] = await conn.execute('SELECT id, tier_name, tier_key FROM model_tiers WHERE id = ? FOR UPDATE', [id]) as any;
+    const tier = rows?.[0];
+    if (!tier) {
+      await conn.rollback();
+      error(res, ErrorCodes.NOT_FOUND, 'Feature entry not found', 404);
+      return;
+    }
+    await conn.execute('DELETE FROM tier_model_bindings WHERE tier_id = ?', [id]);
+    await conn.execute('DELETE FROM tier_capabilities WHERE tier_id = ?', [id]);
+    await conn.execute('DELETE FROM model_tiers WHERE id = ?', [id]);
+    await conn.execute(
+      'INSERT INTO admin_operation_logs (admin_user_id, action, target_type, target_id, detail, created_at) VALUES (?, ?, ?, ?, ?, NOW(3))',
+      [req.user!.userId, 'model_tier.delete', 'model_tier', String(id), JSON.stringify({ tierName: tier.tier_name, tierKey: tier.tier_key })],
+    );
+    await conn.commit();
+    success(res, { deleted: true, id });
+  } catch (e: any) {
+    try { await conn.rollback(); } catch {}
+    error(res, ErrorCodes.SERVER_ERROR, e?.message || '删除功能入口失败');
+  } finally {
+    conn.release();
+  }
+});
+
 // GET /model-tiers/:id/bindings
 router.get('/model-tiers/:id(\\d+)/bindings', adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
-    const rows = await query<any>('SELECT tb.*, m.name as model_name, p.name as provider_name FROM tier_model_bindings tb JOIN ai_models m ON m.id = tb.model_id JOIN ai_model_providers p ON p.id = m.provider_id WHERE tb.tier_id = ? ORDER BY tb.binding_type, tb.fallback_order', [parseInt(req.params.id)]);
-    success(res, rows.map((r: any) => ({
-      id: r.id, modelId: r.model_id, modelName: r.model_name, providerName: r.provider_name,
-      bindingType: r.binding_type, fallbackOrder: r.fallback_order,
-      failoverOnError: !!r.failover_on_error, failoverOnTimeout: !!r.failover_on_timeout, failoverOnRateLimit: !!r.failover_on_rate_limit,
-    })));
+    const tier = await queryOne<any>(
+      `SELECT t.id, mf.feature_key
+         FROM model_tiers t
+         JOIN model_features mf ON mf.id = t.feature_id
+        WHERE t.id = ?`,
+      [parseInt(req.params.id)],
+    );
+    if (!tier) { error(res, ErrorCodes.NOT_FOUND, 'Feature entry not found', 404); return; }
+    success(res, await getTierBindings(tier.id, tier.feature_key));
   } catch { error(res, ErrorCodes.SERVER_ERROR, '获取绑定失败'); }
 });
 
@@ -135,18 +407,33 @@ router.get('/model-tiers/:id(\\d+)/bindings', adminAuthMiddleware, async (req: R
 router.put('/model-tiers/:id(\\d+)/bindings', adminAuthMiddleware, async (req: Request, res: Response) => {
   const tierId = parseInt(req.params.id);
   const { bindings } = req.body;
-  if (!Array.isArray(bindings)) { error(res, ErrorCodes.PARAM_ERROR, 'bindings 必须是数组'); return; }
+  if (!Array.isArray(bindings)) { error(res, ErrorCodes.PARAM_ERROR, 'bindings must be an array'); return; }
+  let normalizedBindings: ReturnType<typeof normalizeBindingPayload>;
+  try {
+    normalizedBindings = normalizeBindingPayload(bindings);
+    await assertBindingsSupportTier(tierId, normalizedBindings);
+  } catch (e: any) {
+    error(res, e?.code || ErrorCodes.SERVER_ERROR, e?.message || '保存绑定失败', e?.status || 200);
+    return;
+  }
 
   const conn = await getConnection();
   try {
     await conn.beginTransaction();
     await conn.execute('DELETE FROM tier_model_bindings WHERE tier_id = ?', [tierId]);
-    for (const b of bindings) {
+    for (const b of normalizedBindings) {
       await conn.execute('INSERT INTO tier_model_bindings (tier_id, model_id, binding_type, fallback_order, failover_on_error, failover_on_timeout, failover_on_rate_limit) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        [tierId, b.modelId, b.bindingType || 'primary', b.fallbackOrder || 0, b.failoverOnError !== false ? 1 : 0, b.failoverOnTimeout !== false ? 1 : 0, b.failoverOnRateLimit !== false ? 1 : 0]);
+        [tierId, b.modelId, b.bindingType, b.fallbackOrder, b.failoverOnError ? 1 : 0, b.failoverOnTimeout ? 1 : 0, b.failoverOnRateLimit ? 1 : 0]);
     }
     await conn.commit();
-    success(res, { updated: true });
+    const tier = await queryOne<any>(
+      `SELECT t.id, mf.feature_key
+         FROM model_tiers t
+         JOIN model_features mf ON mf.id = t.feature_id
+        WHERE t.id = ?`,
+      [tierId],
+    );
+    success(res, { updated: true, bindings: tier ? await getTierBindings(tier.id, tier.feature_key) : [] });
   } catch {
     await conn.rollback();
     error(res, ErrorCodes.SERVER_ERROR, '保存绑定失败');
@@ -163,6 +450,9 @@ router.put('/model-tiers/:id(\\d+)/capabilities', adminAuthMiddleware, async (re
     const pick = (key: string, fallback: any) => Object.prototype.hasOwnProperty.call(req.body, key) ? req.body[key] : fallback;
     const jsonPick = (key: string, dbKey: string, fallback: any[]) => pick(key, existing ? parseJson(existing[dbKey], fallback) : fallback);
     const numberPick = (key: string, dbKey: string, fallback: number) => Number(pick(key, existing?.[dbKey] ?? fallback) || fallback);
+    const optionalModePick = (key: string, dbKey: string, allowed: string[]) => optionalStringOption(pick(key, existing?.[dbKey] ?? null), allowed);
+    const optionalNumberPick = (key: string, dbKey: string) => optionalNonNegativeInt(pick(key, existing?.[dbKey] ?? null));
+    const optionalBooleanPick = (key: string, dbKey: string) => optionalBoolean(pick(key, existing?.[dbKey] ?? null));
     const booleanPick = (key: string, dbKey: string, fallback: boolean) => {
       const value = pick(key, existing ? !!existing[dbKey] : fallback);
       return value !== false ? 1 : 0;
@@ -170,8 +460,8 @@ router.put('/model-tiers/:id(\\d+)/capabilities', adminAuthMiddleware, async (re
     const {
       supportedRatios, supportedQualities, supportedStyles, supportedDurations, supportedCameraMoves,
       supportedAudioModes, defaultAudioMode,
-      supportedSizeModes, allowCustomPixels, nativeSizes, defaultRatio, maxWidth, maxHeight, minWidth, minHeight,
-      maxTotalPixels, maxAspectRatio, allowPostprocess, postprocessModes, allowUpscale, maxImages, maxReferenceImages, maxDurationSeconds,
+      supportedSizeModes, nativeSizes, defaultRatio,
+      postprocessModes,
     } = req.body;
     const next = {
       supportedRatios: supportedRatios ?? jsonPick('supportedRatios', 'supported_ratios', []),
@@ -196,26 +486,30 @@ router.put('/model-tiers/:id(\\d+)/capabilities', adminAuthMiddleware, async (re
       allowUpscale: booleanPick('allowUpscale', 'allow_upscale', false),
       maxImages: numberPick('maxImages', 'max_images', 1),
       maxReferenceImages: numberPick('maxReferenceImages', 'max_reference_images', 4),
+      inputMode: optionalModePick('inputMode', 'input_mode', VIDEO_INPUT_MODES),
+      referenceUploadMode: optionalModePick('referenceUploadMode', 'reference_upload_mode', VIDEO_REFERENCE_UPLOAD_MODES),
+      minReferenceImages: optionalNumberPick('minReferenceImages', 'min_reference_images'),
+      requiredReference: optionalBooleanPick('requiredReference', 'required_reference'),
       maxDurationSeconds: numberPick('maxDurationSeconds', 'max_duration_seconds', 30),
     };
     await query(
       `INSERT INTO tier_capabilities
        (tier_id, supported_ratios, supported_qualities, supported_styles, supported_durations, supported_camera_moves, supported_audio_modes, default_audio_mode,
         supported_size_modes, allow_custom_pixels, native_sizes, default_ratio, max_width, max_height, min_width, min_height,
-        max_total_pixels, max_aspect_ratio, allow_postprocess, postprocess_modes, allow_upscale, max_images, max_reference_images, max_duration_seconds)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        max_total_pixels, max_aspect_ratio, allow_postprocess, postprocess_modes, allow_upscale, max_images, max_reference_images, input_mode, reference_upload_mode, min_reference_images, required_reference, max_duration_seconds)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE supported_ratios=?, supported_qualities=?, supported_styles=?, supported_durations=?, supported_camera_moves=?, supported_audio_modes=?, default_audio_mode=?,
         supported_size_modes=?, allow_custom_pixels=?, native_sizes=?, default_ratio=?, max_width=?, max_height=?, min_width=?, min_height=?,
-        max_total_pixels=?, max_aspect_ratio=?, allow_postprocess=?, postprocess_modes=?, allow_upscale=?, max_images=?, max_reference_images=?, max_duration_seconds=?`,
+        max_total_pixels=?, max_aspect_ratio=?, allow_postprocess=?, postprocess_modes=?, allow_upscale=?, max_images=?, max_reference_images=?, input_mode=?, reference_upload_mode=?, min_reference_images=?, required_reference=?, max_duration_seconds=?`,
       [
         tierId, JSON.stringify(next.supportedRatios), JSON.stringify(next.supportedQualities), JSON.stringify(next.supportedStyles), JSON.stringify(next.supportedDurations), JSON.stringify(next.supportedCameraMoves), JSON.stringify(next.supportedAudioModes), next.defaultAudioMode,
         JSON.stringify(next.supportedSizeModes), next.allowCustomPixels, JSON.stringify(next.nativeSizes), next.defaultRatio,
         next.maxWidth, next.maxHeight, next.minWidth, next.minHeight, next.maxTotalPixels, next.maxAspectRatio,
-        next.allowPostprocess, JSON.stringify(next.postprocessModes), next.allowUpscale, next.maxImages, next.maxReferenceImages, next.maxDurationSeconds,
+        next.allowPostprocess, JSON.stringify(next.postprocessModes), next.allowUpscale, next.maxImages, next.maxReferenceImages, next.inputMode, next.referenceUploadMode, next.minReferenceImages, next.requiredReference, next.maxDurationSeconds,
         JSON.stringify(next.supportedRatios), JSON.stringify(next.supportedQualities), JSON.stringify(next.supportedStyles), JSON.stringify(next.supportedDurations), JSON.stringify(next.supportedCameraMoves), JSON.stringify(next.supportedAudioModes), next.defaultAudioMode,
         JSON.stringify(next.supportedSizeModes), next.allowCustomPixels, JSON.stringify(next.nativeSizes), next.defaultRatio,
         next.maxWidth, next.maxHeight, next.minWidth, next.minHeight, next.maxTotalPixels, next.maxAspectRatio,
-        next.allowPostprocess, JSON.stringify(next.postprocessModes), next.allowUpscale, next.maxImages, next.maxReferenceImages, next.maxDurationSeconds,
+        next.allowPostprocess, JSON.stringify(next.postprocessModes), next.allowUpscale, next.maxImages, next.maxReferenceImages, next.inputMode, next.referenceUploadMode, next.minReferenceImages, next.requiredReference, next.maxDurationSeconds,
       ]
     );
     success(res, { updated: true });
@@ -225,7 +519,7 @@ router.put('/model-tiers/:id(\\d+)/capabilities', adminAuthMiddleware, async (re
 // GET /model-features
 router.get('/model-features', adminAuthMiddleware, async (_req: Request, res: Response) => {
   try {
-    const rows = await query<any>('SELECT * FROM model_features WHERE status = ? ORDER BY sort_order', ['active']);
+    const rows = await getModelFeaturesList('active');
     success(res, rows.map((r: any) => ({ id: r.id, featureKey: r.feature_key, featureName: r.feature_name })));
   } catch { error(res, ErrorCodes.SERVER_ERROR, '获取功能列表失败'); }
 });
@@ -263,7 +557,7 @@ router.post('/real-models/preset', adminAuthMiddleware, async (req: Request, res
       await query(`UPDATE ai_model_providers SET ${sets.join(', ')}, updated_at = NOW(3) WHERE id = ?`, values);
     } else {
       if (!payload.apiKey) {
-        error(res, ErrorCodes.PARAM_ERROR, '首次添加供应商必须填写 API Key');
+        error(res, ErrorCodes.PARAM_ERROR, 'API Key is required when creating provider');
         return;
       }
       const [insertResult] = await query<any>(
@@ -308,49 +602,84 @@ router.post('/real-models/preset', adminAuthMiddleware, async (req: Request, res
 });
 
 // GET /real-models
-router.get('/real-models', adminAuthMiddleware, async (_req: Request, res: Response) => {
+router.get('/real-models', adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
+    const where: string[] = ['m.deleted_at IS NULL', 'p.deleted_at IS NULL'];
+    const params: any[] = [];
+    const keyword = String(req.query.keyword || '').trim();
+    const providerId = String(req.query.providerId || '').trim();
+    const modelType = String(req.query.modelType || '').trim();
+    const status = String(req.query.status || '').trim();
+    if (keyword) {
+      where.push('(m.name LIKE ? OR m.display_name LIKE ? OR m.api_model_name LIKE ? OR p.name LIKE ? OR m.remark LIKE ?)');
+      params.push(...Array(5).fill(`%${keyword}%`));
+    }
+    if (providerId) {
+      where.push('m.provider_id = ?');
+      params.push(parseInt(providerId, 10));
+    }
+    if (modelType) {
+      where.push('m.model_type = ?');
+      params.push(modelType);
+    }
+    if (status) {
+      where.push('m.status = ?');
+      params.push(status);
+    }
+    const whereSql = where.join(' AND ');
+    if (shouldPaginate(req)) {
+      const { page, pageSize, offset } = readPagination(req);
+      const [cnt] = await query<any>(
+        `SELECT COUNT(*) AS total
+           FROM ai_models m
+           JOIN ai_model_providers p ON p.id = m.provider_id
+          WHERE ${whereSql}`,
+        params,
+      );
+      const rows = await query<any>(
+        `SELECT m.*, p.name as provider_name, p.provider_type,
+                c.last_test_status, c.last_test_at, c.last_test_message,
+                caps.capability_keys
+           FROM ai_models m
+           JOIN ai_model_providers p ON p.id = m.provider_id
+           LEFT JOIN config_check_results c ON c.target_key = CONCAT('ai-model:', m.id)
+           LEFT JOIN (
+             SELECT model_id, GROUP_CONCAT(capability_key) AS capability_keys
+               FROM ai_model_capabilities
+              WHERE is_supported = 1
+              GROUP BY model_id
+           ) caps ON caps.model_id = m.id
+          WHERE ${whereSql}
+          ORDER BY p.name, m.name
+          LIMIT ? OFFSET ?`,
+        [...params, pageSize, offset],
+      );
+      const total = Number(cnt?.total || 0);
+      success(res, {
+        list: rows.map(mapRealModelRow),
+        pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) },
+      });
+      return;
+    }
+
     const rows = await query<any>(
       `SELECT m.*, p.name as provider_name, p.provider_type,
-              c.last_test_status, c.last_test_at, c.last_test_message
+              c.last_test_status, c.last_test_at, c.last_test_message,
+              caps.capability_keys
          FROM ai_models m
          JOIN ai_model_providers p ON p.id = m.provider_id
          LEFT JOIN config_check_results c ON c.target_key = CONCAT('ai-model:', m.id)
-        WHERE m.deleted_at IS NULL AND p.deleted_at IS NULL
+         LEFT JOIN (
+           SELECT model_id, GROUP_CONCAT(capability_key) AS capability_keys
+             FROM ai_model_capabilities
+            WHERE is_supported = 1
+            GROUP BY model_id
+         ) caps ON caps.model_id = m.id
+        WHERE ${whereSql}
         ORDER BY p.name, m.name`,
+      params,
     );
-    success(res, rows.map((r: any) => {
-      const config = parseJson(r.config, {});
-      const capabilities = normalizeCapabilitiesForAdmin(config.capabilities);
-      return ({
-        id: r.id, name: r.name, providerId: r.provider_id, providerName: r.provider_name, providerType: r.provider_type,
-        displayName: r.display_name || r.name,
-        modelType: r.model_type, subType: r.sub_type, apiModelName: r.api_model_name,
-        modelCode: r.api_model_name,
-        upstreamModelCode: r.upstream_model_code || "",
-        isAsync: !!r.is_async,
-        pointsCost: r.points_cost,
-        apiCostCents: r.api_cost_cents || 0,
-        queryTaskUrl: r.query_task_url || "",
-        requestTemplate: typeof r.request_template === "string" ? JSON.parse(r.request_template) : (r.request_template || {}),
-        resultPath: r.result_path || "",
-        statusMapping: typeof r.status_mapping === "string" ? JSON.parse(r.status_mapping) : (r.status_mapping || {}),
-        errorMapping: typeof r.error_mapping === "string" ? JSON.parse(r.error_mapping) : (r.error_mapping || {}),
-        timeoutSeconds: r.timeout_seconds || 120,
-        retryTimes: r.retry_times || 3,
-        retryDelayMs: r.retry_delay_ms || 1000,
-        dailyLimit: r.daily_limit || 0,
-        dailyLimitPerUser: r.daily_limit_per_user || 0,
-        maxConcurrency: r.max_concurrency || 5,
-        priority: r.priority || 0,
-        status: r.status, sortOrder: r.sort_order, remark: r.remark || "", createdAt: r.created_at,
-        config,
-        capabilities,
-        lastTestStatus: r.last_test_status || 'untested',
-        lastTestAt: r.last_test_at || null,
-        lastTestMessage: r.last_test_message || '',
-      });
-    }));
+    success(res, rows.map(mapRealModelRow));
   } catch { error(res, ErrorCodes.SERVER_ERROR, '获取真实模型失败'); }
 });
 
@@ -410,7 +739,7 @@ router.put('/real-models/:id(\\d+)', adminAuthMiddleware, async (req: Request, r
     if (pointsCost !== undefined) { sets.push('points_cost = ?'); vals.push(pointsCost); }
     if (apiCostCents !== undefined) { sets.push('api_cost_cents = ?'); vals.push(Number(apiCostCents || 0)); }
     if (req.body.config !== undefined) {
-      const existingModel = await queryOne<any>('SELECT config FROM ai_models WHERE id = ?', [id]);
+      const existingModel = await queryOne<any>('SELECT config FROM ai_models WHERE id = ? AND deleted_at IS NULL', [id]);
       const existingConfig = parseJson(existingModel?.config, {});
       const merged = { ...existingConfig, ...req.body.config };
       sets.push('config = ?');
@@ -418,19 +747,52 @@ router.put('/real-models/:id(\\d+)', adminAuthMiddleware, async (req: Request, r
     }
     if (status) { sets.push('status = ?'); vals.push(status); }
     if (remark !== undefined) { sets.push('remark = ?'); vals.push(remark); }
-    if (sets.length === 0) { error(res, ErrorCodes.PARAM_ERROR, '没有可更新字段'); return; }
+    if (sets.length === 0) { error(res, ErrorCodes.PARAM_ERROR, 'No fields to update'); return; }
+    const existing = await queryOne<any>('SELECT id FROM ai_models WHERE id = ? AND deleted_at IS NULL', [id]);
+    if (!existing) { error(res, ErrorCodes.NOT_FOUND, 'Model not found', 404); return; }
     vals.push(id);
-    await query('UPDATE ai_models SET ' + sets.join(', ') + ' WHERE id = ?', vals);
+    await query('UPDATE ai_models SET ' + sets.join(', ') + ', updated_at = NOW(3) WHERE id = ? AND deleted_at IS NULL', vals);
     success(res, { updated: true });
   } catch { error(res, ErrorCodes.SERVER_ERROR, '更新真实模型失败'); }
 });
 
-router.post('/real-models/:id(\\d+)/test', adminAuthMiddleware, async (req: Request, res: Response) => {
+router.delete('/real-models/:id(\\d+)', adminAuthMiddleware, async (req: Request, res: Response) => {
+  const conn = await getConnection();
+  try {
+    const modelId = parseInt(req.params.id, 10);
+    await conn.beginTransaction();
+    const [bindingResult] = await conn.execute('DELETE FROM tier_model_bindings WHERE model_id = ?', [modelId]) as any;
+    const [fallbackResult] = await conn.execute('DELETE FROM ai_model_fallback_rules WHERE model_id = ? OR fallback_model_id = ?', [modelId, modelId]) as any;
+    const [result] = await conn.execute(
+      'UPDATE ai_models SET deleted_at = NOW(3), updated_at = NOW(3) WHERE id = ? AND deleted_at IS NULL',
+      [modelId],
+    ) as any;
+    if (!Number(result?.affectedRows || 0)) {
+      await conn.rollback();
+      error(res, ErrorCodes.NOT_FOUND, 'Model not found', 404);
+      return;
+    }
+    await conn.commit();
+    success(res, {
+      deleted: true,
+      bindingDeleted: Number(bindingResult?.affectedRows || 0),
+      fallbackDeleted: Number(fallbackResult?.affectedRows || 0),
+    });
+  } catch {
+    await conn.rollback();
+    error(res, ErrorCodes.SERVER_ERROR, '删除真实模型失败');
+  } finally {
+    conn.release();
+  }
+});
+
+router.post('/real-models/:id(\\d+)/test', adminAuthMiddleware, realModelTestLimiter, async (req: Request, res: Response) => {
+  if (!requireRealModelTestConfirmation(req, res)) return;
   const modelId = parseInt(req.params.id, 10);
   const startedAt = Date.now();
   try {
     const model = await getRealModelWithProvider(modelId);
-    if (!model) { error(res, ErrorCodes.NOT_FOUND, '模型不存在', 404); return; }
+    if (!model) { error(res, ErrorCodes.NOT_FOUND, 'Model not found', 404); return; }
     const result = await runRealModelGenerationTest(model, req.body || {});
     const status = result.mappedStatus === 'completed' ? 'passed' : 'risk';
     const message = status === 'passed'
@@ -498,17 +860,17 @@ async function runRealModelGenerationTest(model: any, body: any) {
   if (!['image', 'video', 'text'].includes(modelType)) {
     throw new Error('当前仅支持图片、视频和文本真实模型测试');
   }
-  if (!model.api_base_url || !model.api_key) throw new Error('模型供应商缺少 Base URL 或 API Key');
+  if (!model.api_base_url || !model.api_key) throw new Error('Model provider is missing Base URL or API Key');
   const modelCode = String(model.upstream_model_code || model.api_model_name || '').trim();
   if (!modelCode) throw new Error('真实模型缺少模型 ID');
   const adapter = AdapterRegistry.get(model.provider_type || 'openai_compatible');
-  if (!adapter) throw new Error('当前供应商类型暂不支持真实模型测试');
+  if (!adapter) throw new Error('Provider type does not support real model test');
 
   const taskType = resolveTestTaskType(model, body);
   const prompt = String(body.prompt || '').trim() || defaultTestPrompt(model.model_type);
   const images = normalizeTestImages(body.images);
   if (['image_to_image', 'image_edit', 'image_to_video'].includes(taskType) && images.length === 0) {
-    throw new Error('该模型测试需要参考图，请在请求中传 images');
+    throw new Error('This model test requires reference images. Pass images in request.');
   }
   if (taskType === 'first_last_frame_video' && images.length < 2) {
     throw new Error('首尾帧视频模型测试需要传入两张参考图');
@@ -524,13 +886,7 @@ async function runRealModelGenerationTest(model: any, body: any) {
           topP: body.topP ?? body.top_p,
           maxTokens: body.maxTokens ?? body.max_tokens,
         }
-      : {
-          imageCount: 1,
-          nativeSize: body.nativeSize || body.resolution || '1024x1024',
-          quality: body.quality || 'standard',
-          ratio: body.ratio,
-          aspect_ratio: body.aspect_ratio,
-        };
+      : buildImageTestParams(model, modelConfig, body);
   const timeout = Math.max(5, Number(model.timeout_seconds || model.default_timeout || 120)) * 1000;
 
   const submit = await adapter.submitTask({
@@ -582,9 +938,9 @@ async function runRealModelGenerationTest(model: any, body: any) {
     }
   }
 
-  if (modelType === 'text' && !responseText) throw new Error('文本模型测试未返回可用文本结果');
+  if (modelType === 'text' && !responseText) throw new Error('Text model test returned no usable text result');
   if (modelType !== 'text' && mappedStatus === 'completed' && urls.length === 0) throw new Error('模型任务完成但未返回可用结果地址');
-  if (modelType !== 'text' && submit.type === 'sync' && urls.length === 0) throw new Error('模型测试未返回可用结果');
+  if (modelType !== 'text' && submit.type === 'sync' && urls.length === 0) throw new Error('Model test returned no usable result');
 
   return {
     resultType: submit.type,
@@ -596,6 +952,38 @@ async function runRealModelGenerationTest(model: any, body: any) {
     text: responseText,
     requestId: extractMetadataString(submit.result?.metadata, 'requestId'),
     cost,
+  };
+}
+
+function buildImageTestParams(model: any, modelConfig: Record<string, any>, body: any) {
+  const sizeCaps = buildImageSizeCapabilities({
+    modelName: model.name,
+    apiModelName: model.api_model_name,
+    upstreamModelCode: model.upstream_model_code,
+    providerType: model.provider_type,
+    modelConfig,
+    ratios: Array.isArray(body.ratios) ? body.ratios : [],
+    qualities: Array.isArray(body.qualities) ? body.qualities : [],
+    maxImages: Number(body.maxImages || modelConfig.max_images || modelConfig.maxImages || 1),
+  });
+  const requestedRatio = normalizeRatioPreset(body.ratio || body.aspect_ratio || body.aspectRatio || (body.sizeMode === 'auto' ? 'auto' : ''));
+  const requestedResolution = normalizeResolutionPreset(body.resolutionPreset || body.resolution_preset || body.resolution || body.quality);
+  const sizeOption = findImageSizeOption(sizeCaps.sizeOptions, body.sizeKey || body.size_key, requestedRatio, requestedResolution)
+    || findImageSizeOption(sizeCaps.sizeOptions, sizeCaps.defaultSizeKey)
+    || sizeCaps.sizeOptions[0]
+    || null;
+  const imageCount = clampInt(body.imageCount ?? body.n, 1, Math.max(1, sizeCaps.maxImages || 1), 1);
+  const nativeSize = String(body.nativeSize || body.native_size || '').trim();
+
+  return {
+    imageCount,
+    nativeSize: nativeSize || (String(body.resolution || '').match(/^\d+x\d+$/i) ? String(body.resolution).toLowerCase() : ''),
+    quality: body.quality || 'standard',
+    ratio: sizeOption?.ratio || requestedRatio || body.ratio,
+    aspect_ratio: sizeOption?.ratio || requestedRatio || body.aspect_ratio,
+    resolutionPreset: sizeOption?.resolutionPreset || requestedResolution || undefined,
+    sizeKey: sizeOption?.key || body.sizeKey || body.size_key,
+    sizeOption: sizeOption || undefined,
   };
 }
 
@@ -680,12 +1068,12 @@ function normalizePresetPayload(body: any) {
   const providerType = String(body.providerType || 'openai_compatible').trim();
   const modelType = String(body.modelType || 'image').trim();
   const supportedModelTypes = new Set(['image', 'video', 'audio', 'text']);
-  if (!providerKey) throw new Error('请选择供应商');
+  if (!providerKey) throw new Error('Please choose a provider');
   if (!name) throw new Error('请输入供应商名称');
-  if (!openaiBaseUrl) throw new Error('请输入 OpenAI 地址');
-  if (!modelId) throw new Error('请输入模型 ID');
+  if (!openaiBaseUrl) throw new Error('Please enter OpenAI base URL');
+  if (!modelId) throw new Error('Please enter model ID');
   if (!['openai', 'openai_compatible', 'relay', 'custom'].includes(providerType)) throw new Error('供应商类型不支持');
-  if (!supportedModelTypes.has(modelType)) throw new Error('模型类型不支持');
+  if (!supportedModelTypes.has(modelType)) throw new Error('Unsupported model type');
   return {
     providerKey,
     name,

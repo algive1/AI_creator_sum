@@ -16,13 +16,15 @@ CREATE TABLE IF NOT EXISTS ad_reward_logs (
   user_id BIGINT UNSIGNED NOT NULL,
   ad_date DATE NOT NULL,
   session_id VARCHAR(64) NOT NULL,
+  ad_scene VARCHAR(32) NOT NULL DEFAULT 'reward',
   watch_order TINYINT NOT NULL DEFAULT 1,
   is_completed TINYINT(1) NOT NULL DEFAULT 0,
   reward_points INT NOT NULL DEFAULT 0,
   reward_status VARCHAR(16) NOT NULL DEFAULT 'pending',
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   UNIQUE INDEX uk_session_id (session_id),
-  INDEX idx_user_date (user_id, ad_date)
+  INDEX idx_user_date (user_id, ad_date),
+  INDEX idx_ad_reward_scene_user_date (ad_scene, user_id, ad_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS point_tasks (

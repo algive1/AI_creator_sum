@@ -18,6 +18,7 @@ export interface SubmitTaskParams {
     sizePlan?: Record<string, any>;
     [key: string]: any;
   };
+  requestTemplate?: any;
   callbackUrl?: string;
   providerConfig: ProviderConfig;
 }
@@ -161,6 +162,7 @@ const RESULT_VALUE_KEYS = [
   'file_url',
   'b64_json',
   'b64_video',
+  'remixed_from_video_id',   // Agnes AI video output URL
 ];
 
 export function extractParsedResult(raw: any, resultPath = ''): ParsedResult {

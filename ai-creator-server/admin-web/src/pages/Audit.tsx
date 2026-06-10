@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Table, Tag, Space, Button, Modal, Input, message, Image, Select } from 'antd';
 import api from '../services/api';
+import { EllipsisText, TimeText, nowrapActionStyle } from '../utils/tableCells';
 
 const REJECT_REASONS = ['违规内容', '政治敏感', '色情低俗', '暴力恐怖', '侵权内容', '低质生成', '其他'];
 
@@ -49,17 +50,17 @@ export default function Audit() {
     }},
     { title: '用户', dataIndex: 'nickname', width: 120 },
     { title: '风险等级', dataIndex: 'risk_level', width: 100, render: (v: string) => <Tag color={riskColors[v]}>{v === 'high' ? '高' : v === 'medium' ? '中' : '低'}</Tag> },
-    { title: '风险标签', dataIndex: 'risk_label', width: 160 },
-    { title: '标题', dataIndex: 'title' },
-    { title: '时间', dataIndex: 'created_at', width: 180 },
+    { title: '风险标签', dataIndex: 'risk_label', width: 160, render: (v: string) => <EllipsisText value={v} maxWidth={138} /> },
+    { title: '标题', dataIndex: 'title', width: 260, render: (v: string) => <EllipsisText value={v} maxWidth={238} /> },
+    { title: '时间', dataIndex: 'created_at', width: 180, render: (v: string) => <TimeText value={v} /> },
     { title: '操作', width: 150, render: (_: any, r: any) => (
-      <Space><Button size="small" type="primary" onClick={() => handlePass(r.task_id)}>通过</Button><Button size="small" danger onClick={() => openReject(r.task_id)}>拒绝</Button></Space>
+      <Space style={nowrapActionStyle}><Button size="small" type="primary" onClick={() => handlePass(r.task_id)}>通过</Button><Button size="small" danger onClick={() => openReject(r.task_id)}>拒绝</Button></Space>
     )},
   ];
 
   return (
     <div><h2>内容审核</h2>
-      <Table rowKey="id" columns={columns} dataSource={data} loading={loading} pagination={pagination} onChange={(p: any) => fetch(p.current)} />
+      <Table rowKey="id" columns={columns} dataSource={data} loading={loading} pagination={pagination} tableLayout="fixed" scroll={{ x: 1320 }} onChange={(p: any) => fetch(p.current)} />
 
       <Modal title="审核拒绝" open={!!rejectModal} onOk={confirmReject} onCancel={() => setRejectModal(null)} destroyOnClose>
         <div style={{ marginBottom: 12 }}>

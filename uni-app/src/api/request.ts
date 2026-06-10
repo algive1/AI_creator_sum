@@ -1,6 +1,7 @@
 import { appEnv } from '@/env/index';
 import { PAGE_ROUTES, STORAGE_KEYS } from '@/utils/constants';
 import { getFriendlyError } from '@/utils/error-map';
+import { showInsufficientPointsDialog, showMemberRequiredDialog } from '@/utils/app-dialog';
 
 export interface ApiResponse<T = unknown> {
   code: number;
@@ -18,6 +19,7 @@ export interface RequestOptions<TData = Record<string, unknown>> {
   header?: Record<string, string>;
   loading?: boolean | string;
   dedupe?: boolean;
+  cacheTtl?: number;
   timeout?: number;
   silent?: boolean;
 }
@@ -40,6 +42,18 @@ export interface WechatPaymentParams {
   package: string;
   signType: 'RSA' | 'MD5';
   paySign: string;
+}
+
+export interface WechatPaymentQueryResult {
+  granted?: boolean;
+  grantMessage?: string;
+  order?: {
+    status?: string;
+    payStatus?: string;
+    grantStatus?: string;
+    grantMessage?: string;
+  } | null;
+  [key: string]: unknown;
 }
 
 export class RequestError extends Error {
@@ -71,6 +85,7 @@ let loadingCount = 0;
 let redirectingLogin = false;
 let refreshPromise: Promise<boolean> | null = null;
 const pendingRequests = new Map<string, Promise<unknown>>();
+const responseCache = new Map<string, { expiresAt: number; data: unknown }>();
 
 export function setAuthHandlers(handlers: Partial<typeof authHandlers>) {
   authHandlers = { ...authHandlers, ...handlers };
@@ -78,13 +93,30 @@ export function setAuthHandlers(handlers: Partial<typeof authHandlers>) {
 
 export function request<T = unknown, TData = Record<string, unknown>>(options: RequestOptions<TData>): Promise<T> {
   const method = options.method || 'GET';
-  const shouldDedupe = options.dedupe !== false && method !== 'GET';
-  const requestKey = shouldDedupe ? buildDedupeKey(method, options.url, options.data) : '';
+  const shouldDedupe = options.dedupe !== false;
+  const requestKey = shouldDedupe
+    ? buildDedupeKey(method, options.url, {
+      data: options.data,
+      header: options.header,
+      token: authHandlers.getToken()
+    })
+    : '';
+  const cacheKey = method === 'GET' && options.cacheTtl && options.cacheTtl > 0 ? requestKey : '';
+  if (cacheKey) {
+    const cached = responseCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.data as T);
+    if (cached) responseCache.delete(cacheKey);
+  }
   if (requestKey && pendingRequests.has(requestKey)) return pendingRequests.get(requestKey) as Promise<T>;
 
-  const promise = rawRequest<T, TData>({ ...options, method }).finally(() => {
-    if (requestKey) pendingRequests.delete(requestKey);
-  });
+  const promise = rawRequest<T, TData>({ ...options, method })
+    .then((data) => {
+      if (cacheKey) responseCache.set(cacheKey, { data, expiresAt: Date.now() + Number(options.cacheTtl || 0) });
+      return data;
+    })
+    .finally(() => {
+      if (requestKey) pendingRequests.delete(requestKey);
+    });
   if (requestKey) pendingRequests.set(requestKey, promise);
   return promise;
 }
@@ -99,6 +131,17 @@ export function post<T = unknown>(url: string, data?: Record<string, unknown>, o
 
 export function put<T = unknown>(url: string, data?: Record<string, unknown>, options: Omit<RequestOptions, 'url' | 'method' | 'data'> = {}) {
   return request<T>({ ...options, url, method: 'PUT', data });
+}
+
+function parseResponseBody(raw: unknown): unknown {
+  if (typeof raw !== 'string') return raw;
+  const text = raw.trim();
+  if (!text) return raw;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return raw;
+  }
 }
 
 export function uploadFile<T = unknown>(options: UploadOptions): Promise<T> {
@@ -118,8 +161,11 @@ export function uploadFile<T = unknown>(options: UploadOptions): Promise<T> {
       } as Record<string, string>,
       success: (res) => {
         try {
-          const parsed = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
-          resolve(handleApiResponse<T>(parsed));
+          resolve(handleApiResponse<T>(parseResponseBody(res.data), {
+            url: resolveUrl(options.url || '/files/upload'),
+            statusCode: res.statusCode,
+            raw: res.data
+          }));
         } catch (error) {
           reject(error);
         }
@@ -159,23 +205,37 @@ export function downloadFile(url: string, options: { loading?: boolean | string;
 
 export async function payWithWechat(orderNo: string) {
   const params = await post<WechatPaymentParams>('/payments/wechat/jsapi', { orderNo }, { loading: '正在拉起支付' });
-  await new Promise<void>((resolve, reject) => {
-    if (typeof uni.requestPayment !== 'function') {
-      reject(new RequestError('当前平台不支持微信支付', 3002));
-      return;
-    }
-    uni.requestPayment({
-      provider: 'wxpay',
-      timeStamp: params.timeStamp,
-      nonceStr: params.nonceStr,
-      package: params.package,
-      signType: params.signType,
-      paySign: params.paySign,
-      success: () => resolve(),
-      fail: (error) => reject(error)
-    } as UniApp.RequestPaymentOptions);
-  });
-  return post('/payments/wechat/query', { orderNo }, { loading: '同步支付结果' });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      if (typeof uni.requestPayment !== 'function') {
+        reject(new RequestError('当前平台不支持微信支付', 3002));
+        return;
+      }
+      uni.requestPayment({
+        provider: 'wxpay',
+        timeStamp: params.timeStamp,
+        nonceStr: params.nonceStr,
+        package: params.package,
+        signType: params.signType,
+        paySign: params.paySign,
+        success: () => resolve(),
+        fail: (error) => reject(error)
+      } as UniApp.RequestPaymentOptions);
+    });
+  } catch (error) {
+    const err = normalizePaymentError(error);
+    handleError(err);
+    throw err;
+  }
+
+  const result = await post<WechatPaymentQueryResult>('/payments/wechat/query', { orderNo }, { loading: '同步支付结果' });
+  try {
+    assertWechatPaymentGranted(result);
+  } catch (error) {
+    handleError(error);
+    throw error;
+  }
+  return result;
 }
 
 async function rawRequest<T, TData>(options: RequestOptions<TData>): Promise<T> {
@@ -217,12 +277,16 @@ async function rawRequestOnce<T, TData>(options: RequestOptions<TData>): Promise
           return;
         }
         if (res.statusCode && res.statusCode >= 400) {
-          const body = res.data as Partial<ApiResponse>;
+          const body = parseResponseBody(res.data) as Partial<ApiResponse>;
           reject(new RequestError(body?.message || '请求失败', res.statusCode, body?.requestId, body));
           return;
         }
         try {
-          resolve(handleApiResponse<T>(res.data));
+          resolve(handleApiResponse<T>(parseResponseBody(res.data), {
+            url: resolveUrl(options.url),
+            statusCode: res.statusCode,
+            raw: res.data
+          }));
         } catch (error) {
           reject(error);
         }
@@ -251,7 +315,11 @@ async function refreshAccessToken(): Promise<boolean> {
             resolve(false);
             return;
           }
-          const payload = handleApiResponse<{ token: string; refreshToken?: string; expiresIn?: string }>(res.data);
+          const payload = handleApiResponse<{ token: string; refreshToken?: string; expiresIn?: string }>(parseResponseBody(res.data), {
+            url: resolveUrl('/auth/refresh-token'),
+            statusCode: res.statusCode,
+            raw: res.data
+          });
           if (!payload?.token) {
             resolve(false);
             return;
@@ -272,19 +340,51 @@ async function refreshAccessToken(): Promise<boolean> {
   return refreshPromise;
 }
 
-function handleApiResponse<T>(raw: unknown): T {
+function handleApiResponse<T>(raw: unknown, context?: { url?: string; statusCode?: number; raw?: unknown }): T {
   const body = raw as ApiResponse<T>;
   if (!body || typeof body !== 'object' || typeof body.code !== 'number') {
-    throw new RequestError('接口响应格式异常', -2, undefined, raw);
+    console.error('[API] Non-standard JSON response', buildNonJsonResponseDetail(context, raw));
+    throw new RequestError('接口未返回标准JSON，请检查服务地址或代理配置', -2, undefined, raw);
   }
   if (body.code === 0) return body.data;
   throw new RequestError(getFriendlyError(body.code, body.message), body.code, body.requestId, body);
+}
+
+function buildNonJsonResponseDetail(context: { url?: string; statusCode?: number; raw?: unknown } | undefined, parsed: unknown) {
+  const raw = context?.raw ?? parsed;
+  const text = typeof raw === 'string'
+    ? raw
+    : raw === undefined || raw === null
+      ? ''
+      : safeJsonStringify(raw);
+  return {
+    url: context?.url || '',
+    statusCode: context?.statusCode || 0,
+    preview: text.slice(0, 240),
+    parsed
+  };
+}
+
+function safeJsonStringify(value: unknown) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 function handleError(error: unknown) {
   const err = error instanceof RequestError ? error : normalizeNetworkError(error);
   if (err.code === 401) {
     redirectToLogin();
+    return;
+  }
+  if (err.code === 1002) {
+    showInsufficientPointsDialog({ message: err.message });
+    return;
+  }
+  if (err.code === 4603) {
+    showMemberRequiredDialog({ message: err.message });
     return;
   }
   uni.showToast({
@@ -338,6 +438,32 @@ function normalizeNetworkError(error: unknown) {
   const message = err?.errMsg || err?.message || '';
   if (/timeout/i.test(message)) return new RequestError('请求超时，请稍后重试', -3);
   return new RequestError(message || '网络连接失败，请检查网络', err?.code || -1, undefined, error);
+}
+
+function normalizePaymentError(error: unknown) {
+  if (error instanceof RequestError) return error;
+  const err = error as { errMsg?: string; message?: string; code?: number };
+  const message = String(err?.errMsg || err?.message || '');
+  if (/cancel|取消/i.test(message)) return new RequestError('已取消支付', 3001, undefined, error);
+  if (/not support|unsupported|不支持/i.test(message)) return new RequestError('当前平台不支持微信支付', 3002, undefined, error);
+  return new RequestError('微信支付失败，请稍后重试', err?.code || 3000, undefined, error);
+}
+
+function assertWechatPaymentGranted(result: WechatPaymentQueryResult) {
+  const order = result?.order || {};
+  const payStatus = String(order.payStatus || '');
+  const orderStatus = String(order.status || '');
+  const grantStatus = String(order.grantStatus || '');
+  const paid = payStatus === 'paid' || orderStatus === 'paid';
+  const granted = result.granted === true || grantStatus === 'granted';
+
+  if (!paid) {
+    throw new RequestError('支付结果未确认，请稍后在订单中查看', 3003, undefined, result);
+  }
+  if (!granted) {
+    const message = String(result.grantMessage || order.grantMessage || '').trim();
+    throw new RequestError(message || '支付已完成，权益发放处理中，请稍后查看或联系客服', 3004, undefined, result);
+  }
 }
 
 function buildDedupeKey(method: string, url: string, data: unknown) {

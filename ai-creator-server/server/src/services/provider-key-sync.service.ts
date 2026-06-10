@@ -21,6 +21,8 @@ const PROVIDER_KEY_MAPPINGS: ProviderKeyMapping[] = [
   { providerKey: 'wellapi', envKeys: ['WELLAPI_API_KEY'] },
   { providerKey: 'codesonline_image', envKeys: ['CODESONLINE_IMAGE_API_KEY', 'CODESONLINE_API_KEY'] },
   { providerKey: 'apimart', envKeys: ['APIMART_API_KEY'] },
+  { providerKey: 'runninghub', envKeys: ['RUNNINGHUB_API_KEY', 'RUNNINGHUB_API_TOKEN'] },
+  { providerKey: 'agnes_ai', envKeys: ['AGNES_API_KEY', 'AGNES_API_TOKEN', 'APIHUB_AGNES_API_KEY'] },
 ];
 
 function usableSecret(value: string | undefined): value is string {

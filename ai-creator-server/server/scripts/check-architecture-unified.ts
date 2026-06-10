@@ -69,6 +69,13 @@ function assertNoPattern(label: string, content: string, pattern: RegExp): void 
   if (pattern.test(content)) fail(label);
 }
 
+function sectionBetween(content: string, startNeedle: string, endNeedle: string): string {
+  const start = content.indexOf(startNeedle);
+  if (start < 0) return '';
+  const end = content.indexOf(endNeedle, start + startNeedle.length);
+  return end < 0 ? content.slice(start) : content.slice(start, end);
+}
+
 function assertMainlineRoutes(): void {
   assertRoutes('server/src/routes/orders.ts', [
     'POST /',
@@ -97,6 +104,7 @@ function assertMainlineRoutes(): void {
     'GET /me',
     'PUT /me',
     'GET /me/full',
+    'POST /me/phone',
   ]);
   assertRoutes('server/src/routes/tasks.ts', [
     'GET /',
@@ -211,15 +219,25 @@ function assertUsersAndTasks(): void {
   }
   if (/menuItems|creationActions/.test(userService + users)) fail('/users/me/full must not expose legacy menuItems or creationActions.');
 
-  // Model tiers now served by GET /api/v1/public/model-tiers (public-config.ts)
-  const pc = read("server/src/routes/public-config.ts");
-  for (const key of ["id", "tierId", "tierKey", "tierName", "description", "iconUrl", "pointsCost", "capabilities", "isDefault", "isRecommended"]) {
-    if (!new RegExp(`${key}\\s*:`).test(pc)) fail(`GET /api/v1/public/model-tiers must include ${key}.`);
+  const pc = read('server/src/routes/public-config.ts');
+  const modelTierList = read('server/src/services/model-tier-list.service.ts');
+  if (!/router\.get\(\s*['"`]\/public\/model-tiers['"`]/.test(pc)) {
+    fail('GET /api/v1/public/model-tiers must exist.');
   }
-  if (/api_key|secret_key|private_key|providerConfig|base_url/i.test(pc)) {
-    fail("GET /api/v1/public/model-tiers must not return sensitive provider/model configuration.");
+  if (!/getModelTierList\(feature,\s*req\.user\?\.userId\)/.test(pc)) {
+    fail('GET /api/v1/public/model-tiers must use getModelTierList with optional user discount.');
   }
-  if (!/modelId is not allowed/.test(tasks) || !/tierKey or tierId is required/.test(tasks)) {
+  for (const key of ['id', 'tierId', 'tierKey', 'tierName', 'description', 'iconUrl', 'pointsCost', 'capabilities', 'isDefault', 'isRecommended']) {
+    if (!new RegExp(`${key}\\s*:`).test(modelTierList)) fail(`GET /api/v1/public/model-tiers must include ${key}.`);
+  }
+  const publicModelTiersRoute = sectionBetween(pc, "router.get('/public/model-tiers'", '// GET /public/templates');
+  if (/api_key|secret_key|private_key|providerConfig|apiBaseUrl|providerApiKey/i.test(publicModelTiersRoute)
+    || /(?:apiKey|providerConfig|providerApiKey|apiBaseUrl|secretKey|privateKey)\s*:/.test(modelTierList)) {
+    fail('GET /api/v1/public/model-tiers must not return sensitive provider/model configuration.');
+  }
+  const rejectsModelId = /modelId is not allowed/.test(tasks) || /请使用模型档位/.test(tasks);
+  const requiresTier = /tierKey or tierId is required/.test(tasks) || /请先选择模型档位/.test(tasks);
+  if (!rejectsModelId || !requiresTier) {
     fail("POST /api/v1/tasks/image and /video must reject modelId and require tierId/tierKey.");
   }
 }

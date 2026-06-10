@@ -1,21 +1,53 @@
 <template>
   <view class="flow-page create-flow-page video-create-page">
     <view class="content">
-      <LegacyTopTabs v-model="videoMode" :items="videoModes" />
+      <LegacyTopTabs :model-value="videoMode" :items="videoModes" :labels="videoModeLabels" @select="selectVideoMode" />
 
       <TemplateStrip
         :templates="videoTemplates"
         @select="openTemplate"
       />
 
-      <block v-if="videoMode === '图生视频'">
-        <LegacyAssetUploadCard
-          title="上传素材"
-          :types="videoUploadTypes"
-          :uploaded-count="uploadedAssetCount"
-          :max-uploads="maxUploads"
-          @pick="pickAsset"
-        />
+      <view v-if="isFirstFrameVideoMode" class="card video-source-card single-image-source-card">
+        <view class="upload-head">
+          <view class="section-title">上传首图</view>
+          <view class="video-source-status">
+            <view v-if="hasFirstFrameImage" class="video-source-actions">
+              <view class="video-source-action" @tap.stop="replaceAsset(0)">替换</view>
+              <view class="video-source-action danger" @tap.stop="removeAsset(0)">删除</view>
+            </view>
+            <view v-else class="upload-count">已上传 0/1</view>
+          </view>
+        </view>
+        <view class="video-source-area image-source-area" :class="{ filled: hasFirstFrameImage }" @tap="handleFirstFrameSourceTap">
+          <block v-if="firstFramePreviewPath">
+            <image class="image-source-preview" :src="firstFramePreviewPath" mode="aspectFill" />
+          </block>
+          <block v-else>
+            <view class="upload-line-icon video-empty-icon">
+              <image class="line-icon-img" src="/static/icons/icon_upload_image_line.svg" mode="aspectFit" />
+              <text class="upload-line-plus">+</text>
+            </view>
+            <view class="video-empty-title">上传首图</view>
+            <view class="video-empty-desc">上传 1 张首帧参考图，生成时作为视频起始画面</view>
+          </block>
+        </view>
+      </view>
+      <view v-else-if="isReferenceVideoMode" class="reference-video-upload-section">
+        <view class="card video-source-card reference-image-source-card">
+          <view class="upload-head">
+            <view class="section-title">上传素材</view>
+            <view class="upload-count">{{ referenceUploadCountText }}</view>
+          </view>
+          <view class="video-source-area reference-image-source-area" :class="{ full: referenceUploadFull }" @tap="pickReferenceAsset">
+            <view class="upload-line-icon video-empty-icon">
+              <image class="line-icon-img" src="/static/icons/icon_upload_image_line.svg" mode="aspectFit" />
+              <text class="upload-line-plus">+</text>
+            </view>
+            <view class="video-empty-title">{{ referenceUploadTitle }}</view>
+            <view class="video-empty-desc">{{ referenceUploadDesc }}</view>
+          </view>
+        </view>
         <LegacyAssetStrip
           :assets="assets"
           :max="maxUploads"
@@ -23,7 +55,7 @@
           @remove="removeAsset"
           @hint="showUploadHint"
         />
-      </block>
+      </view>
       <view v-else-if="videoMode === '首尾帧'" class="card frame-upload-card">
         <view class="upload-head">
           <view class="section-title">上传首尾帧</view>
@@ -68,7 +100,7 @@
             <view v-else class="upload-count">已上传 0/1</view>
           </view>
         </view>
-        <view class="video-source-area" :class="{ filled: hasSourceVideo }" @tap="hasSourceVideo ? replaceAsset(0) : pickAsset('source_video')">
+        <view class="video-source-area" :class="{ filled: hasSourceVideo }" @tap="handleSourceVideoTap">
           <block v-if="sourceVideoPreviewPath">
             <video class="video-source-preview" :src="sourceVideoPreviewPath" controls object-fit="contain" @tap.stop />
           </block>
@@ -87,6 +119,7 @@
         v-model="prompt"
         :expanded="promptExpanded"
         :placeholder="promptPlaceholder"
+        :show-smart-fill="promptOptimizeEnabled"
         @toggle-expanded="promptExpanded = !promptExpanded"
         @paste="pastePrompt"
         @select-all="selectAllPrompt"
@@ -117,7 +150,7 @@
 
       <view class="card video-param-card">
         <view class="section-title">生成参数</view>
-        <view class="param-block">
+        <view v-if="resolutionOptions.length" class="param-block">
           <view class="param-block-head">
             <text class="param-block-title">视频清晰度</text>
             <text class="param-block-tip">{{ selectedResolution }}</text>
@@ -127,15 +160,16 @@
               v-for="item in resolutionOptions"
               :key="item"
               class="param-option resolution-option"
-              :class="{ active: selectedResolution === item }"
-              @tap="selectedResolution = item"
+              :class="{ active: selectedResolution === item, locked: resolutionLocked }"
+              :disabled="resolutionLocked"
+              @tap="selectResolution(item)"
             >
               <text class="param-option-title">{{ item }}</text>
               <text class="param-option-desc">输出分辨率</text>
             </button>
           </view>
         </view>
-        <view v-if="videoMode !== '视频编辑'" class="param-block">
+        <view v-if="videoMode !== '视频编辑' && sizeOptions.length" class="param-block">
           <view class="param-block-head">
             <text class="param-block-title">视频尺寸</text>
             <text class="param-block-tip">{{ selectedSizeMode === 'auto' ? '模型自动' : selectedRatio }}</text>
@@ -145,14 +179,16 @@
               v-for="item in sizeOptions"
               :key="item.key"
               class="param-option"
-              :class="{ active: selectedSizeKey === item.key }"
+              :class="{ active: selectedSizeKey === item.key, locked: sizeLocked }"
+              :disabled="sizeLocked"
               @tap="selectSizeOption(item)"
             >
               <text class="param-option-title">{{ item.label }}</text>
+              <text class="param-option-desc">{{ item.desc }}</text>
             </button>
           </view>
         </view>
-        <view class="param-block">
+        <view v-if="durationOptions.length" class="param-block">
           <view class="param-block-head">
             <text class="param-block-title">视频时长</text>
             <text class="param-block-tip">{{ selectedDurationLabel }}</text>
@@ -162,8 +198,9 @@
               v-for="item in durationOptions"
               :key="item"
               class="param-option duration-option"
-              :class="{ active: selectedDuration === item }"
-              @tap="selectedDuration = item"
+              :class="{ active: selectedDuration === item, locked: durationLocked }"
+              :disabled="durationLocked"
+              @tap="selectDuration(item)"
             >
               <text class="param-option-title">{{ durationLabel(item) }}</text>
             </button>
@@ -200,6 +237,49 @@
             </view>
           </view>
         </view>
+        <view class="param-block advanced-param-block">
+          <view class="advanced-param-toggle" @tap="advancedExpanded = !advancedExpanded">
+            <view class="advanced-param-copy">
+              <text class="advanced-param-title">高级参数</text>
+              <text class="advanced-param-desc">{{ advancedParamSummary }}</text>
+            </view>
+            <text class="advanced-param-state">{{ advancedExpanded ? '收起' : '展开' }}</text>
+          </view>
+          <view v-if="advancedExpanded" class="advanced-param-panel">
+            <view class="advanced-param-row">
+              <text class="advanced-param-label">随机种子</text>
+              <input
+                class="advanced-param-input"
+                v-model="advancedSeed"
+                type="number"
+                maxlength="20"
+                placeholder="可选"
+                placeholder-class="advanced-param-placeholder"
+              />
+            </view>
+            <view class="advanced-param-row">
+              <text class="advanced-param-label">帧率</text>
+              <input
+                class="advanced-param-input"
+                v-model="advancedFps"
+                type="number"
+                maxlength="3"
+                placeholder="模型默认"
+                placeholder-class="advanced-param-placeholder"
+              />
+            </view>
+            <view class="advanced-param-row">
+              <text class="advanced-param-label">音频URL</text>
+              <input
+                class="advanced-param-input"
+                v-model="advancedAudioUrl"
+                maxlength="500"
+                placeholder="可选"
+                placeholder-class="advanced-param-placeholder"
+              />
+            </view>
+          </view>
+        </view>
         <view class="param-block">
           <view class="param-block-head">
             <text class="param-block-title">模型档位</text>
@@ -221,6 +301,7 @@
               <text v-if="item.memberDiscountApplied" class="tier-discount">{{ discountLabel(item.memberDiscountPercent) }}</text>
             </button>
           </view>
+          <view v-if="!modelTiersLoading && !modelOptions.length" class="tier-empty">当前功能暂无可用模型档位</view>
         </view>
       </view>
     </view>
@@ -237,6 +318,7 @@
       @close="previewTemplate = null"
       @use="useTemplate"
     />
+    <AppDialogHost />
   </view>
 </template>
 
@@ -245,22 +327,26 @@ import { computed, reactive, ref, watch } from 'vue';
 import { onLoad, onShow } from '@dcloudio/uni-app';
 import LegacyTopTabs from '@/components/legacy/LegacyTopTabs.vue';
 import LegacyPromptComposer from '@/components/legacy/LegacyPromptComposer.vue';
-import LegacyAssetUploadCard from '@/components/legacy/LegacyAssetUploadCard.vue';
 import LegacyAssetStrip, { type LegacyAsset } from '@/components/legacy/LegacyAssetStrip.vue';
 import GenerationActions from '@/components/legacy/GenerationActions.vue';
+import AppDialogHost from '@/components/common/AppDialogHost.vue';
 import TemplatePreviewSheet from '@/components/business/TemplatePreviewSheet.vue';
 import TemplateStrip from '@/components/business/TemplateStrip.vue';
 import { createVideoTask, getVideoModels, optimizeVideoPrompt } from '@/api/ai-video';
+import { getTemplates, useTemplate as useContentTemplate } from '@/api/template';
 import { uploadAsset } from '@/api/upload';
 import { useAuthStore } from '@/stores/auth';
+import { useConfigStore } from '@/stores/config';
 import { DEFAULT_DURATIONS, FEATURE_KEYS, PAGE_ROUTES } from '@/utils/constants';
 import { assertPrompt } from '@/utils/validator';
 import { isDevFallbackEnabled, warnDevFallback } from '@/utils/dev-fallback';
 import { videoInspirationTemplates, type CreativeTemplate } from '@/utils/mock';
 import { discountLabel } from '@/utils/member';
+import { normalizeBackendMediaUrl } from '@/utils/media-url';
+import { showMemberRequiredDialog } from '@/utils/app-dialog';
 
 type SizeMode = 'auto' | 'ratio' | 'custom_pixels';
-type VideoMode = '文生视频' | '图生视频' | '首尾帧' | '视频编辑';
+type VideoMode = '文生视频' | '图生视频' | '参考生视频' | '首尾帧' | '视频编辑';
 type VideoSubType = 'text_to_video' | 'image_to_video' | 'first_last_frame_video' | 'video_edit';
 type FormState = { brand: string; sellingPoint: string; scene: string };
 type ModeState = {
@@ -281,6 +367,10 @@ type ModelCapabilities = {
   defaultAudioMode?: string;
   maxReferenceImages?: number;
   maxDurationSeconds?: number;
+  inputMode?: string;
+  minReferenceImages?: number;
+  referenceUploadMode?: 'none' | 'first_frame' | 'first_last' | 'reference_images' | 'source_video';
+  requiredReference?: boolean;
 };
 type ModelTier = {
   tierKey: string;
@@ -290,11 +380,13 @@ type ModelTier = {
   pointsCost: number;
   memberDiscountPercent: number;
   memberDiscountApplied: boolean;
+  pricing?: TierPricing | null;
   capabilities: ModelCapabilities;
   isDefault?: boolean;
 };
 
 const authStore = useAuthStore();
+const configStore = useConfigStore();
 type SizeOption = {
   key: string;
   label: string;
@@ -306,6 +398,25 @@ type AudioModeOption = {
   key: string;
   label: string;
   desc: string;
+};
+type TierPricingMode = 'fixed' | 'matrix' | 'per_second_matrix' | 'token_preauth';
+type TierPricingRule = {
+  conditions?: Record<string, unknown>;
+  pointsCost?: number;
+  unitPoints?: number;
+  preauthPoints?: number;
+  label?: string;
+};
+type TierPricing = {
+  mode?: TierPricingMode;
+  unit?: 'points';
+  defaultParams?: Record<string, unknown>;
+  rules?: TierPricingRule[];
+  defaultPointsCost?: number;
+  defaultUnitPoints?: number;
+  preauthPoints?: number;
+  memberDiscountPercent?: number;
+  memberDiscountApplied?: boolean;
 };
 type InputAssetMeta = {
   type: string;
@@ -323,14 +434,28 @@ type FrameSlot = {
   asset: LegacyAsset | null;
 };
 
-const videoModes: VideoMode[] = ['文生视频', '图生视频', '首尾帧', '视频编辑'];
+const videoModes: VideoMode[] = ['文生视频', '图生视频', '参考生视频', '首尾帧', '视频编辑'];
+const videoModeLabels: Partial<Record<VideoMode, string>> = {
+  图生视频: '首图视频',
+  参考生视频: '图生视频'
+};
+const VIDEO_DRAFT_KEY = 'ai_creator_video_task_draft';
 const videoMode = ref<VideoMode>('图生视频');
 const selectedTemplate = ref('');
 const previewTemplate = ref<CreativeTemplate | null>(null);
-const videoTemplates = videoInspirationTemplates as CreativeTemplate[];
+const backendVideoTemplates = ref<CreativeTemplate[]>([]);
+const videoTemplates = computed(() => {
+  const feature = videoFeatureForMode();
+  const list = backendVideoTemplates.value.filter((item) => templateMatchesVideoFeature(item, feature));
+  if (list.length) return sortTemplatesForFeature(list, feature);
+  if (!isDevFallbackEnabled) return [];
+  const fallback = (videoInspirationTemplates as CreativeTemplate[]).filter((item) => templateMatchesVideoFeature(item, feature));
+  return fallback.length ? fallback : videoInspirationTemplates as CreativeTemplate[];
+});
 const videoStates = reactive<Record<VideoMode, ModeState>>({
   文生视频: createModeState(),
   图生视频: createModeState(),
+  参考生视频: createModeState(),
   首尾帧: createModeState(),
   视频编辑: createModeState()
 });
@@ -342,37 +467,54 @@ const prompt = computed({
 const form = computed(() => currentState.value.form);
 const assets = computed(() => currentState.value.assets);
 const uploadedAssetCount = computed(() => assets.value.filter(Boolean).length);
+const firstFrameVideoAsset = computed(() => assets.value[0] || null);
+const firstFramePreviewPath = computed(() => firstFrameVideoAsset.value?.path || '');
+const hasFirstFrameImage = computed(() => Boolean(firstFramePreviewPath.value || currentState.value.uploadKeys[0]));
 const startFrameAsset = computed(() => assets.value[0] || null);
 const endFrameAsset = computed(() => assets.value[1] || null);
 const sourceVideoAsset = computed(() => assets.value[0] || null);
 const sourceVideoPreviewPath = computed(() => sourceVideoAsset.value?.path || '');
 const hasSourceVideo = computed(() => Boolean(sourceVideoPreviewPath.value || currentState.value.uploadKeys[0]));
 const promptExpanded = ref(false);
+const promptOptimizeEnabled = computed(() => configStore.features.promptOptimize !== false);
 const selectedSizeMode = ref<SizeMode>('ratio');
 const selectedRatio = ref('9:16');
 const selectedDuration = ref('5s');
 const selectedResolution = ref('720p');
 const selectedAudioMode = ref('silent');
 const preserveAudio = ref(true);
+const advancedExpanded = ref(false);
+const advancedSeed = ref('');
+const advancedFps = ref('');
+const advancedAudioUrl = ref('');
 const isSubmitting = ref(false);
+let draftTimer: ReturnType<typeof setTimeout> | null = null;
 const models = ref<Record<string, unknown>[]>([]);
 const selectedModelIndex = ref(1);
+const modelTiersLoading = ref(false);
+const modelTiersLoaded = ref(false);
 let videoModelRequestToken = 0;
+const VIDEO_TEMPLATE_FEATURES = ['text_to_video', 'image_to_video', 'first_last_frame_video', 'video_edit'];
+const MODEL_CACHE_TTL_MS = 60_000;
+const TEMPLATE_CACHE_TTL_MS = 60_000;
+const videoModelCache = new Map<string, { list: Record<string, unknown>[]; loadedAt: number }>();
+let videoTemplatesCache: { list: CreativeTemplate[]; loadedAt: number } | null = null;
+let videoTemplatesPromise: Promise<CreativeTemplate[]> | null = null;
 const DEFAULT_MAX_REFERENCE_IMAGES = 4;
 const videoRatios = ['16:9', '9:16', '1:1', '4:3', '3:4'];
-const videoUploadTypes = [
-  { type: 'product', label: '产品图', desc: '支持 JPG/PNG/WEBP', hint: '建议≤10MB' },
-  { type: 'reference', label: '参考图（可选）', desc: '支持 JPG/PNG', hint: '建议≤10MB' }
-];
 
 const fallbackCapabilities: ModelCapabilities = {
   ratios: videoRatios,
   qualities: ['720p', '1080p'],
   durations: [...DEFAULT_DURATIONS],
-  supportedSizeModes: ['auto', 'ratio'],
+  supportedSizeModes: ['ratio'],
   nativeSizes: ['auto'],
   defaultRatio: '9:16',
-  maxReferenceImages: DEFAULT_MAX_REFERENCE_IMAGES
+  maxReferenceImages: DEFAULT_MAX_REFERENCE_IMAGES,
+  inputMode: 'first_frame',
+  minReferenceImages: 0,
+  referenceUploadMode: 'first_frame',
+  requiredReference: false,
 };
 const fallbackModels: ModelTier[] = [
   {
@@ -412,6 +554,7 @@ const fallbackModels: ModelTier[] = [
 
 const promptPlaceholder = computed(() => {
   if (videoMode.value === '视频编辑') return '描述你想如何编辑源视频，例如裁剪节奏、换场景或增强画质';
+  if (videoMode.value === '参考生视频') return '描述多张参考图希望如何融合，包含主体、动作、镜头和风格';
   if (videoMode.value === '首尾帧') return '描述从首帧过渡到尾帧的镜头运动、节奏和氛围';
   return '写点什么... 输入完成1秒后自动保存，最多2000字';
 });
@@ -428,27 +571,46 @@ const modelOptions = computed<ModelTier[]>(() => {
     pointsCost: Number(item.pointsCost || 5),
     memberDiscountPercent: Number(item.memberDiscountPercent || 100),
     memberDiscountApplied: Boolean(item.memberDiscountApplied),
+    pricing: normalizePricing(item.pricing),
     capabilities: normalizeCapabilities(item.capabilities),
     isDefault: Boolean(item.isDefault)
-  }));
+  })).filter((item) => modelMatchesVideoMode(item.capabilities));
   if (source.length) return source;
-  return fallbackModels;
+  if (isDevFallbackEnabled && modelTiersLoaded.value) return fallbackModels.filter((item) => modelMatchesVideoMode(item.capabilities));
+  return [];
 });
-const modelTiersReady = computed(() => models.value.length > 0);
 const selectedModel = computed(() => modelOptions.value[selectedModelIndex.value] || modelOptions.value[0]);
-const selectedModelCost = computed(() => selectedModel.value?.pointsCost || 0);
-const selectedModelCostLabel = computed(() => modelTiersReady.value ? `${selectedModelCost.value} 创作点` : '加载中');
+const selectedModelCost = computed(() => estimateSelectedModelCost(selectedModel.value));
+const selectedModelCostLabel = computed(() => modelTiersLoading.value ? '加载中' : selectedModel.value ? `${selectedModelCost.value} 创作点` : '未配置');
 const selectedCapabilities = computed(() => selectedModel.value?.capabilities || fallbackCapabilities);
 const maxUploads = computed(() => normalizeMaxReferenceImages(selectedCapabilities.value.maxReferenceImages));
+const minReferenceImages = computed(() => normalizeMinReferenceImages(selectedCapabilities.value.minReferenceImages));
+const referenceUploadMode = computed(() => selectedCapabilities.value.referenceUploadMode || inferReferenceUploadMode(videoMode.value));
+const isFirstFrameVideoMode = computed(() => videoMode.value === '图生视频');
+const isReferenceVideoMode = computed(() => videoMode.value === '参考生视频');
+const referenceUploadFull = computed(() => uploadedAssetCount.value >= maxUploads.value);
+const referenceUploadCountText = computed(() => `已上传 ${uploadedAssetCount.value}/${maxUploads.value}`);
+const referenceUploadTitle = computed(() => {
+  if (referenceUploadFull.value) return '参考图已满';
+  return uploadedAssetCount.value > 0 ? '继续上传参考图' : '上传参考图';
+});
+const referenceUploadDesc = computed(() => (
+  referenceUploadFull.value
+    ? '可在下方预览区替换或删除'
+    : `上传生成视频参考画面，最多 ${maxUploads.value} 张`
+));
+const hasBoundModel = computed(() => Boolean(selectedModel.value));
 const supportedRatios = computed(() => {
   const modelRatios = selectedCapabilities.value.ratios?.length ? selectedCapabilities.value.ratios : [];
-  return uniqueStrings([...modelRatios, ...videoRatios]);
+  if (modelRatios.length) return uniqueStrings(modelRatios);
+  return hasBoundModel.value ? [] : videoRatios;
 });
 const resolutionOptions = computed<string[]>(() => {
-  const values = selectedCapabilities.value.qualities?.length ? selectedCapabilities.value.qualities : fallbackCapabilities.qualities || [];
-  return uniqueStrings(values);
+  const values = selectedCapabilities.value.qualities?.length ? selectedCapabilities.value.qualities : [];
+  if (values.length) return uniqueStrings(values);
+  return hasBoundModel.value ? [] : uniqueStrings(fallbackCapabilities.qualities || []);
 });
-const supportsAutoSize = computed(() => (selectedCapabilities.value.supportedSizeModes || ['auto', 'ratio']).includes('auto'));
+const supportsAutoSize = computed(() => (selectedCapabilities.value.supportedSizeModes || ['ratio']).includes('auto'));
 const selectedSizeKey = computed(() => selectedSizeMode.value === 'auto' ? 'auto' : selectedRatio.value);
 const sizeOptions = computed<SizeOption[]>(() => {
   const options: SizeOption[] = [];
@@ -456,28 +618,39 @@ const sizeOptions = computed<SizeOption[]>(() => {
     options.push({ key: 'auto', label: '自动', desc: '模型推荐', mode: 'auto' });
   }
   supportedRatios.value.forEach((item) => {
-    options.push({ key: item, label: item, desc: '视频比例', mode: 'ratio', ratio: item });
+    options.push({ key: item, label: ratioOptionLabel(item), desc: ratioOptionDesc(item), mode: 'ratio', ratio: item });
   });
   return options;
 });
 const durationOptions = computed<string[]>(() => {
-  const values = selectedCapabilities.value.durations?.length ? selectedCapabilities.value.durations : [...DEFAULT_DURATIONS];
-  return uniqueStrings(values);
+  const values = selectedCapabilities.value.durations?.length ? selectedCapabilities.value.durations : [];
+  if (values.length) return uniqueStrings(values);
+  return hasBoundModel.value ? [] : uniqueStrings([...DEFAULT_DURATIONS]);
 });
-const selectedDurationLabel = computed(() => durationLabel(selectedDuration.value));
+const resolutionLocked = computed(() => resolutionOptions.value.length <= 1);
+const sizeLocked = computed(() => sizeOptions.value.length <= 1);
+const durationLocked = computed(() => durationOptions.value.length <= 1);
+const selectedDurationLabel = computed(() => durationOptions.value.length ? durationLabel(selectedDuration.value) : '模型默认');
 const audioModeKeys = computed(() => {
   if (videoMode.value === '视频编辑') return [];
   return uniqueStrings((selectedCapabilities.value.audioModes || []).map(normalizeAudioMode).filter(Boolean));
 });
 const defaultAudioModeKey = computed(() => normalizeAudioMode(selectedCapabilities.value.defaultAudioMode || 'silent'));
-const audioModeOptions = computed<AudioModeOption[]>(() => audioModeKeys.value.map((key) => ({
-  key,
-  label: audioModeLabel(key),
-  desc: audioModeOptionDesc(key)
-})));
-const shouldShowAudioMode = computed(() => audioModeKeys.value.includes('audio'));
-const audioModeLocked = computed(() => audioModeOptions.value.length <= 1);
+const audioModeOptions = computed<AudioModeOption[]>(() => {
+  const keys = audioModeKeys.value;
+  const locked = keys.length <= 1;
+  const defaultKey = defaultAudioModeKey.value;
+  return keys.map((key) => ({
+    key,
+    label: audioModeLabel(key),
+    desc: audioModeOptionDesc(key, locked, defaultKey)
+  }));
+});
+const shouldShowAudioMode = computed(() => audioModeKeys.value.length > 0);
+const audioModeLocked = computed(() => audioModeKeys.value.length <= 1);
 const selectedAudioModeLabel = computed(() => audioModeLabel(selectedAudioMode.value));
+const hasAdvancedParams = computed(() => Object.keys(buildAdvancedVideoParams()).length > 0);
+const advancedParamSummary = computed(() => hasAdvancedParams.value ? '已填写' : '可选');
 const audioModeTip = computed(() => {
   if (!shouldShowAudioMode.value) return '';
   if (audioModeLocked.value) return `当前模型仅支持${selectedAudioModeLabel.value}`;
@@ -486,33 +659,86 @@ const audioModeTip = computed(() => {
     : audioModeLabel('silent');
   return `默认${defaultLabel}，当前选择${selectedAudioModeLabel.value}`;
 });
-const generationCostText = computed(() => modelTiersReady.value
-  ? `预计生成${selectedDurationLabel.value} · 消耗 ${selectedModelCost.value} 创作点`
-  : `预计生成${selectedDurationLabel.value} · 模型档位加载中`);
+const generationCostText = computed(() => modelTiersLoading.value
+  ? `预计生成${selectedDurationLabel.value} · 模型档位加载中`
+  : selectedModel.value
+    ? `预计生成${selectedDurationLabel.value} · 消耗 ${selectedModelCost.value} 创作点`
+    : `预计生成${selectedDurationLabel.value} · 请先配置模型档位`);
 
 onLoad((query) => {
+  restoreDraft();
   if (query?.prompt) prompt.value = decodeURIComponent(String(query.prompt));
 });
 
 onShow(() => {
+  configStore.hydrate();
+  configStore.loadPublicConfig().catch(() => undefined);
   authStore.hydrate();
   loadVideoModelsForMode();
+  loadVideoTemplates();
 });
 
 watch(videoMode, () => {
   loadVideoModelsForMode();
+  scheduleDraftSave();
 });
+
+watch([
+  () => videoMode.value,
+  () => selectedSizeMode.value,
+  () => selectedRatio.value,
+  () => selectedDuration.value,
+  () => selectedResolution.value,
+  () => selectedAudioMode.value,
+  () => preserveAudio.value,
+  () => advancedExpanded.value,
+  () => advancedSeed.value,
+  () => advancedFps.value,
+  () => advancedAudioUrl.value,
+  () => videoStates.文生视频.prompt,
+  () => videoStates.图生视频.prompt,
+  () => videoStates.参考生视频.prompt,
+  () => videoStates.首尾帧.prompt,
+  () => videoStates.视频编辑.prompt,
+  () => videoStates.文生视频.form,
+  () => videoStates.图生视频.form,
+  () => videoStates.参考生视频.form,
+  () => videoStates.首尾帧.form,
+  () => videoStates.视频编辑.form,
+], scheduleDraftSave, { deep: true });
 
 function loadVideoModelsForMode() {
   const featureKey = videoFeatureKey();
+  const configModels = configModelTiers(featureKey);
+  if (configModels.length) {
+    models.value = configModels;
+    modelTiersLoading.value = false;
+    modelTiersLoaded.value = true;
+    videoModelCache.set(featureKey, { list: configModels, loadedAt: Date.now() });
+    selectedModelIndex.value = defaultModelIndex();
+    normalizeVideoParams();
+    return;
+  }
+  const cached = videoModelCache.get(featureKey);
+  if (cached && Date.now() - cached.loadedAt < MODEL_CACHE_TTL_MS) {
+    models.value = cached.list;
+    modelTiersLoading.value = false;
+    modelTiersLoaded.value = true;
+    selectedModelIndex.value = defaultModelIndex();
+    normalizeVideoParams();
+    return;
+  }
   const requestToken = ++videoModelRequestToken;
   models.value = [];
+  modelTiersLoading.value = true;
+  modelTiersLoaded.value = false;
   selectedModelIndex.value = defaultModelIndex();
   normalizeVideoParams();
   getVideoModels(featureKey).then((res) => {
     if (requestToken !== videoModelRequestToken || featureKey !== videoFeatureKey()) return;
     const list = Array.isArray(res.list) ? res.list as Record<string, unknown>[] : [];
     if (!list.length && isDevFallbackEnabled) warnDevFallback('video-tiers', `GET /public/model-tiers?feature=${featureKey} returned empty list`);
+    videoModelCache.set(featureKey, { list, loadedAt: Date.now() });
     models.value = list;
     selectedModelIndex.value = defaultModelIndex();
     normalizeVideoParams();
@@ -522,21 +748,205 @@ function loadVideoModelsForMode() {
     models.value = [];
     selectedModelIndex.value = defaultModelIndex();
     normalizeVideoParams();
+  }).finally(() => {
+    if (requestToken !== videoModelRequestToken || featureKey !== videoFeatureKey()) return;
+    modelTiersLoading.value = false;
+    modelTiersLoaded.value = true;
   });
+}
+
+function selectVideoMode(value: string) {
+  if (!videoModes.includes(value as VideoMode)) return;
+  videoMode.value = value as VideoMode;
+}
+
+function loadVideoTemplates() {
+  if (videoTemplatesCache && Date.now() - videoTemplatesCache.loadedAt < TEMPLATE_CACHE_TTL_MS) {
+    backendVideoTemplates.value = videoTemplatesCache.list;
+    return;
+  }
+  if (!videoTemplatesPromise) {
+    videoTemplatesPromise = Promise.all(VIDEO_TEMPLATE_FEATURES.map((targetFeature) => (
+      getTemplates<{ list?: Record<string, unknown>[] }>({ templateType: 'video', targetFeature, page: 1, pageSize: 24 })
+    )))
+      .then((responses) => {
+      const merged = new Map<string, CreativeTemplate>();
+      responses.forEach((res) => {
+        const list = Array.isArray(res.list) ? res.list : [];
+        list.map(normalizeCreativeTemplate).forEach((item) => {
+          if (item) merged.set(String(item.id), item);
+        });
+      });
+      const list = Array.from(merged.values());
+      videoTemplatesCache = { list, loadedAt: Date.now() };
+      return list;
+    });
+  }
+  videoTemplatesPromise
+    .then((list) => {
+      backendVideoTemplates.value = list;
+    })
+    .catch(() => {
+      backendVideoTemplates.value = [];
+      if (isDevFallbackEnabled) warnDevFallback('video-templates', 'GET /templates?templateType=video&targetFeature=... failed');
+    })
+    .finally(() => {
+      videoTemplatesPromise = null;
+    });
+}
+
+function configModelTiers(featureKey: string) {
+  const tiers = configStore.publicConfig?.modelTiers;
+  if (!tiers || typeof tiers !== 'object') return [];
+  const list = (tiers as Record<string, unknown>)[featureKey];
+  return Array.isArray(list) ? list as Record<string, unknown>[] : [];
 }
 
 function openTemplate(item: CreativeTemplate) {
   previewTemplate.value = item;
 }
 
-function useTemplate(item: CreativeTemplate) {
+async function useTemplate(item: CreativeTemplate) {
+  if (item.canUse === false) {
+    showMemberRequiredDialog({
+      title: '开通会员使用模板',
+      message: item.lockReason || '该模板需开通会员后使用。'
+    });
+    return;
+  }
+  const backendTemplateId = numericTemplateId(item.id);
+  if (backendTemplateId) {
+    try {
+      await useContentTemplate(backendTemplateId);
+    } catch {
+      return;
+    }
+  }
   selectedTemplate.value = item.title;
-  const targetMode: VideoMode = item.mode === 'img2video' ? '图生视频' : '文生视频';
+  const targetMode: VideoMode = item.usageType === 'first_last_frame'
+    ? '首尾帧'
+    : item.usageType === 'reference'
+      ? '参考生视频'
+      : item.mode === 'img2video'
+        ? '图生视频'
+        : '文生视频';
   videoMode.value = targetMode;
   const targetState = videoStates[targetMode];
   selectedDuration.value = durationOptions.value.includes(item.duration || '') ? item.duration as string : selectedDuration.value;
   targetState.prompt = item.prompt;
   previewTemplate.value = null;
+}
+
+function normalizeCreativeTemplate(raw: Record<string, unknown>): CreativeTemplate | null {
+  const id = String(raw.id || raw.templateId || '');
+  const promptText = String(raw.prompt || raw.promptTemplate || '');
+  if (!id || !promptText) return null;
+  const targetFeature = normalizeTemplateFeature(raw.targetFeature || raw.target_feature || '');
+  const usageType = String(raw.usageType || raw.usage_type || '');
+  const displayConfig = normalizeDisplayConfig(raw.displayConfig || raw.display_config);
+  const params = raw.paramsJson && typeof raw.paramsJson === 'object' ? raw.paramsJson as Record<string, unknown> : {};
+  const tagsValue = raw.tagsJson || raw.tags;
+  const tags = Array.isArray(tagsValue)
+    ? tagsValue.map((item) => String(item)).filter(Boolean)
+    : String(tagsValue || '').split(/[,，、]/).map((item) => item.trim()).filter(Boolean);
+  const duration = String(raw.duration || params.duration || params.durationSeconds || '');
+  const coverUrl = normalizeBackendMediaUrl(raw.coverUrl || raw.cover_url);
+  const previewUrl = normalizeBackendMediaUrl(raw.previewUrl || raw.preview_url);
+  return {
+    id,
+    title: String(raw.title || raw.name || '视频模板'),
+    tags,
+    prompt: promptText,
+    mediaType: 'video',
+    coverUrl,
+    mediaUrl: previewUrl,
+    mode: videoTemplateMode(targetFeature, usageType),
+    category: String(raw.category || raw.scene || raw.style || ''),
+    duration: duration ? durationLabel(duration) : '',
+    targetFeature,
+    usageType,
+    displayConfig,
+    canUse: raw.canUse !== false,
+    canSave: raw.canSave !== false && raw.canUse !== false,
+    lockReason: String(raw.lockReason || '')
+  };
+}
+
+function videoFeatureForMode() {
+  if (videoMode.value === '图生视频') return 'image_to_video';
+  if (videoMode.value === '参考生视频') return 'image_to_video';
+  if (videoMode.value === '首尾帧') return 'first_last_frame_video';
+  if (videoMode.value === '视频编辑') return 'video_edit';
+  return 'text_to_video';
+}
+
+function numericTemplateId(value: unknown) {
+  const id = Number(value);
+  return Number.isInteger(id) && id > 0 ? id : 0;
+}
+
+function templateMatchesVideoFeature(item: CreativeTemplate, feature: string) {
+  const config = item.displayConfig;
+  if (config && typeof config === 'object' && config[feature]) return true;
+  const targetFeature = normalizeTemplateFeature(item.targetFeature || '');
+  if (targetFeature === feature) return true;
+  if (targetFeature) return false;
+  const usageFeature = videoFeatureFromUsage(item.usageType || '');
+  if (usageFeature) return usageFeature === feature;
+  if (item.mode === 'img2video') return feature === 'image_to_video';
+  if (item.mode === 'text2video') return feature === 'text_to_video';
+  return false;
+}
+
+function sortTemplatesForFeature(list: CreativeTemplate[], feature: string) {
+  return [...list].sort((a, b) => {
+    const aPin = templatePinMeta(a, feature);
+    const bPin = templatePinMeta(b, feature);
+    if (aPin.pinned !== bPin.pinned) return bPin.pinned - aPin.pinned;
+    if (aPin.pinOrder !== bPin.pinOrder) return bPin.pinOrder - aPin.pinOrder;
+    return numericTemplateId(b.id) - numericTemplateId(a.id);
+  });
+}
+
+function templatePinMeta(item: CreativeTemplate, feature: string) {
+  const config = item.displayConfig && typeof item.displayConfig === 'object'
+    ? item.displayConfig[feature] as Record<string, unknown> | undefined
+    : undefined;
+  return {
+    pinned: config?.pinned ? 1 : 0,
+    pinOrder: Number(config?.pinOrder || 0)
+  };
+}
+
+function videoTemplateMode(targetFeature: string, usageType = '') {
+  if (/reference|first_last_frame/i.test(usageType)) return 'img2video';
+  if (/image_to_video|first_last_frame/i.test(targetFeature)) return 'img2video';
+  return 'text2video';
+}
+
+function videoFeatureFromUsage(value: string) {
+  if (value === 'reference') return 'image_to_video';
+  if (value === 'first_last_frame') return 'first_last_frame_video';
+  if (value === 'video_edit') return 'video_edit';
+  if (value === 'generate') return 'text_to_video';
+  return '';
+}
+
+function normalizeTemplateFeature(value: unknown) {
+  const text = String(value || '').trim();
+  if (text === 'video_create') return 'text_to_video';
+  return text;
+}
+
+function normalizeDisplayConfig(value: unknown): Record<string, unknown> | null {
+  if (!value) return null;
+  if (typeof value === 'object') return value as Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(String(value));
+    return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
 }
 
 function pickAsset(type: string) {
@@ -547,13 +957,33 @@ function pickAsset(type: string) {
   chooseAndSetImage(type);
 }
 
+function handleFirstFrameSourceTap() {
+  if (hasFirstFrameImage.value) {
+    replaceAsset(0);
+    return;
+  }
+  pickAsset('product');
+}
+
+function pickReferenceAsset() {
+  pickAsset('reference');
+}
+
+function handleSourceVideoTap() {
+  if (hasSourceVideo.value) {
+    replaceAsset(0);
+    return;
+  }
+  pickAsset('source_video');
+}
+
 function replaceAsset(slotIndex: number) {
   const current = assets.value[slotIndex];
   if (videoMode.value === '视频编辑') {
     chooseAndSetVideo();
     return;
   }
-  chooseAndSetImage(current?.type || frameTypeBySlot(slotIndex) || 'reference', slotIndex);
+  chooseAndSetImage(current?.type || frameTypeBySlot(slotIndex) || defaultUploadAssetType(slotIndex), slotIndex);
 }
 
 function chooseAndSetImage(type: string, replaceIndex?: number) {
@@ -569,23 +999,26 @@ function chooseAndSetImage(type: string, replaceIndex?: number) {
       if (typeof slotIndex === 'number') {
         assetIndex = slotIndex;
         state.assets[slotIndex] = asset;
-      } else if (uploadedAssetCount.value < maxUploads.value) {
-        assetIndex = state.assets.length;
-        state.assets.push(asset);
       } else {
-        uni.showToast({ title: `最多上传${maxUploads.value}张素材`, icon: 'none' });
-        return;
+        assetIndex = nextAvailableAssetSlot(state, type);
+        if (assetIndex >= 0) {
+          state.assets[assetIndex] = asset;
+        } else {
+          uni.showToast({ title: `最多上传${maxUploads.value}张素材`, icon: 'none' });
+          return;
+        }
       }
       state.uploadKeys[assetIndex] = undefined;
       state.fileIds[assetIndex] = undefined;
       try {
-        const uploaded = await uploadAsset<Record<string, unknown>>(path, 'ref_image');
+        const uploaded = await uploadAsset<Record<string, unknown>>(path, 'ref_image', 'public');
         const fileId = extractFileId(uploaded);
         const key = isFrameUploadType(type) ? (fileId || uploaded.fileNo || uploaded.url) : (uploaded.fileNo || fileId || uploaded.url);
         state.uploadKeys[assetIndex] = key;
         state.fileIds[assetIndex] = fileId;
       } catch {
         // 上传失败时仍保留本地预览，方便用户继续调整。
+        uni.showToast({ title: '素材上传失败，请重试', icon: 'none' });
       }
     }
   });
@@ -604,12 +1037,13 @@ function chooseAndSetVideo() {
       state.uploadKeys[0] = undefined;
       state.fileIds[0] = undefined;
       try {
-        const uploaded = await uploadAsset<Record<string, unknown>>(path, 'ref_video');
+        const uploaded = await uploadAsset<Record<string, unknown>>(path, 'ref_video', 'public');
         const fileId = extractFileId(uploaded);
         state.fileIds[0] = fileId;
         state.uploadKeys[0] = fileId || uploaded.fileNo || uploaded.url;
       } catch {
         // 上传失败时仍保留本地预览，方便用户继续调整。
+        uni.showToast({ title: '视频上传失败，请重试', icon: 'none' });
       }
     }
   });
@@ -617,7 +1051,7 @@ function chooseAndSetVideo() {
 
 function removeAsset(slotIndex: number) {
   const state = currentState.value;
-  if (videoMode.value === '首尾帧' || videoMode.value === '视频编辑') {
+  if (videoMode.value === '图生视频' || videoMode.value === '首尾帧' || videoMode.value === '视频编辑') {
     state.assets[slotIndex] = null;
     state.uploadKeys[slotIndex] = undefined;
     state.fileIds[slotIndex] = undefined;
@@ -641,13 +1075,17 @@ function selectAllPrompt() {
 }
 
 async function optimizePrompt() {
+  if (!promptOptimizeEnabled.value) {
+    uni.showToast({ title: '智能优化功能已关闭', icon: 'none' });
+    return;
+  }
   if (!assertPrompt(prompt.value)) return;
   const result = await optimizeVideoPrompt<Record<string, unknown>>({
     featureKey: videoFeatureKey(),
     prompt: prompt.value,
-    ratio: videoMode.value !== '视频编辑' && selectedSizeMode.value === 'ratio' ? selectedRatio.value : undefined,
-    duration: selectedDuration.value,
-    resolution: selectedResolution.value
+    ratio: videoMode.value !== '视频编辑' && sizeOptions.value.length > 0 && selectedSizeMode.value === 'ratio' ? selectedRatio.value : undefined,
+    duration: durationOptions.value.length > 0 ? selectedDuration.value : undefined,
+    resolution: resolutionOptions.value.length > 0 ? selectedResolution.value : undefined
   });
   prompt.value = String(result.optimizedPrompt || result.optimized_prompt || prompt.value);
 }
@@ -659,18 +1097,27 @@ async function submit() {
     return;
   }
   if (!assertPrompt(prompt.value)) return;
-  if (!modelTiersReady.value) {
+  if (modelTiersLoading.value) {
     uni.showToast({ title: '模型档位加载中，请稍后再生成', icon: 'none' });
-    loadVideoModelsForMode();
     return;
   }
   if (!selectedModel.value) {
-    uni.showToast({ title: '请先在后台配置模型档位', icon: 'none' });
+    uni.showToast({ title: '请先在后台配置可用模型档位', icon: 'none' });
     return;
   }
   const state = currentState.value;
-  if (videoMode.value === '图生视频' && !state.assets.some(Boolean)) {
-    uni.showToast({ title: '请先上传产品图或参考图', icon: 'none' });
+  const requiredImageCount = Math.max(
+    videoMode.value === '图生视频' ? 1 : 0,
+    videoMode.value === '参考生视频' ? Math.max(1, minReferenceImages.value) : 0,
+  );
+  const uploadedImageCount = countFilledAssets(state);
+  const uploadedImageKeys = countUploadedKeys(state);
+  if ((videoMode.value === '图生视频' || videoMode.value === '参考生视频') && uploadedImageCount < requiredImageCount) {
+    uni.showToast({ title: videoMode.value === '参考生视频' ? `请至少上传 ${requiredImageCount} 张参考图` : '请先上传首图', icon: 'none' });
+    return;
+  }
+  if ((videoMode.value === '图生视频' || videoMode.value === '参考生视频') && uploadedImageKeys < requiredImageCount) {
+    uni.showToast({ title: '素材未上传成功，请重新上传', icon: 'none' });
     return;
   }
   if (videoMode.value === '首尾帧' && (!state.assets[0] || !state.assets[1])) {
@@ -696,12 +1143,15 @@ async function submit() {
   const featureKey = videoFeatureKey();
   const inputAssets = buildInputAssets(state);
   const audioMode = shouldShowAudioMode.value ? selectedAudioMode.value : undefined;
+  const advancedParams = buildAdvancedVideoParams();
   const params = {
-    resolution: selectedResolution.value,
+    resolution: resolutionOptions.value.length > 0 ? selectedResolution.value : undefined,
     preserveAudio: videoMode.value === '视频编辑' ? preserveAudio.value : undefined,
     videoFileId,
     audioMode,
-    inputAssets
+    referenceMode: referenceUploadMode.value,
+    inputAssets,
+    ...advancedParams
   };
   isSubmitting.value = true;
   try {
@@ -709,6 +1159,7 @@ async function submit() {
     featureKey,
     subType,
     videoMode: subType,
+    referenceMode: referenceUploadMode.value,
     prompt: buildFinalPrompt(prompt.value, state.form),
     tierKey: selectedModel.value.tierKey,
     firstFrameFileId,
@@ -716,12 +1167,13 @@ async function submit() {
     videoFileId,
     ...(videoMode.value !== '视频编辑' ? {
       sizeMode: selectedSizeMode.value,
-      ratio: selectedSizeMode.value === 'ratio' ? selectedRatio.value : undefined
+      ratio: sizeOptions.value.length > 0 && selectedSizeMode.value === 'ratio' ? selectedRatio.value : undefined
     } : {}),
-    duration: selectedDuration.value,
+    duration: durationOptions.value.length > 0 ? selectedDuration.value : undefined,
     audioMode,
     style: state.form.scene,
-    quality: selectedResolution.value,
+    quality: resolutionOptions.value.length > 0 ? selectedResolution.value : undefined,
+    ...advancedParams,
     autoScript: true,
     formData: { ...state.form },
     params,
@@ -729,7 +1181,7 @@ async function submit() {
   });
   const id = Number(result.id || result.taskId);
   if (!Number.isInteger(id) || id <= 0) {
-    uni.showToast({ title: 'Task submit failed', icon: 'none' });
+    uni.showToast({ title: '任务提交失败，请稍后重试', icon: 'none' });
     return;
   }
   cacheResultMeta(id, {
@@ -737,8 +1189,8 @@ async function submit() {
     videoMode: subType,
     videoModeLabel: videoMode.value,
     ratio: videoMode.value !== '视频编辑' ? selectedRatio.value : undefined,
-    duration: selectedDuration.value,
-    resolution: selectedResolution.value,
+    duration: durationOptions.value.length > 0 ? selectedDuration.value : undefined,
+    resolution: resolutionOptions.value.length > 0 ? selectedResolution.value : undefined,
     audioMode,
     firstFrameFileId,
     lastFrameFileId,
@@ -746,7 +1198,10 @@ async function submit() {
     inputAssets,
     params
   });
+  clearDraft();
   uni.redirectTo({ url: `${PAGE_ROUTES.result}?id=${id}&type=video` });
+  } catch {
+    // 请求层已展示错误提示，这里只避免页面产生未处理异常。
   } finally {
     isSubmitting.value = false;
   }
@@ -767,8 +1222,19 @@ function defaultModelIndex() {
 }
 
 function selectSizeOption(item: SizeOption) {
+  if (sizeLocked.value) return;
   selectedSizeMode.value = item.mode;
   if (item.ratio) selectedRatio.value = item.ratio;
+}
+
+function selectResolution(value: string) {
+  if (resolutionLocked.value) return;
+  selectedResolution.value = value;
+}
+
+function selectDuration(value: string) {
+  if (durationLocked.value) return;
+  selectedDuration.value = value;
 }
 
 function selectAudioMode(value: string) {
@@ -778,17 +1244,17 @@ function selectAudioMode(value: string) {
 
 function normalizeVideoParams() {
   const caps = selectedCapabilities.value;
-  const modes = caps.supportedSizeModes?.length ? caps.supportedSizeModes : ['auto', 'ratio'];
+  const modes = caps.supportedSizeModes?.length ? caps.supportedSizeModes : ['ratio'];
   if (selectedSizeMode.value === 'auto' && !modes.includes('auto')) {
     selectedSizeMode.value = 'ratio';
   }
-  if (selectedSizeMode.value !== 'auto' && !supportedRatios.value.includes(selectedRatio.value)) {
+  if (selectedSizeMode.value !== 'auto' && supportedRatios.value.length > 0 && !supportedRatios.value.includes(selectedRatio.value)) {
     selectedRatio.value = caps.defaultRatio && supportedRatios.value.includes(caps.defaultRatio) ? caps.defaultRatio : supportedRatios.value[0];
   }
-  if (!durationOptions.value.includes(selectedDuration.value)) {
+  if (durationOptions.value.length > 0 && !durationOptions.value.includes(selectedDuration.value)) {
     selectedDuration.value = durationOptions.value[0];
   }
-  if (resolutionOptions.value.length && !resolutionOptions.value.includes(selectedResolution.value)) {
+  if (resolutionOptions.value.length > 0 && !resolutionOptions.value.includes(selectedResolution.value)) {
     selectedResolution.value = resolutionOptions.value[0];
   }
   if (audioModeKeys.value.length && !audioModeKeys.value.includes(selectedAudioMode.value)) {
@@ -814,6 +1280,67 @@ function createModeState(): ModeState {
   };
 }
 
+function scheduleDraftSave() {
+  if (draftTimer) clearTimeout(draftTimer);
+  draftTimer = setTimeout(saveDraft, 500);
+}
+
+function saveDraft() {
+  const draft = {
+    videoMode: videoMode.value,
+    selectedSizeMode: selectedSizeMode.value,
+    selectedRatio: selectedRatio.value,
+    selectedDuration: selectedDuration.value,
+    selectedResolution: selectedResolution.value,
+    selectedAudioMode: selectedAudioMode.value,
+    preserveAudio: preserveAudio.value,
+    advancedExpanded: advancedExpanded.value,
+    advancedSeed: advancedSeed.value,
+    advancedFps: advancedFps.value,
+    advancedAudioUrl: advancedAudioUrl.value,
+    states: Object.fromEntries(Object.entries(videoStates).map(([key, state]) => [key, {
+      prompt: state.prompt,
+      form: { ...state.form },
+    }])),
+  };
+  uni.setStorageSync(VIDEO_DRAFT_KEY, draft);
+}
+
+function restoreDraft() {
+  const draft = uni.getStorageSync(VIDEO_DRAFT_KEY) as any;
+  if (!draft || typeof draft !== 'object') return;
+  const restoredMode = normalizeVideoModeKey(draft.videoMode);
+  if (restoredMode) videoMode.value = restoredMode;
+  selectedSizeMode.value = draft.selectedSizeMode || selectedSizeMode.value;
+  selectedRatio.value = draft.selectedRatio || selectedRatio.value;
+  selectedDuration.value = draft.selectedDuration || selectedDuration.value;
+  selectedResolution.value = draft.selectedResolution || selectedResolution.value;
+  selectedAudioMode.value = draft.selectedAudioMode || selectedAudioMode.value;
+  preserveAudio.value = draft.preserveAudio !== false;
+  advancedExpanded.value = Boolean(draft.advancedExpanded);
+  advancedSeed.value = String(draft.advancedSeed || '');
+  advancedFps.value = String(draft.advancedFps || '');
+  advancedAudioUrl.value = String(draft.advancedAudioUrl || '');
+  Object.entries(draft.states || {}).forEach(([key, value]) => {
+    const modeKey = normalizeVideoModeKey(key);
+    if (!modeKey) return;
+    const item = value as any;
+    videoStates[modeKey].prompt = String(item.prompt || '');
+    videoStates[modeKey].form = { ...videoStates[modeKey].form, ...(item.form || {}) };
+  });
+}
+
+function normalizeVideoModeKey(value: unknown): VideoMode | '' {
+  if (value === '首图视频') return '图生视频';
+  return videoModes.includes(value as VideoMode) ? value as VideoMode : '';
+}
+
+function clearDraft() {
+  if (draftTimer) clearTimeout(draftTimer);
+  draftTimer = null;
+  uni.removeStorageSync(VIDEO_DRAFT_KEY);
+}
+
 function normalizeCapabilities(value: unknown): ModelCapabilities {
   const caps = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
   return {
@@ -826,13 +1353,138 @@ function normalizeCapabilities(value: unknown): ModelCapabilities {
     defaultRatio: String(caps.defaultRatio || fallbackCapabilities.defaultRatio || '9:16'),
     defaultAudioMode: String(caps.defaultAudioMode || caps.default_audio_mode || 'silent'),
     maxReferenceImages: normalizeMaxReferenceImages(caps.maxReferenceImages),
-    maxDurationSeconds: Number(caps.maxDurationSeconds || fallbackCapabilities.maxDurationSeconds || 0)
+    maxDurationSeconds: Number(caps.maxDurationSeconds || fallbackCapabilities.maxDurationSeconds || 0),
+    inputMode: String(caps.inputMode || fallbackCapabilities.inputMode || 'first_frame'),
+    minReferenceImages: normalizeMinReferenceImages(caps.minReferenceImages),
+    referenceUploadMode: normalizeReferenceUploadMode(caps.referenceUploadMode || fallbackCapabilities.referenceUploadMode || 'first_frame'),
+    requiredReference: Boolean(caps.requiredReference),
   };
+}
+
+function normalizePricing(value: unknown): TierPricing | null {
+  if (!value || typeof value !== 'object') return null;
+  const source = value as Record<string, unknown>;
+  const mode = String(source.mode || 'fixed') as TierPricingMode;
+  return {
+    mode: ['fixed', 'matrix', 'per_second_matrix', 'token_preauth'].includes(mode) ? mode : 'fixed',
+    unit: 'points',
+    defaultParams: source.defaultParams && typeof source.defaultParams === 'object' ? source.defaultParams as Record<string, unknown> : {},
+    rules: Array.isArray(source.rules) ? source.rules as TierPricingRule[] : [],
+    defaultPointsCost: numberOrUndefined(source.defaultPointsCost),
+    defaultUnitPoints: numberOrUndefined(source.defaultUnitPoints),
+    preauthPoints: numberOrUndefined(source.preauthPoints),
+    memberDiscountPercent: numberOrUndefined(source.memberDiscountPercent),
+    memberDiscountApplied: Boolean(source.memberDiscountApplied),
+  };
+}
+
+function estimateSelectedModelCost(model?: ModelTier): number {
+  if (!model) return 0;
+  const pricing = model.pricing;
+  if (!pricing || pricing.mode === 'fixed') return Math.max(0, Number(model.pointsCost || 0));
+  const params = normalizePricingParams(mergePricingParams(pricing.defaultParams || {}, {
+    duration: durationOptions.value.length > 0 ? selectedDuration.value : undefined,
+    quality: resolutionOptions.value.length > 0 ? selectedResolution.value : undefined,
+    resolution: resolutionOptions.value.length > 0 ? selectedResolution.value : undefined,
+    audioMode: shouldShowAudioMode.value ? selectedAudioMode.value : undefined,
+  }));
+  const rule = findPricingRule(pricing.rules || [], params);
+  const discountPercent = Number(pricing.memberDiscountPercent ?? model.memberDiscountPercent ?? 100);
+  if (pricing.mode === 'matrix') {
+    const base = numberOrFallback(rule?.pointsCost ?? pricing.defaultPointsCost, model.basePointsCost || model.pointsCost || 0);
+    return applyMemberDiscount(base, discountPercent);
+  }
+  if (pricing.mode === 'per_second_matrix') {
+    const seconds = parseDurationSeconds(params.duration);
+    const unit = numberOrFallback(rule?.unitPoints ?? pricing.defaultUnitPoints, 0);
+    if (seconds > 0 && unit > 0) return applyMemberDiscount(seconds * unit, discountPercent);
+    return Math.max(0, Number(model.pointsCost || 0));
+  }
+  if (pricing.mode === 'token_preauth') {
+    const base = numberOrFallback(rule?.preauthPoints ?? pricing.preauthPoints, model.basePointsCost || model.pointsCost || 0);
+    return applyMemberDiscount(base, discountPercent);
+  }
+  return Math.max(0, Number(model.pointsCost || 0));
+}
+
+function normalizePricingParams(params: Record<string, unknown>) {
+  const out: Record<string, unknown> = {};
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') return;
+    out[key] = normalizePricingValue(key, value);
+  });
+  if (!out.quality && out.resolution) out.quality = out.resolution;
+  if (!out.resolution && out.quality) out.resolution = out.quality;
+  if (!out.duration && out.durationSeconds) out.duration = `${parseDurationSeconds(out.durationSeconds)}s`;
+  return out;
+}
+
+function mergePricingParams(defaultParams: Record<string, unknown>, params: Record<string, unknown>) {
+  const merged: Record<string, unknown> = { ...(defaultParams || {}) };
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') return;
+    merged[key] = value;
+  });
+  return merged;
+}
+
+function findPricingRule(rules: TierPricingRule[], params: Record<string, unknown>): TierPricingRule | null {
+  let best: TierPricingRule | null = null;
+  let bestScore = -1;
+  for (const source of rules) {
+    const conditions = normalizePricingParams(source.conditions || {});
+    const entries = Object.entries(conditions);
+    if (!entries.length) continue;
+    const matched = entries.every(([key, value]) => normalizePricingValue(key, params[key]) === normalizePricingValue(key, value));
+    if (matched && entries.length > bestScore) {
+      best = source;
+      bestScore = entries.length;
+    }
+  }
+  return best;
+}
+
+function normalizePricingValue(key: string, value: unknown): unknown {
+  if (key === 'duration' || key === 'durationRaw' || key === 'durationText') return `${parseDurationSeconds(value)}s`;
+  if (key === 'durationSeconds') return parseDurationSeconds(value);
+  if (key === 'audioMode') return normalizeAudioMode(String(value || ''));
+  if (['quality', 'resolution', 'mode', 'generationMode', 'generation_mode', 'version'].includes(key)) return String(value || '').trim().toLowerCase();
+  if (typeof value === 'string') return value.trim();
+  return value;
+}
+
+function parseDurationSeconds(value: unknown) {
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.max(0, Math.trunc(value));
+  const match = String(value || '').match(/(\d+(?:\.\d+)?)/);
+  return match ? Math.max(0, Math.trunc(Number(match[1]) || 0)) : 0;
+}
+
+function numberOrUndefined(value: unknown) {
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? Math.trunc(numberValue) : undefined;
+}
+
+function numberOrFallback(value: unknown, fallback: number) {
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) ? Math.max(0, Math.trunc(numberValue)) : Math.max(0, Math.trunc(Number(fallback) || 0));
+}
+
+function applyMemberDiscount(basePoints: number, discountPercent: number) {
+  const base = Math.max(0, Math.trunc(Number(basePoints) || 0));
+  if (base <= 0) return 0;
+  const percent = Math.min(100, Math.max(1, Number(discountPercent) || 100));
+  if (percent >= 100) return base;
+  return Math.max(1, Math.round(base * percent / 100));
 }
 
 function normalizeMaxReferenceImages(value: unknown) {
   const count = Math.floor(Number(value || DEFAULT_MAX_REFERENCE_IMAGES));
   return Number.isFinite(count) && count > 0 ? count : DEFAULT_MAX_REFERENCE_IMAGES;
+}
+
+function normalizeMinReferenceImages(value: unknown) {
+  const count = Math.floor(Number(value || 0));
+  return Number.isFinite(count) && count >= 0 ? count : 0;
 }
 
 function stringArray(value: unknown, fallback: string[] = []) {
@@ -846,6 +1498,7 @@ function uniqueStrings(values: string[]) {
 function durationLabel(value: string) {
   const text = String(value || '').trim();
   if (!text) return '';
+  if (text.toLowerCase() === 'auto') return '自动';
   const match = text.match(/^(\d+)(?:s)?$/i);
   return match ? `${match[1]}秒` : text;
 }
@@ -863,24 +1516,84 @@ function audioModeLabel(value: string) {
   return value || '无声';
 }
 
-function audioModeOptionDesc(value: string) {
-  if (audioModeLocked.value) return '当前模型仅支持';
-  if (value === defaultAudioModeKey.value) return '默认选项';
+function audioModeOptionDesc(value: string, locked = audioModeKeys.value.length <= 1, defaultKey = defaultAudioModeKey.value) {
+  if (locked) return '当前模型仅支持';
+  if (value === defaultKey) return '默认选项';
   return value === 'silent' ? '关闭声音' : '生成音频';
 }
 
+function modelMatchesVideoMode(caps: ModelCapabilities) {
+  const uploadMode = normalizeReferenceUploadMode(caps.referenceUploadMode || caps.inputMode || inferReferenceUploadMode(videoMode.value));
+  if (videoMode.value === '图生视频') return uploadMode === 'first_frame';
+  if (videoMode.value === '参考生视频') return uploadMode === 'reference_images';
+  if (videoMode.value === '首尾帧') return uploadMode === 'first_last';
+  if (videoMode.value === '视频编辑') return uploadMode === 'source_video';
+  return true;
+}
+
+function normalizeReferenceUploadMode(value: unknown) {
+  const text = String(value || '').trim().toLowerCase();
+  if (['first_frame', 'single_image', 'image_to_video'].includes(text)) return 'first_frame';
+  if (['first_last', 'first_last_frame', 'first_last_frame_video'].includes(text)) return 'first_last';
+  if (['reference_images', 'reference', 'reference_to_video'].includes(text)) return 'reference_images';
+  if (['source_video', 'video', 'video_edit'].includes(text)) return 'source_video';
+  if (['none', 'text'].includes(text)) return 'none';
+  return 'first_frame';
+}
+
+function inferReferenceUploadMode(mode: VideoMode) {
+  if (mode === '图生视频') return 'first_frame';
+  if (mode === '参考生视频') return 'reference_images';
+  if (mode === '首尾帧') return 'first_last';
+  if (mode === '视频编辑') return 'source_video';
+  return 'none';
+}
+
+function ratioOptionLabel(value: string) {
+  if (value === 'adaptive') return '跟随素材';
+  if (value === 'auto') return '自动';
+  return value;
+}
+
+function ratioOptionDesc(value: string) {
+  if (value === 'adaptive') return '按素材比例生成';
+  if (value === 'auto') return '模型自动选择';
+  return '视频比例';
+}
+
+function defaultUploadAssetType(slotIndex = -1) {
+  if (videoMode.value === '图生视频') return 'product';
+  return 'reference';
+}
+
+function countFilledAssets(state: ModeState) {
+  return state.assets.filter(Boolean).length;
+}
+
+function countUploadedKeys(state: ModeState) {
+  return state.uploadKeys.filter((item) => item !== undefined && item !== null && item !== '').length;
+}
+
 function imageTypeLabel(type: string) {
-  if (type === 'product') return '产品图';
+  if (type === 'product') return videoMode.value === '图生视频' ? '首图' : '主图';
   if (type === 'start_frame') return '开始帧';
   if (type === 'end_frame') return '结束帧';
   return '参考图';
 }
 
 function fixedAssetSlot(type: string) {
+  if (type === 'product' && videoMode.value === '图生视频') return 0;
   if (type === 'start_frame') return 0;
   if (type === 'end_frame') return 1;
   if (type === 'source_video') return 0;
   return undefined;
+}
+
+function nextAvailableAssetSlot(state: ModeState, type: string) {
+  for (let index = 0; index < maxUploads.value; index += 1) {
+    if (!state.assets[index]) return index;
+  }
+  return -1;
 }
 
 function isFrameUploadType(type: string) {
@@ -900,6 +1613,7 @@ function frameTypeBySlot(slotIndex: number) {
 
 function videoSubType(): VideoSubType {
   if (videoMode.value === '图生视频') return 'image_to_video';
+  if (videoMode.value === '参考生视频') return 'image_to_video';
   if (videoMode.value === '首尾帧') return 'first_last_frame_video';
   if (videoMode.value === '视频编辑') return 'video_edit';
   return 'text_to_video';
@@ -907,6 +1621,7 @@ function videoSubType(): VideoSubType {
 
 function videoFeatureKey() {
   if (videoMode.value === '图生视频') return FEATURE_KEYS.imageToVideo;
+  if (videoMode.value === '参考生视频') return FEATURE_KEYS.imageToVideo;
   if (videoMode.value === '首尾帧') return FEATURE_KEYS.firstLastFrameVideo;
   if (videoMode.value === '视频编辑') return FEATURE_KEYS.videoEdit;
   return FEATURE_KEYS.video;
@@ -934,6 +1649,33 @@ function buildInputAssets(state: ModeState): InputAssetMeta[] {
     });
     return items;
   }, []);
+}
+
+function buildAdvancedVideoParams() {
+  const params: Record<string, string | number> = {};
+  const seed = normalizeSeedParam(advancedSeed.value);
+  const fps = normalizePositiveInteger(advancedFps.value, 1, 120);
+  const audioUrl = advancedAudioUrl.value.trim().slice(0, 500);
+  if (seed !== undefined) params.seed = seed;
+  if (fps !== undefined) params.fps = fps;
+  if (audioUrl) params.audioUrl = audioUrl;
+  return params;
+}
+
+function normalizeSeedParam(value: string) {
+  const text = String(value || '').trim();
+  if (!text) return undefined;
+  const numberValue = Number(text);
+  if (Number.isSafeInteger(numberValue)) return numberValue;
+  return text.slice(0, 64);
+}
+
+function normalizePositiveInteger(value: string, min: number, max: number) {
+  const numberValue = Number(String(value || '').trim());
+  if (!Number.isFinite(numberValue)) return undefined;
+  const integer = Math.trunc(numberValue);
+  if (integer < min || integer > max) return undefined;
+  return integer;
 }
 
 function cacheResultMeta(id: number, meta: Record<string, unknown>) {
@@ -984,6 +1726,18 @@ function cacheResultMeta(id: number, meta: Record<string, unknown>) {
 .frame-upload-card,
 .video-source-card {
   padding: 24rpx 22rpx 22rpx;
+}
+
+.single-image-source-card {
+  margin-bottom: 24rpx;
+}
+
+.reference-video-upload-section {
+  width: 100%;
+}
+
+.reference-image-source-card {
+  margin-bottom: 16rpx;
 }
 
 .frame-upload-grid {
@@ -1185,6 +1939,30 @@ function cacheResultMeta(id: number, meta: Record<string, unknown>) {
   background: #111827;
 }
 
+.reference-image-source-area {
+  min-height: 420rpx;
+}
+
+.reference-image-source-area:active {
+  border-color: rgba(122, 92, 255, 0.5);
+  background: #f3f1ff;
+}
+
+.reference-image-source-area.full {
+  border-style: solid;
+  border-color: #e2e8f0;
+  background: #f8fbff;
+}
+
+.image-source-area.filled {
+  background: #ffffff;
+}
+
+.image-source-preview {
+  width: 100%;
+  height: 420rpx;
+}
+
 .video-source-preview {
   width: 100%;
   height: 420rpx;
@@ -1266,6 +2044,19 @@ function cacheResultMeta(id: number, meta: Record<string, unknown>) {
   min-height: 92rpx;
 }
 
+.tier-empty {
+  margin-top: 14rpx;
+  padding: 18rpx;
+  border: 2rpx dashed #dce8f6;
+  border-radius: 16rpx;
+  background: #f8fbff;
+  color: #64748b;
+  font-size: 22rpx;
+  font-weight: 800;
+  line-height: 1.35;
+  text-align: center;
+}
+
 .duration-option {
   min-height: 64rpx;
 }
@@ -1296,6 +2087,88 @@ function cacheResultMeta(id: number, meta: Record<string, unknown>) {
   font-size: 21rpx;
   font-weight: 700;
   line-height: 1.35;
+}
+
+.advanced-param-block {
+  border-top: 1rpx solid #edf2f8;
+  padding-top: 20rpx;
+}
+
+.advanced-param-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18rpx;
+  min-height: 74rpx;
+}
+
+.advanced-param-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.advanced-param-title {
+  color: #172033;
+  font-size: 25rpx;
+  font-weight: 900;
+  line-height: 1.2;
+}
+
+.advanced-param-desc {
+  margin-top: 6rpx;
+  color: #64748b;
+  font-size: 21rpx;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.advanced-param-state {
+  flex-shrink: 0;
+  color: #7a5cff;
+  font-size: 22rpx;
+  font-weight: 900;
+}
+
+.advanced-param-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12rpx;
+  margin-top: 12rpx;
+}
+
+.advanced-param-row {
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+  min-height: 76rpx;
+  padding: 0 18rpx;
+  border: 2rpx solid #dce8f6;
+  border-radius: 16rpx;
+  background: #f8fbff;
+}
+
+.advanced-param-label {
+  flex-shrink: 0;
+  width: 128rpx;
+  color: #172033;
+  font-size: 23rpx;
+  font-weight: 900;
+}
+
+.advanced-param-input {
+  flex: 1;
+  min-width: 0;
+  height: 72rpx;
+  color: #172033;
+  font-size: 24rpx;
+  font-weight: 800;
+  line-height: 72rpx;
+}
+
+.advanced-param-placeholder {
+  color: #9aa8b8;
+  font-weight: 700;
 }
 
 .tier-base-cost {

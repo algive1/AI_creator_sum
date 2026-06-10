@@ -4,7 +4,9 @@ export const STORAGE_KEYS = {
   user: 'ai_creator_user',
   profile: 'ai_creator_profile',
   config: 'ai_creator_config',
-  navigation: 'ai_creator_navigation'
+  navigation: 'ai_creator_navigation',
+  legalConsent: 'ai_creator_legal_consent',
+  announcementPopupState: 'ai_creator_announcement_popup_state'
 } as const;
 
 export const PAGE_ROUTES = {
@@ -24,9 +26,7 @@ export const PAGE_ROUTES = {
   invite: '/pages/invite/index',
   checkin: '/pages/checkin/index',
   tasks: '/pages/tasks/index',
-  generating: '/pages/generating/index',
   result: '/pages/result/index',
-  taskDetail: '/pages/task-detail/index',
   announcements: '/pages/announcements/index',
   agreement: '/pages/agreement/index'
 } as const;
@@ -42,6 +42,4 @@ export const FEATURE_KEYS = {
 } as const;
 
 export const DEFAULT_RATIOS = ['1:1', '16:9', '9:16', '4:5'] as const;
-export const DEFAULT_STYLES = ['写实', '高级感', '电商', '科技', '国潮', '卡通'] as const;
-export const DEFAULT_QUALITIES = ['标准', '高清', '超清'] as const;
 export const DEFAULT_DURATIONS = ['3s', '4s', '5s', '6s', '7s', '8s', '9s', '10s', '11s', '12s', '13s', '14s', '15s'] as const;

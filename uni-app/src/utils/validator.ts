@@ -1,16 +1,3 @@
-export function required(value: unknown) {
-  return String(value ?? '').trim().length > 0;
-}
-
-export function maxLength(value: unknown, length: number) {
-  return String(value ?? '').length <= length;
-}
-
-export function isPositiveId(value: unknown) {
-  const id = Number(value);
-  return Number.isInteger(id) && id > 0;
-}
-
 export function assertPrompt(prompt: string) {
   const text = prompt.trim();
   if (!text) {

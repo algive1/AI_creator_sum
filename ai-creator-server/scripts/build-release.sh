@@ -6,7 +6,7 @@ PROJECT_ROOT="$(cd -P "$SCRIPT_DIR/.." >/dev/null 2>&1 && pwd)"
 VERSION="${1:-}"
 SEMVER_PATTERN='^(0|[1-9][0-9]*)\.([0-9]|[1-9][0-9]*)\.([0-9]|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
 
-STAGING_ROOT="${RELEASE_STAGING_ROOT:-${TMPDIR:-/tmp}/ai-creator-release}"
+STAGING_ROOT="${RELEASE_STAGING_ROOT:-/tmp/ai-creator-release}"
 STAGING_DIR=""
 PACKAGE_PATH=""
 
@@ -24,8 +24,13 @@ usage() {
 Usage:
   bash scripts/build-release.sh 1.0.3
 
+  REQUIRE_WECHAT_PAY_READY=1 bash scripts/build-release.sh 1.0.3
+
 Creates:
   ai-creator-release-<version>.tar.gz
+
+Set REQUIRE_WECHAT_PAY_READY=1 to make the payment check fail unless
+wechat_pay.* is ready for real WeChat collection.
 USAGE
 }
 
@@ -84,15 +89,20 @@ run_build_checks() {
   local run_tmp="$STAGING_DIR/.tmp"
   mkdir -p "$run_tmp"
 
-  log "checking admin-web lint and build"
-  (cd "$STAGING_DIR/admin-web" && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm ci --include=dev && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run lint && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run build)
+  log "building admin-web dist from source"
+  (cd "$PROJECT_ROOT/admin-web" && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm ci --no-audit --no-fund && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run build)
+  rm -rf "$STAGING_DIR/admin-web/dist"
+  copy_dir "$PROJECT_ROOT/admin-web/dist" "$STAGING_DIR/admin-web/dist"
 
-  log "checking server lint, encoding and build"
-  (cd "$STAGING_DIR/server" && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm ci --include=dev && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run lint && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run check:encoding && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run build)
+  log "checking admin-web lint"
+  (cd "$STAGING_DIR/admin-web" && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm ci --include=dev --no-audit --no-fund && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run lint)
+
+  log "checking server lint, architecture, payment, encoding, migrations, video pricing, Xiaoma video params and build"
+  (cd "$STAGING_DIR/server" && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm ci --include=dev --no-audit --no-fund && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run lint && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run check:architecture-unified && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run check:payment && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run check:encoding && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run check:migrations-idempotent && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run check:video-pricing && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run check:xiaoma-video-params && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run build)
 }
 
 remove_build_artifacts() {
-  rm -rf "$STAGING_DIR/admin-web/node_modules" "$STAGING_DIR/admin-web/dist"
+  rm -rf "$STAGING_DIR/admin-web/node_modules"
   rm -rf "$STAGING_DIR/server/node_modules" "$STAGING_DIR/server/dist"
   rm -rf "$STAGING_DIR/.tmp"
   find "$STAGING_DIR" -name '*.tsbuildinfo' -type f -delete

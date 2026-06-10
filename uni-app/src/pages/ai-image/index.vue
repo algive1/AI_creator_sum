@@ -1,7 +1,7 @@
 <template>
   <view class="flow-page create-flow-page image-create-page">
     <view class="content">
-      <LegacyTopTabs v-model="imageType" :items="imageTypes" />
+      <LegacyTopTabs :model-value="imageType" :items="imageTypes" @select="selectImageType" />
 
       <TemplateStrip
         :templates="activeTemplates"
@@ -11,7 +11,7 @@
       <block v-if="imageType === '图生图'">
         <LegacyAssetUploadCard
           :types="uploadTypes"
-          :uploaded-count="assets.length"
+          :uploaded-count="uploadedAssetCount"
           :max-uploads="maxUploads"
           @pick="pickAsset"
         />
@@ -54,6 +54,7 @@
         :expanded="promptExpanded"
         :placeholder="imageType === '图片编辑' ? '点击下方一键编辑，或写下你想怎么编辑图片' : '写点什么... 输入完成1秒后自动保存，最多2000字'"
         smart-label="✨ 智能补全"
+        :show-smart-fill="promptOptimizeEnabled"
         @toggle-expanded="promptExpanded = !promptExpanded"
         @paste="pastePrompt"
         @select-all="selectAllPrompt"
@@ -95,16 +96,16 @@
         <view class="section-title">生成参数</view>
         <view class="param-block">
           <view class="param-block-head">
-            <text class="param-block-title">图片尺寸</text>
-            <text class="param-block-tip">{{ selectedSizeMode === 'auto' ? '模型自动' : selectedRatio }}</text>
+            <text class="param-block-title">比例</text>
+            <text class="param-block-tip">{{ ratioLabel(selectedRatio) }}</text>
           </view>
           <view class="param-option-grid">
             <button
-              v-for="item in sizeOptions"
+              v-for="item in ratioOptions"
               :key="item.key"
               class="param-option"
-              :class="{ active: selectedSizeKey === item.key }"
-              @tap="selectSizeOption(item)"
+              :class="{ active: selectedRatio === item.key }"
+              @tap="selectRatioOption(item)"
             >
               <text class="param-option-title">{{ item.label }}</text>
             </button>
@@ -112,16 +113,16 @@
         </view>
         <view class="param-block">
           <view class="param-block-head">
-            <text class="param-block-title">画质选择</text>
-            <text class="param-block-tip">{{ selectedQuality.label }}</text>
+            <text class="param-block-title">分辨率</text>
+            <text class="param-block-tip">{{ selectedResolution.label }}</text>
           </view>
           <view class="param-option-grid quality-grid">
             <button
-              v-for="item in qualityOptions"
+              v-for="item in resolutionOptions"
               :key="item.key"
               class="param-option quality-option"
-              :class="{ active: selectedQualityKey === item.key }"
-              @tap="selectedQualityKey = item.key"
+              :class="{ active: selectedResolutionPreset === item.key }"
+              @tap="selectResolutionOption(item)"
             >
               <text class="param-option-title">{{ item.label }}</text>
             </button>
@@ -133,7 +134,7 @@
               <view class="image-count-title">生成数量</view>
               <view class="image-count-desc">{{ imageCountTip }}</view>
             </view>
-            <view class="image-count-stepper">
+            <view v-if="maxImageCount > 1" class="image-count-stepper">
               <button
                 class="count-stepper-btn"
                 :class="{ disabled: selectedImageCount <= 1 }"
@@ -150,6 +151,10 @@
                 :disabled="selectedImageCount >= maxImageCount"
                 @tap="increaseImageCount"
               >+</button>
+            </view>
+            <view v-else class="image-count-fixed">
+              <text class="count-stepper-number">1</text>
+              <text class="count-stepper-unit">张</text>
             </view>
           </view>
         </view>
@@ -168,7 +173,7 @@
             </view>
           </view>
         </view>
-        <view class="param-block">
+        <view v-if="modelOptions.length > 1 || !modelTiersLoading && !modelOptions.length" class="param-block">
           <view class="param-block-head">
             <text class="param-block-title">模型档位</text>
             <text class="param-block-tip">{{ selectedModelCostLabel }}</text>
@@ -189,6 +194,7 @@
               <text v-if="item.memberDiscountApplied" class="tier-discount">{{ discountLabel(item.memberDiscountPercent) }}</text>
             </button>
           </view>
+          <view v-if="!modelTiersLoading && !modelOptions.length" class="tier-empty">当前功能暂无可用模型档位</view>
         </view>
       </view>
     </view>
@@ -205,6 +211,7 @@
       @close="previewTemplate = null"
       @use="useTemplate"
     />
+    <AppDialogHost />
   </view>
 </template>
 
@@ -216,18 +223,23 @@ import LegacyPromptComposer from '@/components/legacy/LegacyPromptComposer.vue';
 import LegacyAssetUploadCard from '@/components/legacy/LegacyAssetUploadCard.vue';
 import LegacyAssetStrip, { type LegacyAsset } from '@/components/legacy/LegacyAssetStrip.vue';
 import GenerationActions from '@/components/legacy/GenerationActions.vue';
+import AppDialogHost from '@/components/common/AppDialogHost.vue';
 import TemplatePreviewSheet from '@/components/business/TemplatePreviewSheet.vue';
 import TemplateStrip from '@/components/business/TemplateStrip.vue';
 import { createImageTask, getImageModels, optimizeImagePrompt } from '@/api/ai-image';
 import { confirmCompliance } from '@/api/config';
+import { getTemplates, useTemplate as useContentTemplate } from '@/api/template';
 import { updateMe } from '@/api/user';
 import { uploadAsset } from '@/api/upload';
 import { DEFAULT_RATIOS, FEATURE_KEYS, PAGE_ROUTES, STORAGE_KEYS } from '@/utils/constants';
 import { assertPrompt } from '@/utils/validator';
 import { isDevFallbackEnabled, warnDevFallback } from '@/utils/dev-fallback';
 import { discountLabel } from '@/utils/member';
+import { normalizeBackendMediaUrl } from '@/utils/media-url';
+import { showMemberRequiredDialog } from '@/utils/app-dialog';
 import { useUserStore } from '@/stores/user';
 import { useAuthStore } from '@/stores/auth';
+import { useConfigStore } from '@/stores/config';
 import {
   imageEditTemplates,
   imageToImageTemplates,
@@ -243,13 +255,16 @@ type FormState = { brand: string; sellingPoint: string; scene: string };
 type ModeState = {
   prompt: string;
   form: FormState;
-  assets: LegacyAsset[];
+  assets: Array<LegacyAsset | null>;
   uploadKeys: unknown[];
   editTool: string;
 };
 type ModelCapabilities = {
   ratios?: string[];
   qualities?: string[];
+  resolutionPresets?: string[];
+  sizeOptions?: BackendSizeOption[];
+  defaultSizeKey?: string;
   durations?: string[] | null;
   supportedSizeModes?: string[];
   nativeSizes?: string[];
@@ -268,20 +283,26 @@ type ModelTier = {
   capabilities: ModelCapabilities;
   isDefault?: boolean;
 };
-type SizeOption = {
+type BackendSizeOption = {
   key: string;
+  ratio: string;
+  resolutionPreset: string;
   label: string;
-  desc: string;
-  mode: SizeMode;
-  ratio?: string;
+  upstreamSize?: string;
+  isAuto?: boolean;
 };
-type QualityOption = {
+type RatioOption = {
   key: string;
   label: string;
-  backendQuality: string;
+};
+type ResolutionOption = {
+  key: string;
+  label: string;
+  optionKey: string;
 };
 
 const imageTypes: ImageMode[] = ['文生图', '图生图', '图片编辑'];
+const configStore = useConfigStore();
 const imageType = ref<ImageMode>('文生图');
 const imageStates = reactive<Record<ImageMode, ModeState>>({
   文生图: createModeState(),
@@ -295,9 +316,11 @@ const prompt = computed({
 });
 const form = computed(() => currentState.value.form);
 const assets = computed(() => currentState.value.assets);
+const uploadedAssetCount = computed(() => assets.value.filter(Boolean).length);
 const editImageState = computed(() => imageStates['图片编辑']);
 const editImageAsset = computed(() => editImageState.value.assets[0] || null);
 const editImagePreviewPath = computed(() => editImageAsset.value?.path || '');
+const promptOptimizeEnabled = computed(() => configStore.features.promptOptimize !== false);
 const hasEditImage = computed(() => Boolean(editImagePreviewPath.value || editImageState.value.uploadKeys[0]));
 const editTool = computed({
   get: () => currentState.value.editTool,
@@ -305,25 +328,40 @@ const editTool = computed({
 });
 const promptExpanded = ref(false);
 const selectedSizeMode = ref<SizeMode>('auto');
-const selectedRatio = ref('1:1');
+const selectedRatio = ref('auto');
+const selectedResolutionPreset = ref('auto');
+const selectedSizeKey = ref('');
 const selectedImageCount = ref(1);
 const editTools = ['换背景', '去水印', '局部重绘', '扩图', '提升清晰度', '改风格'];
 const models = ref<Record<string, unknown>[]>([]);
 const selectedModelIndex = ref(1);
+const modelTiersLoading = ref(false);
+const modelTiersLoaded = ref(false);
 let imageModelRequestToken = 0;
 const DEFAULT_MAX_REFERENCE_IMAGES = 4;
 const previewTemplate = ref<CreativeTemplate | null>(null);
+const backendTemplates = ref<CreativeTemplate[]>([]);
 const userStore = useUserStore();
 const authStore = useAuthStore();
 const platformWatermarkEnabled = ref(true);
 const platformWatermarkOffConfirmed = ref(false);
 const isSubmitting = ref(false);
+const IMAGE_DRAFT_KEY = 'ai_creator_image_task_draft';
+let draftTimer: ReturnType<typeof setTimeout> | null = null;
 const fallbackCapabilities: ModelCapabilities = {
-  ratios: [...DEFAULT_RATIOS],
-  qualities: ['1K', '2K', '4K'],
+  ratios: ['auto', ...DEFAULT_RATIOS],
+  qualities: ['auto', '1K', '2K', '4K'],
+  resolutionPresets: ['auto', '1K', '2K', '4K'],
+  sizeOptions: [
+    { key: 'auto', ratio: 'auto', resolutionPreset: 'auto', label: '自动', isAuto: true },
+    { key: '1:1_1K', ratio: '1:1', resolutionPreset: '1K', label: '1K 1:1' },
+    { key: '16:9_1K', ratio: '16:9', resolutionPreset: '1K', label: '1K 16:9' },
+    { key: '9:16_1K', ratio: '9:16', resolutionPreset: '1K', label: '1K 9:16' }
+  ],
+  defaultSizeKey: 'auto',
   supportedSizeModes: ['auto', 'ratio'],
   nativeSizes: ['auto'],
-  defaultRatio: '1:1',
+  defaultRatio: 'auto',
   maxImages: 1,
   maxReferenceImages: DEFAULT_MAX_REFERENCE_IMAGES
 };
@@ -362,7 +400,12 @@ const fallbackModels: ModelTier[] = [
     isDefault: false
   }
 ];
-const selectedQualityKey = ref('2K');
+const IMAGE_TEMPLATE_FEATURES = ['text_to_image', 'image_to_image', 'image_edit'];
+const MODEL_CACHE_TTL_MS = 60_000;
+const TEMPLATE_CACHE_TTL_MS = 60_000;
+const imageModelCache = new Map<string, { list: Record<string, unknown>[]; loadedAt: number }>();
+let imageTemplatesCache: { list: CreativeTemplate[]; loadedAt: number } | null = null;
+let imageTemplatesPromise: Promise<CreativeTemplate[]> | null = null;
 
 const modelOptions = computed<ModelTier[]>(() => {
   const source: ModelTier[] = models.value.map((item) => ({
@@ -377,9 +420,9 @@ const modelOptions = computed<ModelTier[]>(() => {
     isDefault: Boolean(item.isDefault)
   }));
   if (source.length) return source;
-  return fallbackModels;
+  if (isDevFallbackEnabled && modelTiersLoaded.value) return fallbackModels;
+  return [];
 });
-const modelTiersReady = computed(() => models.value.length > 0);
 const selectedModel = computed(() => modelOptions.value[selectedModelIndex.value] || modelOptions.value[0]);
 const selectedModelName = computed(() => selectedModel.value?.tierName || '标准生图');
 const selectedModelDescription = computed(() => selectedModel.value?.description || '');
@@ -388,39 +431,56 @@ const selectedCapabilities = computed(() => selectedModel.value?.capabilities ||
 const maxImageCount = computed(() => Math.max(1, Math.floor(Number(selectedCapabilities.value.maxImages || 1))));
 const maxUploads = computed(() => normalizeMaxReferenceImages(selectedCapabilities.value.maxReferenceImages));
 const totalModelCost = computed(() => selectedModelCost.value * selectedImageCount.value);
-const selectedModelCostLabel = computed(() => modelTiersReady.value ? `${selectedModelCost.value} 创作点/张` : '加载中');
-const generationCostText = computed(() => modelTiersReady.value ? `消耗 ${totalModelCost.value} 创作点 · ${selectedImageCount.value}张` : '模型档位加载中');
+const selectedModelCostLabel = computed(() => modelTiersLoading.value ? '加载中' : selectedModel.value ? `${selectedModelCost.value} 创作点/张` : '未配置');
+const generationCostText = computed(() => modelTiersLoading.value
+  ? '模型档位加载中'
+  : selectedModel.value
+    ? `消耗 ${totalModelCost.value} 创作点 · ${selectedImageCount.value}张`
+    : '请先配置模型档位');
 const imageCountTip = computed(() => maxImageCount.value > 1 ? `当前最多一次生成 ${maxImageCount.value} 张` : '当前一次生成 1 张');
-const qualityOptions = computed<QualityOption[]>(() => {
-  const values = uniqueStrings([...(selectedCapabilities.value.qualities || []), ...(fallbackCapabilities.qualities || [])]);
-  return uniqueStrings(values).map((item) => ({
-    key: item,
-    label: qualityLabel(item),
-    backendQuality: item
-  }));
+const backendSizeOptions = computed<BackendSizeOption[]>(() => {
+  const options = selectedCapabilities.value.sizeOptions?.length
+    ? selectedCapabilities.value.sizeOptions
+    : fallbackCapabilities.sizeOptions || [];
+  return options.filter((item) => item.key && item.ratio && item.resolutionPreset);
 });
-const selectedQuality = computed(() => qualityOptions.value.find((item) => item.key === selectedQualityKey.value) || qualityOptions.value[0] || {
-  key: '',
-  label: '默认画质',
-  backendQuality: ''
-});
-const supportedRatios = computed(() => {
-  const values = selectedCapabilities.value.ratios?.length ? selectedCapabilities.value.ratios : fallbackCapabilities.ratios;
-  return values || ['1:1'];
-});
-const supportsAutoSize = computed(() => (selectedCapabilities.value.supportedSizeModes || ['auto', 'ratio']).includes('auto'));
-const selectedSizeKey = computed(() => selectedSizeMode.value === 'auto' ? 'auto' : selectedRatio.value);
-const sizeOptions = computed<SizeOption[]>(() => {
-  const options: SizeOption[] = [];
-  if (supportsAutoSize.value) {
-    options.push({ key: 'auto', label: '自动', desc: '模型推荐', mode: 'auto' });
-  }
-  supportedRatios.value.forEach((item) => {
-    options.push({ key: item, label: item, desc: '图片比例', mode: 'ratio', ratio: item });
+const selectedSizeOption = computed(() => backendSizeOptions.value.find((item) => item.key === selectedSizeKey.value) || backendSizeOptions.value[0] || null);
+const ratioOptions = computed<RatioOption[]>(() => {
+  const seen = new Set<string>();
+  const options: RatioOption[] = [];
+  backendSizeOptions.value.forEach((item) => {
+    if (seen.has(item.ratio)) return;
+    seen.add(item.ratio);
+    options.push({ key: item.ratio, label: ratioLabel(item.ratio) });
   });
   return options;
 });
+const resolutionOptions = computed<ResolutionOption[]>(() => {
+  const seen = new Set<string>();
+  const options: ResolutionOption[] = [];
+  backendSizeOptions.value
+    .filter((item) => item.ratio === selectedRatio.value)
+    .forEach((item) => {
+      if (seen.has(item.resolutionPreset)) return;
+      seen.add(item.resolutionPreset);
+      options.push({
+        key: item.resolutionPreset,
+        label: resolutionLabel(item.resolutionPreset),
+        optionKey: item.key
+      });
+    });
+  return options;
+});
+const selectedResolution = computed(() => resolutionOptions.value.find((item) => item.key === selectedResolutionPreset.value) || resolutionOptions.value[0] || {
+  key: '',
+  label: '默认',
+  optionKey: ''
+});
 const activeTemplates = computed(() => {
+  const feature = imageFeatureForType();
+  const list = backendTemplates.value.filter((item) => templateMatchesImageFeature(item, feature));
+  if (list.length) return sortTemplatesForFeature(list, feature);
+  if (!isDevFallbackEnabled) return [];
   if (imageType.value === '图生图') return imageToImageTemplates;
   if (imageType.value === '图片编辑') return imageEditTemplates;
   return textImageTemplates;
@@ -432,14 +492,17 @@ const platformWatermarkDesc = computed(() => platformWatermarkEnabled.value
   : '已关闭平台水印，请遵守用户协议与内容合规要求');
 
 onLoad((query) => {
+  restoreDraft();
   if (query?.prompt) prompt.value = decodeURIComponent(String(query.prompt));
   if (query?.scene) form.value.scene = decodeURIComponent(String(query.scene));
 });
 
-onShow(() => {
-  authStore.hydrate();
+onShow(async () => {
+  configStore.hydrate();
+  configStore.loadPublicConfig().catch(() => undefined);
+  await authStore.hydrate();
   if (authStore.isLoggedIn) {
-    userStore.hydrate();
+    await userStore.hydrate();
     syncWatermarkPreferenceFromProfile();
     userStore.loadFullProfile().then(syncWatermarkPreferenceFromProfile).catch(() => undefined);
   } else {
@@ -447,22 +510,63 @@ onShow(() => {
     platformWatermarkOffConfirmed.value = false;
   }
   loadImageModelsForMode();
+  loadImageTemplates();
 });
 
 watch(imageType, () => {
   loadImageModelsForMode();
+  scheduleDraftSave();
 });
+
+watch([
+  () => imageType.value,
+  () => selectedSizeMode.value,
+  () => selectedRatio.value,
+  () => selectedResolutionPreset.value,
+  () => selectedSizeKey.value,
+  () => selectedImageCount.value,
+  () => platformWatermarkEnabled.value,
+  () => imageStates.文生图.prompt,
+  () => imageStates.图生图.prompt,
+  () => imageStates.图片编辑.prompt,
+  () => imageStates.文生图.form,
+  () => imageStates.图生图.form,
+  () => imageStates.图片编辑.form,
+  () => imageStates.图片编辑.editTool,
+], scheduleDraftSave, { deep: true });
 
 function loadImageModelsForMode() {
   const featureKey = imageFeatureKey();
+  const configModels = configModelTiers(featureKey);
+  if (configModels.length) {
+    models.value = configModels;
+    modelTiersLoading.value = false;
+    modelTiersLoaded.value = true;
+    imageModelCache.set(featureKey, { list: configModels, loadedAt: Date.now() });
+    selectedModelIndex.value = defaultModelIndex();
+    normalizeImageParams();
+    return;
+  }
+  const cached = imageModelCache.get(featureKey);
+  if (cached && Date.now() - cached.loadedAt < MODEL_CACHE_TTL_MS) {
+    models.value = cached.list;
+    modelTiersLoading.value = false;
+    modelTiersLoaded.value = true;
+    selectedModelIndex.value = defaultModelIndex();
+    normalizeImageParams();
+    return;
+  }
   const requestToken = ++imageModelRequestToken;
   models.value = [];
+  modelTiersLoading.value = true;
+  modelTiersLoaded.value = false;
   selectedModelIndex.value = defaultModelIndex();
   normalizeImageParams();
   getImageModels(featureKey).then((res) => {
     if (requestToken !== imageModelRequestToken || featureKey !== imageFeatureKey()) return;
     const list = Array.isArray(res.list) ? res.list as Record<string, unknown>[] : [];
     if (!list.length && isDevFallbackEnabled) warnDevFallback('image-tiers', `GET /public/model-tiers?feature=${featureKey} returned empty list`);
+    imageModelCache.set(featureKey, { list, loadedAt: Date.now() });
     models.value = list;
     selectedModelIndex.value = defaultModelIndex();
     normalizeImageParams();
@@ -472,7 +576,58 @@ function loadImageModelsForMode() {
     models.value = [];
     selectedModelIndex.value = defaultModelIndex();
     normalizeImageParams();
+  }).finally(() => {
+    if (requestToken !== imageModelRequestToken || featureKey !== imageFeatureKey()) return;
+    modelTiersLoading.value = false;
+    modelTiersLoaded.value = true;
   });
+}
+
+function loadImageTemplates() {
+  if (imageTemplatesCache && Date.now() - imageTemplatesCache.loadedAt < TEMPLATE_CACHE_TTL_MS) {
+    backendTemplates.value = imageTemplatesCache.list;
+    return;
+  }
+  if (!imageTemplatesPromise) {
+    imageTemplatesPromise = Promise.all(IMAGE_TEMPLATE_FEATURES.map((targetFeature) => (
+    getTemplates<{ list?: Record<string, unknown>[] }>({ templateType: 'image', targetFeature, page: 1, pageSize: 24 })
+    )))
+      .then((responses) => {
+      const merged = new Map<string, CreativeTemplate>();
+      responses.forEach((res) => {
+        const list = Array.isArray(res.list) ? res.list : [];
+        list.map(normalizeCreativeTemplate).forEach((item) => {
+          if (item) merged.set(String(item.id), item);
+        });
+      });
+      const list = Array.from(merged.values());
+      imageTemplatesCache = { list, loadedAt: Date.now() };
+      return list;
+    });
+  }
+  imageTemplatesPromise
+    .then((list) => {
+      backendTemplates.value = list;
+    })
+    .catch(() => {
+      backendTemplates.value = [];
+      if (isDevFallbackEnabled) warnDevFallback('image-templates', 'GET /templates?templateType=image&targetFeature=... failed');
+    })
+    .finally(() => {
+      imageTemplatesPromise = null;
+    });
+}
+
+function selectImageType(value: string) {
+  if (!imageTypes.includes(value as ImageMode)) return;
+  imageType.value = value as ImageMode;
+}
+
+function configModelTiers(featureKey: string) {
+  const tiers = configStore.publicConfig?.modelTiers;
+  if (!tiers || typeof tiers !== 'object') return [];
+  const list = (tiers as Record<string, unknown>)[featureKey];
+  return Array.isArray(list) ? list as Record<string, unknown>[] : [];
 }
 
 function selectScene(event: { detail: { value: number } }) {
@@ -488,7 +643,22 @@ function openTemplate(item: CreativeTemplate) {
   previewTemplate.value = item;
 }
 
-function useTemplate(item: CreativeTemplate) {
+async function useTemplate(item: CreativeTemplate) {
+  if (item.canUse === false) {
+    showMemberRequiredDialog({
+      title: '开通会员使用模板',
+      message: item.lockReason || '该模板需开通会员后使用。'
+    });
+    return;
+  }
+  const backendTemplateId = numericTemplateId(item.id);
+  if (backendTemplateId) {
+    try {
+      await useContentTemplate(backendTemplateId);
+    } catch {
+      return;
+    }
+  }
   const targetMode: ImageMode = item.mode === 'img2img' ? '图生图' : item.mode === 'edit' ? '图片编辑' : '文生图';
   imageType.value = targetMode;
   const targetState = imageStates[targetMode];
@@ -500,12 +670,127 @@ function useTemplate(item: CreativeTemplate) {
   }
 }
 
+function normalizeCreativeTemplate(raw: Record<string, unknown>): CreativeTemplate | null {
+  const id = String(raw.id || raw.templateId || '');
+  const promptText = String(raw.prompt || raw.promptTemplate || '');
+  if (!id || !promptText) return null;
+  const targetFeature = normalizeTemplateFeature(raw.targetFeature || raw.target_feature || '');
+  const usageType = String(raw.usageType || raw.usage_type || '');
+  const displayConfig = normalizeDisplayConfig(raw.displayConfig || raw.display_config);
+  const params = raw.paramsJson && typeof raw.paramsJson === 'object' ? raw.paramsJson as Record<string, unknown> : {};
+  const tagsValue = raw.tagsJson || raw.tags;
+  const tags = Array.isArray(tagsValue)
+    ? tagsValue.map((item) => String(item)).filter(Boolean)
+    : String(tagsValue || '').split(/[,，、]/).map((item) => item.trim()).filter(Boolean);
+  return {
+    id,
+    title: String(raw.title || raw.name || '灵感模板'),
+    tags,
+    prompt: promptText,
+    mediaType: 'image',
+    coverUrl: normalizeBackendMediaUrl(raw.coverUrl || raw.cover_url || raw.previewUrl || raw.preview_url),
+    mediaUrl: normalizeBackendMediaUrl(raw.previewUrl || raw.preview_url || raw.coverUrl || raw.cover_url),
+    mode: imageTemplateMode(targetFeature, usageType),
+    category: String(raw.category || raw.scene || raw.style || ''),
+    duration: String(raw.duration || params.duration || ''),
+    targetFeature,
+    usageType,
+    displayConfig,
+    canUse: raw.canUse !== false,
+    canSave: raw.canSave !== false && raw.canUse !== false,
+    lockReason: String(raw.lockReason || '')
+  };
+}
+
+function numericTemplateId(value: unknown) {
+  const id = Number(value);
+  return Number.isInteger(id) && id > 0 ? id : 0;
+}
+
+function imageFeatureForType() {
+  if (imageType.value === '图生图') return 'image_to_image';
+  if (imageType.value === '图片编辑') return 'image_edit';
+  return 'text_to_image';
+}
+
+function templateMatchesImageFeature(item: CreativeTemplate, feature: string) {
+  const config = item.displayConfig;
+  if (config && typeof config === 'object' && config[feature]) return true;
+  const targetFeature = normalizeTemplateFeature(item.targetFeature || '');
+  if (targetFeature === feature) return true;
+  if (targetFeature) return false;
+  const usageFeature = imageFeatureFromUsage(item.usageType || '');
+  if (usageFeature) return usageFeature === feature;
+  if (item.mode === 'img2img') return feature === 'image_to_image';
+  if (item.mode === 'edit') return feature === 'image_edit';
+  if (item.mode === 'text2img') return feature === 'text_to_image';
+  return false;
+}
+
+function sortTemplatesForFeature(list: CreativeTemplate[], feature: string) {
+  return [...list].sort((a, b) => {
+    const aPin = templatePinMeta(a, feature);
+    const bPin = templatePinMeta(b, feature);
+    if (aPin.pinned !== bPin.pinned) return bPin.pinned - aPin.pinned;
+    if (aPin.pinOrder !== bPin.pinOrder) return bPin.pinOrder - aPin.pinOrder;
+    return numericTemplateId(b.id) - numericTemplateId(a.id);
+  });
+}
+
+function templatePinMeta(item: CreativeTemplate, feature: string) {
+  const config = item.displayConfig && typeof item.displayConfig === 'object'
+    ? item.displayConfig[feature] as Record<string, unknown> | undefined
+    : undefined;
+  return {
+    pinned: config?.pinned ? 1 : 0,
+    pinOrder: Number(config?.pinOrder || 0)
+  };
+}
+
+function imageTemplateMode(targetFeature: string, usageType = '') {
+  if (/reference/i.test(usageType)) return 'img2img';
+  if (/edit/i.test(usageType)) return 'edit';
+  if (/image_to_image|img2img/i.test(targetFeature)) return 'img2img';
+  if (/edit|paint|watermark|expand/i.test(targetFeature)) return 'edit';
+  return 'text2img';
+}
+
+function imageFeatureFromUsage(value: string) {
+  if (value === 'reference') return 'image_to_image';
+  if (value === 'edit') return 'image_edit';
+  if (value === 'generate') return 'text_to_image';
+  return '';
+}
+
+function normalizeTemplateFeature(value: unknown) {
+  const text = String(value || '').trim();
+  if (text === 'image_create') return 'text_to_image';
+  if (text === 'image_editing') return 'image_edit';
+  return text;
+}
+
+function normalizeDisplayConfig(value: unknown): Record<string, unknown> | null {
+  if (!value) return null;
+  if (typeof value === 'object') return value as Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(String(value));
+    return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
 function pickAsset(type: string) {
+  if (imageType.value === '图生图' && type === 'reference' && !currentState.value.assets[0]) {
+    uni.showToast({ title: '请先上传主图', icon: 'none' });
+    return;
+  }
   chooseAndSetAsset(type);
 }
 
 function replaceAsset(slotIndex: number) {
-  chooseAndSetAsset(assets.value[slotIndex]?.type || 'reference', slotIndex);
+  const fallbackType = imageType.value === '图生图' && slotIndex === 0 ? 'product' : 'reference';
+  chooseAndSetAsset(assets.value[slotIndex]?.type || fallbackType, slotIndex);
 }
 
 function pickEditImage() {
@@ -522,24 +807,38 @@ function chooseAndSetAsset(type: string, replaceIndex?: number) {
     success: async (res) => {
       const path = Array.isArray(res.tempFilePaths) ? res.tempFilePaths[0] : res.tempFilePaths;
       if (!path) return;
-      const asset = { path, type, typeLabel: type === 'product' ? '主图' : type === 'edit' ? '编辑图' : '参考图' };
+      const asset: LegacyAsset = { path, type, typeLabel: type === 'product' ? '主图' : type === 'edit' ? '编辑图' : '参考图', mediaType: 'image' };
       const state = currentState.value;
-      if (typeof replaceIndex === 'number') state.assets.splice(replaceIndex, 1, asset);
-      else if (state.assets.length < maxUploads.value) state.assets.push(asset);
-      else {
+      const assetIndex = typeof replaceIndex === 'number' ? replaceIndex : nextAvailableAssetSlot(state, type);
+      if (assetIndex < 0) {
         uni.showToast({ title: `最多上传${maxUploads.value}张素材`, icon: 'none' });
         return;
       }
+      state.assets[assetIndex] = asset;
+      state.uploadKeys[assetIndex] = undefined;
       try {
-        const uploaded = await uploadAsset<Record<string, unknown>>(path, 'ref_image');
+        const uploaded = await uploadAsset<Record<string, unknown>>(path, 'ref_image', 'public');
         const key = uploaded.fileNo || uploaded.fileId || uploaded.url;
-        if (typeof replaceIndex === 'number') state.uploadKeys.splice(replaceIndex, 1, key);
-        else state.uploadKeys.push(key);
+        state.uploadKeys[assetIndex] = key;
       } catch {
-        // 保留本地预览。
+        uni.showToast({ title: '素材上传失败，请重试', icon: 'none' });
       }
     }
   });
+}
+
+function nextAvailableAssetSlot(state: ModeState, type: string) {
+  if (imageType.value === '图生图') {
+    if (type === 'product') return 0;
+    for (let index = 1; index < maxUploads.value; index += 1) {
+      if (!state.assets[index]) return index;
+    }
+    return -1;
+  }
+  for (let index = 0; index < maxUploads.value; index += 1) {
+    if (!state.assets[index]) return index;
+  }
+  return -1;
 }
 
 function chooseAndSetEditImage() {
@@ -553,16 +852,21 @@ function chooseAndSetEditImage() {
       state.assets.splice(0, state.assets.length, asset);
       state.uploadKeys.splice(0, state.uploadKeys.length);
       try {
-        const uploaded = await uploadAsset<Record<string, unknown>>(path, 'ref_image');
+        const uploaded = await uploadAsset<Record<string, unknown>>(path, 'ref_image', 'public');
         state.uploadKeys[0] = uploaded.fileNo || uploaded.fileId || uploaded.url;
       } catch {
-        // 上传失败时仍保留本地预览，方便用户替换或删除。
+        uni.showToast({ title: '素材上传失败，请重试', icon: 'none' });
       }
     }
   });
 }
 
 function removeAsset(slotIndex: number) {
+  if (imageType.value === '图生图') {
+    currentState.value.assets[slotIndex] = null;
+    currentState.value.uploadKeys[slotIndex] = undefined;
+    return;
+  }
   currentState.value.assets.splice(slotIndex, 1);
   currentState.value.uploadKeys.splice(slotIndex, 1);
 }
@@ -577,6 +881,25 @@ function showUploadHint() {
   uni.showToast({ title: '请点击上方上传素材卡片', icon: 'none' });
 }
 
+function countFilledAssets(state: ModeState) {
+  return state.assets.filter(Boolean).length;
+}
+
+function countUploadedKeys(state: ModeState) {
+  return state.assets.filter((asset, index) => {
+    const key = state.uploadKeys[index];
+    return Boolean(asset) && key !== undefined && key !== null && key !== '';
+  }).length;
+}
+
+function buildUploadKeys(state: ModeState) {
+  return state.assets.reduce<unknown[]>((keys, asset, index) => {
+    const key = state.uploadKeys[index];
+    if (asset && key !== undefined && key !== null && key !== '') keys.push(key);
+    return keys;
+  }, []);
+}
+
 function pastePrompt() {
   uni.getClipboardData({ success: (res) => { prompt.value = res.data || prompt.value; } });
 }
@@ -586,12 +909,16 @@ function selectAllPrompt() {
 }
 
 async function optimizePrompt() {
+  if (!promptOptimizeEnabled.value) {
+    uni.showToast({ title: '智能优化功能已关闭', icon: 'none' });
+    return;
+  }
   if (!assertPrompt(prompt.value)) return;
   const result = await optimizeImagePrompt<Record<string, unknown>>({
     featureKey: imageFeatureKey(),
     prompt: prompt.value,
     scene: form.value.scene,
-    ratio: selectedSizeMode.value === 'ratio' ? selectedRatio.value : undefined
+    ratio: selectedRatio.value !== 'auto' ? selectedRatio.value : undefined
   });
   prompt.value = String(result.optimizedPrompt || result.optimized_prompt || prompt.value);
 }
@@ -603,22 +930,39 @@ async function submit() {
     return;
   }
   if (!assertPrompt(prompt.value)) return;
-  if (!modelTiersReady.value) {
+  if (modelTiersLoading.value) {
     uni.showToast({ title: '模型档位加载中，请稍后再生成', icon: 'none' });
-    loadImageModelsForMode();
     return;
   }
   if (!selectedModel.value) {
-    uni.showToast({ title: '请先在后台配置模型档位', icon: 'none' });
+    uni.showToast({ title: '请先在后台配置可用模型档位', icon: 'none' });
     return;
   }
   const state = currentState.value;
-  if (imageType.value !== '文生图' && !state.assets.length) {
+  if (imageType.value === '图生图') {
+    if (!state.assets[0]) {
+      uni.showToast({ title: '请先上传主图', icon: 'none' });
+      return;
+    }
+    if (!state.uploadKeys[0]) {
+      uni.showToast({ title: '主图未上传成功，请重新上传', icon: 'none' });
+      return;
+    }
+    if (countUploadedKeys(state) < countFilledAssets(state)) {
+      uni.showToast({ title: '素材未上传成功，请重新上传', icon: 'none' });
+      return;
+    }
+  } else if (imageType.value !== '文生图' && !countFilledAssets(state)) {
     uni.showToast({ title: '请先上传素材图片', icon: 'none' });
     return;
   }
   const subType = imageType.value === '图生图' ? 'img2img' : imageType.value === '图片编辑' ? 'edit' : 'text2img';
   const featureKey = imageFeatureKey();
+  const sizeOption = selectedSizeOption.value;
+  if (!sizeOption) {
+    uni.showToast({ title: '当前档位暂无可用尺寸', icon: 'none' });
+    return;
+  }
   isSubmitting.value = true;
   try {
   const result = await createImageTask<Record<string, unknown>>({
@@ -627,34 +971,50 @@ async function submit() {
     prompt: buildFinalPrompt(prompt.value, state.form),
     tierKey: String(selectedModel.value.tierKey),
     sizeMode: selectedSizeMode.value,
-    ratio: selectedSizeMode.value === 'ratio' ? selectedRatio.value : undefined,
-    quality: selectedQuality.value.backendQuality || undefined,
+    ratio: sizeOption.ratio !== 'auto' ? sizeOption.ratio : undefined,
+    resolutionPreset: sizeOption.resolutionPreset,
+    sizeKey: sizeOption.key,
     scene: state.form.scene,
     formData: { ...state.form },
     params: {
       imageCount: selectedImageCount.value,
-      qualityPreset: selectedQuality.value.key,
-      qualityLabel: selectedQuality.value.label,
+      resolutionPreset: sizeOption.resolutionPreset,
+      resolutionLabel: resolutionLabel(sizeOption.resolutionPreset),
+      sizeKey: sizeOption.key,
       platformWatermarkEnabled: effectivePlatformWatermarkEnabled.value
     },
     platformWatermarkEnabled: effectivePlatformWatermarkEnabled.value,
-    uploadKeys: [...state.uploadKeys],
+    uploadKeys: buildUploadKeys(state),
     editTool: imageType.value === '图片编辑' ? state.editTool || 'edit' : undefined
   } as any);
   const id = Number(result.id || result.taskId);
   if (!Number.isInteger(id) || id <= 0) {
-    uni.showToast({ title: 'Task submit failed', icon: 'none' });
+    uni.showToast({ title: '任务提交失败，请稍后重试', icon: 'none' });
     return;
   }
+  clearDraft();
   uni.redirectTo({ url: `${PAGE_ROUTES.result}?id=${id}&type=image` });
+  } catch {
+    // 请求层已展示错误提示，这里只避免页面产生未处理异常。
   } finally {
     isSubmitting.value = false;
   }
 }
 
-function selectSizeOption(item: SizeOption) {
-  selectedSizeMode.value = item.mode;
-  if (item.ratio) selectedRatio.value = item.ratio;
+function selectRatioOption(item: RatioOption) {
+  selectedRatio.value = item.key;
+  const sameResolution = backendSizeOptions.value.find((option) => (
+    option.ratio === item.key && option.resolutionPreset === selectedResolutionPreset.value
+  ));
+  const candidates = backendSizeOptions.value.filter((option) => option.ratio === item.key);
+  applySizeOption(sameResolution || chooseClosestSizeOption(candidates, selectedResolutionPreset.value) || null);
+}
+
+function selectResolutionOption(item: ResolutionOption) {
+  const option = backendSizeOptions.value.find((size) => size.key === item.optionKey)
+    || backendSizeOptions.value.find((size) => size.ratio === selectedRatio.value && size.resolutionPreset === item.key)
+    || null;
+  applySizeOption(option);
 }
 
 function selectModel(index: number) {
@@ -746,18 +1106,42 @@ function defaultModelIndex() {
 
 function normalizeImageParams() {
   const caps = selectedCapabilities.value;
-  const modes = caps.supportedSizeModes?.length ? caps.supportedSizeModes : ['auto', 'ratio'];
-  if (selectedSizeMode.value === 'auto' && !modes.includes('auto')) {
-    selectedSizeMode.value = 'ratio';
-  }
-  const ratios = caps.ratios?.length ? caps.ratios : fallbackCapabilities.ratios || ['1:1'];
-  if (selectedSizeMode.value !== 'auto' && !ratios.includes(selectedRatio.value)) {
-    selectedRatio.value = caps.defaultRatio && ratios.includes(caps.defaultRatio) ? caps.defaultRatio : ratios[0];
-  }
-  if (qualityOptions.value.length && !qualityOptions.value.some((item) => item.key === selectedQualityKey.value)) {
-    selectedQualityKey.value = qualityOptions.value[0].key;
-  }
+  const options = backendSizeOptions.value;
+  const current = options.find((item) => item.key === selectedSizeKey.value)
+    || options.find((item) => item.ratio === selectedRatio.value && item.resolutionPreset === selectedResolutionPreset.value)
+    || options.find((item) => item.key === caps.defaultSizeKey)
+    || options[0]
+    || null;
+  applySizeOption(current);
   selectedImageCount.value = Math.min(maxImageCount.value, Math.max(1, selectedImageCount.value));
+}
+
+function applySizeOption(option: BackendSizeOption | null) {
+  if (!option) {
+    selectedSizeKey.value = '';
+    selectedRatio.value = 'auto';
+    selectedResolutionPreset.value = 'auto';
+    selectedSizeMode.value = 'auto';
+    return;
+  }
+  selectedSizeKey.value = option.key;
+  selectedRatio.value = option.ratio;
+  selectedResolutionPreset.value = option.resolutionPreset;
+  selectedSizeMode.value = option.ratio === 'auto' ? 'auto' : 'ratio';
+}
+
+function chooseClosestSizeOption(options: BackendSizeOption[], currentResolution: string) {
+  if (!options.length) return null;
+  const resolutionRank: Record<string, number> = { auto: 0, '1K': 1, '2K': 2, '4K': 3 };
+  const currentRank = resolutionRank[normalizeResolutionPreset(currentResolution)] ?? 1;
+  return [...options].sort((a, b) => {
+    const aRank = resolutionRank[a.resolutionPreset] ?? 1;
+    const bRank = resolutionRank[b.resolutionPreset] ?? 1;
+    const aDistance = Math.abs(aRank - currentRank);
+    const bDistance = Math.abs(bRank - currentRank);
+    if (aDistance !== bDistance) return aDistance - bDistance;
+    return bRank - aRank;
+  })[0] || null;
 }
 
 function createModeState(): ModeState {
@@ -770,13 +1154,71 @@ function createModeState(): ModeState {
   };
 }
 
+function scheduleDraftSave() {
+  if (draftTimer) clearTimeout(draftTimer);
+  draftTimer = setTimeout(saveDraft, 500);
+}
+
+function saveDraft() {
+  const draft = {
+    imageType: imageType.value,
+    selectedSizeMode: selectedSizeMode.value,
+    selectedRatio: selectedRatio.value,
+    selectedResolutionPreset: selectedResolutionPreset.value,
+    selectedSizeKey: selectedSizeKey.value,
+    selectedImageCount: selectedImageCount.value,
+    platformWatermarkEnabled: platformWatermarkEnabled.value,
+    states: Object.fromEntries(Object.entries(imageStates).map(([key, state]) => [key, {
+      prompt: state.prompt,
+      form: { ...state.form },
+      editTool: state.editTool,
+    }])),
+  };
+  uni.setStorageSync(IMAGE_DRAFT_KEY, draft);
+}
+
+function restoreDraft() {
+  const draft = uni.getStorageSync(IMAGE_DRAFT_KEY) as any;
+  if (!draft || typeof draft !== 'object') return;
+  if (imageTypes.includes(draft.imageType)) imageType.value = draft.imageType;
+  selectedSizeMode.value = draft.selectedSizeMode || selectedSizeMode.value;
+  selectedRatio.value = draft.selectedRatio || selectedRatio.value;
+  selectedResolutionPreset.value = draft.selectedResolutionPreset || selectedResolutionPreset.value;
+  selectedSizeKey.value = draft.selectedSizeKey || selectedSizeKey.value;
+  selectedImageCount.value = Number(draft.selectedImageCount || selectedImageCount.value) || 1;
+  platformWatermarkEnabled.value = draft.platformWatermarkEnabled !== false;
+  Object.entries(draft.states || {}).forEach(([key, value]) => {
+    if (!imageTypes.includes(key as ImageMode)) return;
+    const item = value as any;
+    imageStates[key as ImageMode].prompt = String(item.prompt || '');
+    imageStates[key as ImageMode].form = { ...imageStates[key as ImageMode].form, ...(item.form || {}) };
+    imageStates[key as ImageMode].editTool = String(item.editTool || '');
+  });
+}
+
+function clearDraft() {
+  if (draftTimer) clearTimeout(draftTimer);
+  draftTimer = null;
+  uni.removeStorageSync(IMAGE_DRAFT_KEY);
+}
+
 function normalizeCapabilities(value: unknown): ModelCapabilities {
   const caps = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
+  const supportedSizeModes = stringArray(caps.supportedSizeModes, fallbackCapabilities.supportedSizeModes);
+  const ratios = normalizeRatioOptions(stringArray(caps.ratios, fallbackCapabilities.ratios), supportedSizeModes);
+  const resolutionPresets = normalizeResolutionPresetList(
+    caps.resolutionPresets,
+    stringArray(caps.qualities, fallbackCapabilities.resolutionPresets)
+  );
+  const sizeOptions = normalizeBackendSizeOptions(caps.sizeOptions, ratios, resolutionPresets);
   return {
-    ratios: stringArray(caps.ratios, fallbackCapabilities.ratios),
-    qualities: stringArray(caps.qualities, fallbackCapabilities.qualities),
+    ratios,
+    qualities: normalizeResolutionPresetList(caps.qualities, resolutionPresets),
+    resolutionPresets,
+    sizeOptions,
+    defaultSizeKey: chooseDefaultSizeKey(caps.defaultSizeKey, sizeOptions),
     durations: stringArray(caps.durations, []),
-    supportedSizeModes: stringArray(caps.supportedSizeModes, fallbackCapabilities.supportedSizeModes),
+    supportedSizeModes,
     nativeSizes: stringArray(caps.nativeSizes, fallbackCapabilities.nativeSizes),
     defaultRatio: String(caps.defaultRatio || fallbackCapabilities.defaultRatio || '1:1'),
     maxImages: Number(caps.maxImages || fallbackCapabilities.maxImages || 1),
@@ -797,11 +1239,109 @@ function uniqueStrings(values: string[]) {
   return values.filter((item, index) => Boolean(item) && values.indexOf(item) === index);
 }
 
-function qualityLabel(value: string) {
+function normalizeRatioOptions(values: string[], supportedSizeModes: string[]) {
+  const list = values.map((item) => String(item || '').trim()).filter(Boolean);
+  if (supportedSizeModes.includes('auto') && !list.includes('auto')) {
+    return ['auto', ...list];
+  }
+  return list.length ? list : ['auto', '1:1'];
+}
+
+function normalizeResolutionPresetList(value: unknown, fallback: string[] = []) {
+  const raw = Array.isArray(value) ? value : fallback;
+  const normalized = raw
+    .map(normalizeResolutionPreset)
+    .filter((item) => ['auto', '1K', '2K', '4K'].includes(item));
+  const unique = normalized.filter((item, index) => normalized.indexOf(item) === index);
+  return unique.length ? unique : fallbackCapabilities.resolutionPresets || ['auto', '1K'];
+}
+
+function normalizeResolutionPreset(value: unknown) {
   const text = String(value || '').trim();
-  if (!text) return '默认画质';
-  if (/^\d+k$/i.test(text)) return `${text.toUpperCase()}画质`;
+  const lower = text.toLowerCase();
+  if (!text || lower === 'auto' || lower === 'default') return 'auto';
+  if (['standard', 'normal', '1k', '1024'].includes(lower)) return '1K';
+  if (['hd', '2k', '2048'].includes(lower)) return '2K';
+  if (['4k', '4096'].includes(lower)) return '4K';
+  return text.toUpperCase();
+}
+
+function normalizeBackendSizeOptions(value: unknown, ratios: string[], resolutions: string[]): BackendSizeOption[] {
+  if (Array.isArray(value) && value.length) {
+    const explicitOptions = value.map((raw) => {
+      const item = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
+      const ratio = String(item.ratio || '').trim();
+      const resolutionPreset = normalizeResolutionPreset(item.resolutionPreset || item.resolution || '');
+      if (!ratio || !resolutionPreset) return null;
+      return {
+        key: String(item.key || `${ratio}_${resolutionPreset}`).trim(),
+        ratio,
+        resolutionPreset,
+        label: String(item.label || `${resolutionLabel(resolutionPreset)} ${ratioLabel(ratio)}`),
+        upstreamSize: String(item.upstreamSize || ''),
+        isAuto: Boolean(item.isAuto)
+      } as BackendSizeOption;
+    }).filter(Boolean) as BackendSizeOption[];
+    return ensureAutoSizeOptions(explicitOptions, ratios, resolutions);
+  }
+  const safeRatios = ratios.length ? ratios : ['auto', '1:1'];
+  const safeResolutions = uniqueStrings([
+    ...(safeRatios.includes('auto') ? ['auto'] : []),
+    ...(resolutions.length ? resolutions : ['1K'])
+  ]);
+  const options: BackendSizeOption[] = [];
+  safeRatios.forEach((ratio) => {
+    safeResolutions.forEach((resolutionPreset) => {
+      if (ratio === 'auto' && resolutionPreset !== 'auto') return;
+      if (ratio !== 'auto' && resolutionPreset === 'auto') return;
+      options.push({
+        key: ratio === 'auto' && resolutionPreset === 'auto' ? 'auto' : `${ratio}_${resolutionPreset}`,
+        ratio,
+        resolutionPreset,
+        label: ratio === 'auto' && resolutionPreset === 'auto'
+          ? '自动'
+          : `${resolutionLabel(resolutionPreset)} ${ratioLabel(ratio)}`,
+        isAuto: ratio === 'auto' && resolutionPreset === 'auto'
+      });
+    });
+  });
+  return ensureAutoSizeOptions(options, ratios, resolutions);
+}
+
+function ensureAutoSizeOptions(options: BackendSizeOption[], ratios: string[], resolutions: string[]) {
+  if (!ratios.includes('auto') || options.some((item) => item.ratio === 'auto')) return options;
+  const hasAutoResolution = !resolutions.length || resolutions.includes('auto');
+  if (!hasAutoResolution) return options;
+  const autoOption: BackendSizeOption = {
+    key: 'auto',
+    ratio: 'auto',
+    resolutionPreset: 'auto',
+    label: '自动',
+    isAuto: true
+  };
+  return [autoOption, ...options];
+}
+
+function chooseDefaultSizeKey(configured: unknown, options: BackendSizeOption[]) {
+  const configuredKey = String(configured || '').trim();
+  if (configuredKey && options.some((item) => item.key === configuredKey)) return configuredKey;
+  return options.find((item) => item.key === 'auto')?.key
+    || options.find((item) => item.ratio === 'auto' && item.resolutionPreset === '1K')?.key
+    || options.find((item) => item.ratio === 'auto')?.key
+    || options[0]?.key
+    || String(fallbackCapabilities.defaultSizeKey || 'auto');
+}
+
+function resolutionLabel(value: string) {
+  const text = String(value || '').trim();
+  if (!text || text.toLowerCase() === 'auto') return '自动';
+  if (/^\d+k$/i.test(text)) return text.toUpperCase();
   return text;
+}
+
+function ratioLabel(value: string) {
+  const text = String(value || '').trim();
+  return text.toLowerCase() === 'auto' || !text ? '自动' : text;
 }
 
 function imageFeatureKey() {
@@ -1149,6 +1689,19 @@ function buildFinalPrompt(basePrompt: string, data: FormState) {
   min-height: 92rpx;
 }
 
+.tier-empty {
+  margin-top: 14rpx;
+  padding: 18rpx;
+  border: 2rpx dashed #dce8f6;
+  border-radius: 16rpx;
+  background: #f8fbff;
+  color: #64748b;
+  font-size: 22rpx;
+  font-weight: 800;
+  line-height: 1.35;
+  text-align: center;
+}
+
 .param-option-title {
   color: #172033;
   font-size: 25rpx;
@@ -1271,11 +1824,21 @@ function buildFinalPrompt(basePrompt: string, data: FormState) {
   left: 43rpx;
 }
 
-.image-count-stepper {
+.image-count-stepper,
+.image-count-fixed {
   display: flex;
   align-items: center;
   flex-shrink: 0;
   gap: 8rpx;
+}
+
+.image-count-fixed {
+  justify-content: center;
+  min-width: 96rpx;
+  height: 56rpx;
+  border: 2rpx solid #dce8f6;
+  border-radius: 14rpx;
+  background: #f8fbff;
 }
 
 .count-stepper-btn {

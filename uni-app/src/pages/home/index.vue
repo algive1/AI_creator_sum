@@ -1,10 +1,15 @@
 <template>
   <view class="screen home-page">
-    <AppTopbar class="app-nav-root">
+    <AppTopbar class="app-nav-root" transparent>
       <template #left>
         <view class="home-nav-title">{{ appName }}</view>
       </template>
     </AppTopbar>
+
+    <view class="pull-refresh-indicator" :class="{ visible: pullRefreshing }">
+      <text class="pull-refresh-spinner"></text>
+      <text>正在刷新</text>
+    </view>
 
     <button class="home-hero" @tap="goCreate">
       <view class="hero-copy">
@@ -59,18 +64,27 @@
       >
         <view class="entry-card-fallback" :class="`entry-${item.key}`">
           <view class="entry-fallback-icon">
-            <text>AI</text>
+            <image class="entry-fallback-icon-image" :src="item.icon" mode="aspectFit" />
           </view>
           <view class="entry-fallback-title">{{ item.title }}</view>
           <view class="entry-fallback-sub">{{ item.sub }}</view>
         </view>
-        <image class="entry-card-image" :src="item.image" mode="aspectFill" lazy-load />
+        <image
+          v-if="!entryImageErrors[item.key]"
+          class="entry-card-image"
+          :src="item.image"
+          mode="aspectFill"
+          @error="onEntryImageError(item.key)"
+        />
       </button>
     </view>
 
     <view class="section-head">
       <view class="section-title">灵感推荐<text>✨</text></view>
-      <button class="section-refresh" @tap="refreshInspirations">换一换 <text class="refresh-icon"></text></button>
+      <button class="section-refresh" :class="{ loading: loadingInspirations }" :disabled="loadingInspirations" @tap="refreshInspirations">
+        <text>{{ loadingInspirations ? '刷新中' : '换一换' }}</text>
+        <text class="refresh-icon"></text>
+      </button>
     </view>
 
     <scroll-view scroll-x class="inspiration-tabs">
@@ -131,12 +145,16 @@
     </view>
 
     <view v-else class="inspiration-empty">
+      <text v-if="loadingInspirations" class="inline-spinner empty-spinner"></text>
       <view>{{ loadingInspirations ? '正在加载灵感...' : '暂无灵感内容' }}</view>
       <button @tap="refreshInspirations">重新加载</button>
     </view>
 
     <view v-if="filteredInspirations.length" class="load-state">
-      <text v-if="loadingInspirations">加载中...</text>
+      <view v-if="loadingInspirations" class="inline-loading">
+        <text class="inline-spinner small"></text>
+        <text>加载中...</text>
+      </view>
       <text v-else-if="!hasMore">没有更多了</text>
       <text v-else>继续下滑查看更多</text>
     </view>
@@ -162,29 +180,36 @@
       @close="previewTemplate = null"
       @use="usePreviewTemplate"
     />
+    <AppDialogHost class="app-dialog-host-root" />
     <AppTabBar class="app-nav-root" />
   </view>
 </template>
 
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { onReachBottom, onShow } from '@dcloudio/uni-app';
+import { onPullDownRefresh, onReachBottom, onShow } from '@dcloudio/uni-app';
 import AppTabBar from '@/components/common/AppTabBar.vue';
 import AppTopbar from '@/components/common/AppTopbar.vue';
+import AppDialogHost from '@/components/common/AppDialogHost.vue';
 import TemplatePreviewSheet from '@/components/business/TemplatePreviewSheet.vue';
-import { getInspirations } from '@/api/template';
+import { getInspirations, useTemplate as useContentTemplate } from '@/api/template';
 import { useAuthStore } from '@/stores/auth';
 import { useConfigStore } from '@/stores/config';
 import { useUserStore } from '@/stores/user';
-import { PAGE_ROUTES } from '@/utils/constants';
+import { PAGE_ROUTES, STORAGE_KEYS } from '@/utils/constants';
 import { isDevFallbackEnabled, warnDevFallback } from '@/utils/dev-fallback';
+import { normalizeBackendMediaUrl } from '@/utils/media-url';
+import { acceptLegalDocuments, getLegalDocuments } from '@/api/config';
+import { showAppDialog, showMemberRequiredDialog } from '@/utils/app-dialog';
 import type { CreativeTemplate } from '@/utils/mock';
+import { markAnnouncementRead, closeAnnouncement } from '@/api/announcements';
 
 type EntryKey = 'image' | 'video' | 'comic';
 
 interface EntryCard {
   key: EntryKey;
   image: string;
+  icon: string;
   title: string;
   sub: string;
 }
@@ -199,7 +224,11 @@ interface InspirationItem {
   theme: string;
   kind: 'image' | 'video';
   cover?: string;
+  mediaUrl?: string;
   prompt?: string;
+  canUse?: boolean;
+  canSave?: boolean;
+  lockReason?: string;
 }
 
 interface HomeAnnouncement {
@@ -207,25 +236,36 @@ interface HomeAnnouncement {
   title: string;
   content: string;
   type: string;
+  showFrequency: string;
   readAt: string | null;
+  closedAt?: string | null;
+  lastPopupAt?: string | null;
+  popupCount?: number;
   startAt?: string | null;
   createdAt?: string | null;
 }
 
+interface LocalAnnouncementPopupRecord {
+  lastPopupAt?: string;
+  closedAt?: string;
+  readAt?: string;
+  popupCount?: number;
+}
+
+interface LegalDocument {
+  docType: string;
+  title: string;
+  version: string;
+  content: string;
+}
+
 const LOCAL_HOME_BANNER = '/static/home/home_banner.jpg';
 const LOCAL_HOME_MEMBER_UPSELL = '/static/home/home_member_upsell.jpg';
-const devPreviewAnnouncement: HomeAnnouncement = {
-  id: 0,
-  title: 'AI漫剧功能全新上线，快来体验吧！🎉',
-  content: '首页公告开发预览',
-  type: 'home',
-  readAt: null,
-  createdAt: '2026-05-20T12:30:00+08:00'
-};
-const entryCards: EntryCard[] = [
-  { key: 'image', image: '/static/home/home_entry_image.jpg', title: 'AI生图', sub: '智能生成图片' },
-  { key: 'video', image: '/static/home/home_entry_video.jpg', title: 'AI视频', sub: '一键生成视频' },
-  { key: 'comic', image: '/static/home/home_entry_comic.jpg', title: 'AI漫剧', sub: '漫画与故事创作' }
+const DIALOG_VISUAL_BASE = '/static/visuals/dialog';
+const allEntryCards: EntryCard[] = [
+  { key: 'image', image: '/static/home/home_entry_image.jpg', icon: '/static/icons/workbench_image.svg', title: 'AI生图', sub: '智能生成图片' },
+  { key: 'video', image: '/static/home/home_entry_video.jpg', icon: '/static/icons/workbench_video.svg', title: 'AI视频', sub: '一键生成视频' },
+  { key: 'comic', image: '/static/home/home_entry_comic.jpg', icon: '/static/icons/workbench_comic.svg', title: 'AI漫剧', sub: '漫画与故事创作' }
 ];
 
 const fallbackInspirations: InspirationItem[] = [
@@ -245,16 +285,26 @@ const activeInspirationTab = ref('推荐');
 const inspirations = ref<InspirationItem[]>([]);
 const previewTemplate = ref<CreativeTemplate | null>(null);
 const loadingInspirations = ref(false);
+const pullRefreshing = ref(false);
+const phoneBinding = ref(false);
 const hasMore = ref(true);
 const page = ref(1);
 const pageSize = 12;
 const failedVisualAssets = ref<Record<string, boolean>>({});
+const entryImageErrors = ref<Record<string, boolean>>({});
+const popupDismissed = ref(false);
+const phonePromptDismissed = ref(false);
+const dialogFlowRunning = ref(false);
 
 const appName = computed(() => {
   const source = configStore.publicConfig || {};
   return String(source.appName || source.siteName || 'AIGC生成艺术工坊');
 });
-const showMemberFloat = computed(() => !userStore.isMember);
+const membershipEnabled = computed(() => configStore.publicConfig?.membershipEnabled !== false);
+const storyboardGenerateEnabled = computed(() => configStore.features.storyboardGenerate !== false);
+const entryCards = computed(() => allEntryCards.filter((item) => item.key !== 'comic' || storyboardGenerateEnabled.value));
+const showMemberFloat = computed(() => membershipEnabled.value && !userStore.isMember);
+const phoneBound = computed(() => Boolean(userStore.user?.phoneBound || userStore.user?.phone));
 const visualAssets = computed(() => {
   const value = configStore.publicConfig?.visualAssets;
   return value && typeof value === 'object' ? value as Record<string, unknown> : {};
@@ -266,7 +316,9 @@ const homeAnnouncement = computed(() => {
   const list = Array.isArray(homeData.homeAnnouncements) ? homeData.homeAnnouncements : [];
   const first = list[0];
   if (first && typeof first === 'object') return normalizeHomeAnnouncement(first as Record<string, unknown>);
-  return isDevFallbackEnabled ? devPreviewAnnouncement : null;
+  const popup = homeData.popupAnnouncement;
+  if (popup && typeof popup === 'object') return normalizeHomeAnnouncement(popup as Record<string, unknown>);
+  return null;
 });
 const filteredInspirations = computed(() => {
   return inspirations.value.filter((item) => tabMatches(item, activeInspirationTab.value));
@@ -275,18 +327,174 @@ const leftInspirations = computed(() => filteredInspirations.value.filter((_, in
 const rightInspirations = computed(() => filteredInspirations.value.filter((_, index) => index % 2 === 1));
 
 onShow(() => {
-  configStore.hydrate();
-  configStore.loadPublicConfig().catch(() => undefined);
-  configStore.loadHomeData().catch(() => undefined);
-  authStore.hydrate();
-  userStore.hydrate();
-  if (authStore.isLoggedIn) {
-    userStore.loadFullProfile().catch(() => undefined);
-  }
-  if (!inspirations.value.length) {
-    loadInspirations(true);
-  }
+  refreshHomePage(!inspirations.value.length).catch(() => undefined);
 });
+
+onPullDownRefresh(() => {
+  pullRefreshing.value = true;
+  refreshHomePage(true, true).finally(() => {
+    pullRefreshing.value = false;
+    uni.stopPullDownRefresh();
+  });
+});
+
+async function refreshHomePage(reloadInspirations: boolean, force = false) {
+  configStore.hydrate();
+  await authStore.hydrate();
+  await userStore.hydrate();
+
+  const homePromise = configStore.loadHomeData({ force });
+
+  await Promise.all([
+    configStore.loadPublicConfig({ force }).catch(() => undefined),
+    homePromise.catch(() => undefined),
+    authStore.isLoggedIn ? userStore.loadFullProfile().catch(() => undefined) : Promise.resolve(),
+    reloadInspirations ? loadInspirations(true).catch(() => undefined) : Promise.resolve()
+  ]);
+
+  runHomeDialogFlow().catch(() => undefined);
+}
+
+async function runHomeDialogFlow() {
+  if (dialogFlowRunning.value) return;
+  dialogFlowRunning.value = true;
+  try {
+    await maybeShowAgreementDialog();
+    await maybeShowPhoneDialog();
+    await maybeShowAnnouncementDialog();
+  } finally {
+    dialogFlowRunning.value = false;
+  }
+}
+
+async function maybeShowAgreementDialog() {
+  const legalRequired = (configStore.homeData?.legalRequired || {}) as Record<string, any>;
+  const serverRequiresAgreement = authStore.isLoggedIn && Boolean(legalRequired.required);
+  const docs = await loadLegalDocumentsForDialog();
+  const signature = legalSignature(docs, legalRequired);
+  const localSignature = String(uni.getStorageSync(STORAGE_KEYS.legalConsent) || '');
+  if (!serverRequiresAgreement && localSignature === signature) return;
+
+  await showAppDialog({
+    variant: 'agreement',
+    image: '/static/icons/icon_security_shield.svg',
+    title: '请先阅读并同意协议',
+    subtitle: '继续使用前，请确认已阅读用户协议、隐私政策和 AI 内容规则。',
+    richContent: agreementSummary(docs, legalRequired),
+    primaryLabel: '同意并继续',
+    secondaryLabel: '查看完整协议',
+    closable: false,
+    maskClosable: false,
+    closeOnSecondary: true,
+    onPrimary: async () => {
+      if (authStore.isLoggedIn && docs.length) {
+        await acceptLegalDocuments(
+          docs.map((item) => ({ docType: item.docType, version: item.version })),
+          'first_open'
+        );
+      }
+      uni.setStorageSync(STORAGE_KEYS.legalConsent, signature);
+    },
+    onSecondary: () => {
+      uni.navigateTo({ url: PAGE_ROUTES.agreement });
+    }
+  });
+}
+
+async function maybeShowPhoneDialog() {
+  if (!authStore.isLoggedIn || phoneBound.value || phonePromptDismissed.value) return;
+  await showAppDialog({
+    variant: 'phone',
+    image: `${DIALOG_VISUAL_BASE}/benefit-support-contact.png`,
+    title: '绑定手机号',
+    subtitle: '用于订单通知、生成结果提醒、售后联系和账号安全验证。',
+    primaryLabel: phoneBinding.value ? '绑定中' : '授权手机号',
+    secondaryLabel: '暂不绑定',
+    primaryOpenType: 'getPhoneNumber',
+    benefits: [
+      { label: '订单通知', sub: '充值开通可追踪', image: `${DIALOG_VISUAL_BASE}/benefit-order-notice.png` },
+      { label: '结果提醒', sub: '生成完成不错过', image: `${DIALOG_VISUAL_BASE}/benefit-result-notice.png` },
+      { label: '售后联系', sub: '问题处理更快', image: `${DIALOG_VISUAL_BASE}/benefit-support-contact.png` }
+    ],
+    onGetPhoneNumber: async (event) => {
+      const ok = await handleGetPhoneNumber(event);
+      if (ok) phonePromptDismissed.value = true;
+      return ok;
+    },
+    onSecondary: () => {
+      phonePromptDismissed.value = true;
+    }
+  });
+}
+
+async function maybeShowAnnouncementDialog() {
+  if (popupDismissed.value) return;
+  const homeData = configStore.homeData || {};
+  const popup = homeData.popupAnnouncement;
+  if (!popup || typeof popup !== 'object' || Object.keys(popup).length === 0) return;
+  const announcement = normalizeHomeAnnouncement(popup as Record<string, unknown>);
+  if (!announcement.id && !announcement.title && !announcement.content) return;
+  if (!shouldShowLocalAnnouncementPopup(announcement)) return;
+  markLocalAnnouncementPopupSeen(announcement);
+  await showAppDialog({
+    variant: 'announcement',
+    image: '/static/home/notice_megaphone.png',
+    title: announcement.title || '公告',
+    richContent: announcement.content || '暂无公告内容',
+    primaryLabel: '我知道了',
+    secondaryLabel: '查看全部公告',
+    onSecondary: () => {
+      uni.navigateTo({ url: PAGE_ROUTES.announcements });
+    },
+    onClose: () => {
+      closeHomeAnnouncement(announcement);
+    }
+  });
+}
+
+async function loadLegalDocumentsForDialog(): Promise<LegalDocument[]> {
+  try {
+    const res = await getLegalDocuments<Record<string, unknown>>();
+    const docs = (res.documents || res.list || []) as Record<string, unknown>[];
+    return docs.map(normalizeLegalDocument).filter((item) => item.docType && item.version);
+  } catch {
+    return [];
+  }
+}
+
+function normalizeLegalDocument(row: Record<string, unknown>): LegalDocument {
+  return {
+    docType: String(row.docType || row.doc_type || ''),
+    title: String(row.title || '用户协议'),
+    version: String(row.version || ''),
+    content: String(row.content || '')
+  };
+}
+
+function legalSignature(docs: LegalDocument[], legalRequired: Record<string, any>) {
+  if (docs.length) return docs.map((item) => `${item.docType}:${item.version}`).join('|');
+  const missing = Array.isArray(legalRequired.missing) ? legalRequired.missing : [];
+  if (missing.length) return missing.map((item: any) => `${item.docType || item.doc_type}:${item.version || ''}`).join('|');
+  return 'local-legal-v1';
+}
+
+function agreementSummary(docs: LegalDocument[], legalRequired: Record<string, any>) {
+  const names = docs.length
+    ? docs.map((item) => `${item.title} v${item.version}`)
+    : Array.isArray(legalRequired.missing)
+      ? legalRequired.missing.map((item: any) => `${item.title || '协议'} v${item.version || ''}`)
+      : [];
+  const list = names.length ? names : ['用户协议', '隐私政策', 'AI 内容规则'];
+  return `<p>请确认你已阅读并同意以下内容：</p><ul>${list.map((item) => `<li>${item}</li>`).join('')}</ul><p>平台会依据协议处理账号、积分、会员、作品保存和内容合规相关事项。</p>`;
+}
+
+function closeHomeAnnouncement(announcement: HomeAnnouncement) {
+  popupDismissed.value = true;
+  markLocalAnnouncementClosed(announcement);
+  if (!authStore.isLoggedIn || !announcement.id) return;
+  markAnnouncementRead(Number(announcement.id)).catch(() => undefined);
+  closeAnnouncement(Number(announcement.id)).catch(() => undefined);
+}
 
 onReachBottom(() => {
   loadInspirations(false);
@@ -305,15 +513,52 @@ function goEntry(key: EntryKey) {
     uni.navigateTo({ url: PAGE_ROUTES.aiVideo });
     return;
   }
-  uni.reLaunch({ url: PAGE_ROUTES.comic });
+  if (!storyboardGenerateEnabled.value) {
+    uni.showToast({ title: 'AI漫剧功能已关闭', icon: 'none' });
+    return;
+  }
+  uni.navigateTo({ url: PAGE_ROUTES.comic });
 }
 
 function goMember() {
+  if (!membershipEnabled.value) {
+    uni.showToast({ title: '会员功能已关闭', icon: 'none' });
+    return;
+  }
   uni.navigateTo({ url: PAGE_ROUTES.member });
 }
 
 function goAnnouncements() {
+  if (homeAnnouncement.value?.id) {
+    markLocalAnnouncementRead(homeAnnouncement.value);
+    if (authStore.isLoggedIn) markAnnouncementRead(Number(homeAnnouncement.value.id)).catch(() => undefined);
+  }
   uni.navigateTo({ url: PAGE_ROUTES.announcements });
+}
+
+async function handleGetPhoneNumber(event: any) {
+  if (phoneBinding.value) return false;
+  const code = String(event?.detail?.code || '').trim();
+  if (!code) {
+    uni.showToast({ title: '未获得手机号授权', icon: 'none' });
+    return false;
+  }
+  phoneBinding.value = true;
+  try {
+    await userStore.bindPhoneByCode(code);
+    uni.showToast({ title: '手机号已绑定', icon: 'none' });
+    return true;
+  } catch (error) {
+    uni.showToast({ title: requestErrorText(error, '绑定手机号失败'), icon: 'none' });
+    return false;
+  } finally {
+    phoneBinding.value = false;
+  }
+}
+
+function requestErrorText(error: unknown, fallback: string) {
+  const message = error instanceof Error ? error.message.trim() : '';
+  return message ? message.slice(0, 60) : fallback;
 }
 
 function refreshInspirations() {
@@ -333,6 +578,13 @@ function onVisualAssetError(localKey: string) {
   failedVisualAssets.value = {
     ...failedVisualAssets.value,
     [`${localKey}:${source || fallback}`]: true
+  };
+}
+
+function onEntryImageError(key: EntryKey) {
+  entryImageErrors.value = {
+    ...entryImageErrors.value,
+    [key]: true
   };
 }
 
@@ -408,13 +660,32 @@ function useInspiration(item: InspirationItem) {
     prompt: item.prompt || item.title,
     mediaType: item.kind,
     coverUrl: item.cover || '',
+    mediaUrl: item.mediaUrl || '',
     mode: item.kind === 'video' ? 'text2video' : 'text2img',
     category: item.category,
-    duration: item.kind === 'video' ? '10s' : undefined
+    duration: item.kind === 'video' ? '10s' : undefined,
+    canUse: item.canUse !== false,
+    canSave: item.canSave !== false && item.canUse !== false,
+    lockReason: item.lockReason || ''
   };
 }
 
-function usePreviewTemplate(item: CreativeTemplate) {
+async function usePreviewTemplate(item: CreativeTemplate) {
+  if (item.canUse === false) {
+    showMemberRequiredDialog({
+      title: '开通会员使用模板',
+      message: item.lockReason || '该模板需开通会员后使用。'
+    });
+    return;
+  }
+  const backendTemplateId = item.mediaType === 'image' ? numericTemplateId(item.id) : 0;
+  if (backendTemplateId) {
+    try {
+      await useContentTemplate(backendTemplateId);
+    } catch {
+      return;
+    }
+  }
   previewTemplate.value = null;
   const prompt = encodeURIComponent(item.prompt);
   const target = item.mediaType === 'video' ? PAGE_ROUTES.aiVideo : PAGE_ROUTES.aiImage;
@@ -427,10 +698,89 @@ function normalizeHomeAnnouncement(row: Record<string, unknown>): HomeAnnounceme
     title: String(row.title || '公告'),
     content: String(row.content || ''),
     type: String(row.type || 'home'),
+    showFrequency: String(row.showFrequency || row.show_frequency || 'once_per_day'),
     readAt: String(row.readAt || row.read_at || '') || null,
+    closedAt: String(row.closedAt || row.closed_at || '') || null,
+    lastPopupAt: String(row.lastPopupAt || row.last_popup_at || '') || null,
+    popupCount: Number(row.popupCount || row.popup_count || 0),
     startAt: String(row.startAt || row.start_at || '') || null,
     createdAt: String(row.createdAt || row.created_at || '') || null
   };
+}
+
+function shouldShowLocalAnnouncementPopup(announcement: HomeAnnouncement) {
+  const frequency = announcement.showFrequency || 'once_per_day';
+  if (frequency === 'list_only') return false;
+  if (frequency === 'every_open') return true;
+  const record = getLocalAnnouncementRecord(announcement);
+  if (!record) return true;
+  if (frequency === 'once') return !record.closedAt && !record.readAt && !Number(record.popupCount || 0);
+  if (frequency === 'once_per_day') {
+    return !isSameLocalDate(record.closedAt)
+      && !isSameLocalDate(record.readAt)
+      && !isSameLocalDate(record.lastPopupAt);
+  }
+  return true;
+}
+
+function markLocalAnnouncementPopupSeen(announcement: HomeAnnouncement) {
+  updateLocalAnnouncementRecord(announcement, (record) => ({
+    ...record,
+    lastPopupAt: new Date().toISOString(),
+    popupCount: Number(record.popupCount || 0) + 1
+  }));
+}
+
+function markLocalAnnouncementClosed(announcement: HomeAnnouncement) {
+  updateLocalAnnouncementRecord(announcement, (record) => ({
+    ...record,
+    closedAt: new Date().toISOString()
+  }));
+}
+
+function markLocalAnnouncementRead(announcement: HomeAnnouncement) {
+  updateLocalAnnouncementRecord(announcement, (record) => ({
+    ...record,
+    readAt: new Date().toISOString()
+  }));
+}
+
+function getLocalAnnouncementRecord(announcement: HomeAnnouncement) {
+  return readLocalAnnouncementState()[localAnnouncementKey(announcement)];
+}
+
+function updateLocalAnnouncementRecord(
+  announcement: HomeAnnouncement,
+  updater: (record: LocalAnnouncementPopupRecord) => LocalAnnouncementPopupRecord
+) {
+  const key = localAnnouncementKey(announcement);
+  if (!key) return;
+  const state = readLocalAnnouncementState();
+  state[key] = updater(state[key] || {});
+  const trimmed: Record<string, LocalAnnouncementPopupRecord> = {};
+  Object.entries(state).slice(-50).forEach(([itemKey, itemValue]) => {
+    trimmed[itemKey] = itemValue;
+  });
+  uni.setStorageSync(STORAGE_KEYS.announcementPopupState, trimmed);
+}
+
+function readLocalAnnouncementState(): Record<string, LocalAnnouncementPopupRecord> {
+  const value = uni.getStorageSync(STORAGE_KEYS.announcementPopupState);
+  return value && typeof value === 'object' ? value as Record<string, LocalAnnouncementPopupRecord> : {};
+}
+
+function localAnnouncementKey(announcement: HomeAnnouncement) {
+  return announcement.id ? String(announcement.id) : `${announcement.type}:${announcement.title}`;
+}
+
+function isSameLocalDate(value?: string) {
+  if (!value) return false;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return false;
+  const now = new Date();
+  return date.getFullYear() === now.getFullYear()
+    && date.getMonth() === now.getMonth()
+    && date.getDate() === now.getDate();
 }
 
 function normalizeInspiration(item: Record<string, unknown>, index: number): InspirationItem {
@@ -447,9 +797,18 @@ function normalizeInspiration(item: Record<string, unknown>, index: number): Ins
     tag: tagOf(kind, category),
     theme: ['flower', 'neon', 'cat', 'landscape', 'sky', 'story'][index % 6],
     kind,
-    cover: String(item.coverUrl || item.cover_url || item.thumbnail || item.cover || ''),
-    prompt: String(item.prompt || item.description || title)
+    cover: normalizeBackendMediaUrl(item.coverUrl || item.cover_url || item.thumbnail || item.cover),
+    mediaUrl: normalizeBackendMediaUrl(item.previewUrl || item.preview_url || item.mediaUrl || item.media_url),
+    prompt: String(item.prompt || item.description || title),
+    canUse: item.canUse !== false,
+    canSave: item.canSave !== false && item.canUse !== false,
+    lockReason: String(item.lockReason || '')
   };
+}
+
+function numericTemplateId(value: unknown) {
+  const id = Number(value);
+  return Number.isInteger(id) && id > 0 ? id : 0;
 }
 
 function categoryOf(item: Record<string, unknown>, templateType: string, title: string) {
@@ -517,7 +876,7 @@ function formatAnnouncementTime(value?: string | null) {
   pointer-events: none;
 }
 
-.home-page > view:not(.app-nav-root),
+.home-page > view:not(.app-nav-root):not(.pull-refresh-indicator):not(.app-dialog-host-root):not(.app-dialog-host),
 .home-page > scroll-view {
   position: relative;
   z-index: 1;
@@ -536,6 +895,61 @@ function formatAnnouncementTime(value?: string | null) {
   line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.pull-refresh-indicator {
+  position: fixed;
+  left: 50%;
+  top: calc(env(safe-area-inset-top) + 92rpx);
+  z-index: 32;
+  display: flex;
+  align-items: center;
+  gap: 10rpx;
+  height: 56rpx;
+  padding: 0 22rpx;
+  border-radius: 999rpx;
+  background: rgba(255, 255, 255, 0.96);
+  color: #6c4bff;
+  font-size: 23rpx;
+  font-weight: 900;
+  line-height: 56rpx;
+  box-shadow: 0 10rpx 18rpx rgba(122, 92, 255, 0.16);
+  opacity: 0;
+  transform: translate(-50%, -16rpx);
+  transition: opacity 180ms ease, transform 180ms ease;
+  pointer-events: none;
+}
+
+.pull-refresh-indicator.visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.pull-refresh-spinner {
+  flex-shrink: 0;
+  width: 24rpx;
+  height: 24rpx;
+  border: 4rpx solid rgba(108, 75, 255, 0.22);
+  border-top-color: #6c4bff;
+  border-radius: 50%;
+  animation: pull-refresh-spin 760ms linear infinite;
+}
+
+@keyframes pull-refresh-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pull-refresh-indicator {
+    transition: opacity 120ms ease;
+    transform: translate(-50%, 0);
+  }
+
+  .pull-refresh-spinner {
+    animation: none;
+    border-color: rgba(108, 75, 255, 0.22);
+    border-top-color: #6c4bff;
+  }
 }
 
 .home-hero {
@@ -956,18 +1370,13 @@ function formatAnnouncementTime(value?: string | null) {
   content: "";
 }
 
-.entry-fallback-icon text {
-  position: absolute;
-  right: -12rpx;
-  top: -14rpx;
-  height: 34rpx;
-  padding: 0 10rpx;
-  border-radius: 999rpx;
-  background: linear-gradient(135deg, #7b5cff, #a76bff);
-  color: #ffffff;
-  font-size: 20rpx;
-  font-weight: 900;
-  line-height: 34rpx;
+.entry-fallback-icon-image {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 64rpx;
+  height: 64rpx;
+  margin: 21rpx auto 0;
 }
 
 .entry-fallback-title {
@@ -1020,12 +1429,23 @@ function formatAnnouncementTime(value?: string | null) {
   line-height: 48rpx;
 }
 
+.section-refresh.loading {
+  color: #7a5cff;
+  opacity: 0.86;
+}
+
 .refresh-icon {
   width: 24rpx;
   height: 24rpx;
   border: 4rpx solid #6f7190;
   border-left-color: transparent;
   border-radius: 50%;
+}
+
+.section-refresh.loading .refresh-icon {
+  border-color: #7a5cff;
+  border-left-color: transparent;
+  animation: pull-refresh-spin 0.82s linear infinite;
 }
 
 .inspiration-tabs {
@@ -1254,6 +1674,22 @@ function formatAnnouncementTime(value?: string | null) {
   box-shadow: 0 10rpx 12rpx rgba(122, 92, 255, 0.08);
 }
 
+.inline-spinner {
+  display: inline-block;
+  width: 28rpx;
+  height: 28rpx;
+  box-sizing: border-box;
+  border: 4rpx solid rgba(122, 92, 255, 0.18);
+  border-top-color: #7a5cff;
+  border-radius: 50%;
+  vertical-align: middle;
+  animation: pull-refresh-spin 0.82s linear infinite;
+}
+
+.empty-spinner {
+  margin-bottom: 14rpx;
+}
+
 .inspiration-empty button {
   width: 190rpx;
   height: 56rpx;
@@ -1272,6 +1708,19 @@ function formatAnnouncementTime(value?: string | null) {
   font-size: 22rpx;
   font-weight: 800;
   text-align: center;
+}
+
+.inline-loading {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10rpx;
+}
+
+.inline-spinner.small {
+  width: 22rpx;
+  height: 22rpx;
+  border-width: 3rpx;
 }
 
 .member-float {
@@ -1408,4 +1857,5 @@ function formatAnnouncementTime(value?: string | null) {
   font-weight: 900;
   line-height: 60rpx;
 }
+
 </style>

@@ -1,20 +1,27 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import crypto from 'crypto';
+import fs from 'fs';
+import axios from 'axios';
 import { adminAuthMiddleware } from '../middleware/auth';
-import { getConnection } from '../utils/db';
+import { getConnection, queryOne } from '../utils/db';
+import { success, error } from '../utils/response';
+import { ErrorCodes } from '../types';
 import { StorageService } from '../services/storage/storage.service';
+import { preloadStorageConfigs } from '../services/storage/storage-config-loader';
 import { validateFileSize, validateMagicBytes, getImageDimensions } from '../services/storage/upload-validator';
 import { FileCategory, genFileNo } from '../services/storage/adapter.interface';
+import { resolveLocalFilePath } from '../services/storage/local-paths';
 
 const router = Router();
 const MAX_ADMIN_IMAGE_UPLOAD_SIZE = positiveInt(process.env.ADMIN_IMAGE_UPLOAD_MAX_FILE_SIZE || process.env.ADMIN_UPLOAD_MAX_FILE_SIZE || process.env.UPLOAD_MAX_FILE_SIZE, 10 * 1024 * 1024);
 const MAX_ADMIN_VIDEO_UPLOAD_SIZE = positiveInt(process.env.ADMIN_VIDEO_UPLOAD_MAX_FILE_SIZE || process.env.UPLOAD_MAX_VIDEO_SIZE, 200 * 1024 * 1024);
 const MAX_ADMIN_UPLOAD_SIZE = Math.max(MAX_ADMIN_IMAGE_UPLOAD_SIZE, MAX_ADMIN_VIDEO_UPLOAD_SIZE);
+const FILE_CONTENT_PROXY_TIMEOUT_MS = positiveInt(process.env.FILE_CONTENT_PROXY_TIMEOUT_MS, 120000);
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_ADMIN_UPLOAD_SIZE } });
 const ALLOWED_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const ALLOWED_VIDEO_MIME_TYPES = new Set(['video/mp4', 'video/quicktime', 'video/webm', 'video/x-msvideo']);
-const ALLOWED_ADMIN_FILE_CATEGORIES = new Set<FileCategory>(['general', 'template_cover', 'ref_image', 'ai_video']);
+const ALLOWED_ADMIN_FILE_CATEGORIES = new Set<FileCategory>(['general', 'template_cover', 'ref_image', 'ref_video', 'ai_video']);
 
 function positiveInt(value: any, fallback: number): number {
   const parsed = parseInt(String(value || ''), 10);
@@ -22,11 +29,7 @@ function positiveInt(value: any, fallback: number): number {
 }
 
 function uploadFailed(res: Response, message: string, httpStatus = 400): void {
-  res.status(httpStatus).json({
-    success: false,
-    code: 'UPLOAD_FAILED',
-    message,
-  });
+  error(res, ErrorCodes.FILE_UPLOAD_FAILED, message, httpStatus);
 }
 
 function validateAdminFile(file: Express.Multer.File): string | null {
@@ -54,6 +57,30 @@ function validateAdminFile(file: Express.Multer.File): string | null {
   const magicCheck = validateMagicBytes(file.buffer, file.mimetype);
   if (!magicCheck.valid) return `${isVideo ? '视频' : '图片'}文件内容与类型不匹配`;
   return null;
+}
+
+function requestBaseUrl(req: Request): string {
+  const configured = String(process.env.APP_PUBLIC_URL || process.env.PUBLIC_API_DOMAIN || process.env.SITE_API_DOMAIN || '').trim().replace(/\/+$/, '');
+  if (/^https?:\/\//i.test(configured)) return configured;
+  return `${req.protocol}://${req.get('host') || ''}`.replace(/\/+$/, '');
+}
+
+function absoluteFileUrl(req: Request, url: string): string {
+  const value = String(url || '').trim();
+  if (!value || /^https?:\/\//i.test(value)) return value;
+  return `${requestBaseUrl(req)}${value.startsWith('/') ? value : `/${value}`}`;
+}
+
+function adminFileContentUrl(fileNo: string): string {
+  return `/api/v1/admin/files/${encodeURIComponent(fileNo)}/content`;
+}
+
+function storageSourceUrl(req: Request, file: any): string {
+  const adapter = StorageService.getActiveAdapter();
+  const raw = file.provider === adapter.provider && file.storage_key
+    ? adapter.getAccessUrl(file.storage_key)
+    : (file.cdn_url || file.access_url || '');
+  return absoluteFileUrl(req, raw);
 }
 
 router.post('/files/upload', adminAuthMiddleware, (req: Request, res: Response) => {
@@ -86,6 +113,7 @@ router.post('/files/upload', adminAuthMiddleware, (req: Request, res: Response) 
       const defaultRefType = fileCategory === 'template_cover' ? 'template_cover' : fileCategory === 'ai_video' ? 'template_preview' : 'admin_upload';
       const refType = String(req.body?.refType || defaultRefType).slice(0, 32);
       const refId = String(req.body?.refId || req.user!.userId || '').slice(0, 64);
+      await preloadStorageConfigs();
       const adapter = StorageService.getActiveAdapter();
       const storageKey = StorageService.genStorageKey(fileCategory, file.originalname);
       const uploadStart = Date.now();
@@ -144,19 +172,25 @@ router.post('/files/upload', adminAuthMiddleware, (req: Request, res: Response) 
       );
 
       await conn.commit();
-      res.json({
-        success: true,
-        data: {
-          url: publicUrl,
-          fileId,
-          fileNo,
-          filename: file.originalname,
-          size: file.size,
-          mimeType: file.mimetype,
-          storageProvider: adapter.provider,
-        },
-        message: '上传成功',
-      });
+      const accessUrl = absoluteFileUrl(req, adapter.getAccessUrl(storageKey));
+      const displayUrl = adminFileContentUrl(fileNo);
+      const absolutePublicUrl = absoluteFileUrl(req, publicUrl);
+      success(res, {
+        url: absolutePublicUrl,
+        displayUrl,
+        previewUrl: accessUrl || absolutePublicUrl || displayUrl,
+        copyUrl: absolutePublicUrl || accessUrl,
+        rawUrl: publicUrl,
+        publicUrl: absolutePublicUrl,
+        accessUrl,
+        cdnUrl: absolutePublicUrl,
+        fileId,
+        fileNo,
+        filename: file.originalname,
+        size: file.size,
+        mimeType: file.mimetype,
+        storageProvider: adapter.provider,
+      }, '上传成功');
     } catch (uploadErr: any) {
       try { await conn.rollback(); } catch {}
       console.error('[admin-files] upload failed:', uploadErr);
@@ -165,6 +199,45 @@ router.post('/files/upload', adminAuthMiddleware, (req: Request, res: Response) 
       conn.release();
     }
   });
+});
+
+router.get('/files/:fileNo/content', adminAuthMiddleware, async (req: Request, res: Response) => {
+  try {
+    const file = await queryOne<any>('SELECT * FROM files WHERE file_no = ? AND is_deleted = 0', [req.params.fileNo]);
+    if (!file) {
+      error(res, ErrorCodes.FILE_NOT_FOUND, '文件不存在', 404);
+      return;
+    }
+
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    if (file.provider === 'local') {
+      const filePath = resolveLocalFilePath(file.storage_key);
+      if (!fs.existsSync(filePath)) {
+        error(res, ErrorCodes.FILE_NOT_FOUND, '文件不存在', 404);
+        return;
+      }
+      const stat = fs.statSync(filePath);
+      res.setHeader('Content-Type', file.mime_type || 'application/octet-stream');
+      res.setHeader('Content-Length', String(stat.size));
+      fs.createReadStream(filePath).pipe(res);
+      return;
+    }
+
+    const response = await axios.get(storageSourceUrl(req, file), {
+      responseType: 'stream',
+      timeout: FILE_CONTENT_PROXY_TIMEOUT_MS,
+    });
+    res.setHeader('Content-Type', file.mime_type || response.headers['content-type'] || 'application/octet-stream');
+    const contentLength = response.headers['content-length'];
+    if (typeof contentLength === 'string' || typeof contentLength === 'number') res.setHeader('Content-Length', contentLength);
+    response.data.pipe(res);
+  } catch (err: any) {
+    if (res.headersSent) {
+      res.destroy(err);
+      return;
+    }
+    error(res, ErrorCodes.FILE_STORAGE_ERROR, err?.message || '文件读取失败');
+  }
 });
 
 export default router;

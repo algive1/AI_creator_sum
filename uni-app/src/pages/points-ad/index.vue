@@ -54,6 +54,7 @@ interface AdHistory {
 const rewardPerWatch = ref(0);
 const maxPerDay = ref(0);
 const watched = ref(0);
+const adUnitId = ref('');
 const isLoadingAd = ref(false);
 const adErrorText = ref('');
 const history = ref<AdHistory[]>([]);
@@ -79,12 +80,15 @@ function loadStatus() {
       watched.value = Number(res.watchedToday || res.watched || 0);
       maxPerDay.value = Number(res.maxPerDay || res.maxDailyCount || 0);
       rewardPerWatch.value = Number(res.rewardPerWatch || 0);
+      const config = res.config && typeof res.config === 'object' ? res.config as Record<string, unknown> : {};
+      adUnitId.value = String(res.adUnitId || config.adUnitId || '');
       adErrorText.value = '';
     })
     .catch(() => {
       watched.value = 0;
       maxPerDay.value = 0;
       rewardPerWatch.value = 0;
+      adUnitId.value = '';
       adErrorText.value = '广告状态获取失败';
     });
 }
@@ -104,44 +108,71 @@ function loadHistory() {
     .catch(() => { history.value = []; });
 }
 
-function watchAd() {
+async function watchAd() {
   if (isLoadingAd.value || exhausted.value) return;
   isLoadingAd.value = true;
   adErrorText.value = '';
-  createAdRewardSession<Record<string, unknown>>()
-    .then((session) => {
-      const sessionId = String(session.sessionId || '');
-      uni.showModal({
-        title: '模拟激励广告',
-        content: '当前为联调模拟流程。确认代表完整观看，取消代表中途关闭。',
-        confirmText: '完整观看',
-        cancelText: '中途关闭',
-        success: async (res) => {
-          if (!res.confirm) {
-            isLoadingAd.value = false;
-            uni.showToast({ title: '完整观看后才可领取积分', icon: 'none' });
-            return;
-          }
-          try {
-            const reward = await claimAdReward<Record<string, unknown>>(sessionId, true);
-            const points = Number(reward.rewardPoints || rewardPerWatch.value || 0);
-            uni.showToast({ title: points ? `+${points} 积分` : '奖励已到账', icon: 'none' });
-            loadStatus();
-            loadHistory();
-          } finally {
-            isLoadingAd.value = false;
-          }
-        },
-        fail: () => {
-          isLoadingAd.value = false;
-          adErrorText.value = '广告暂不可用，稍后再试';
-        }
-      });
-    })
-    .catch(() => {
-      isLoadingAd.value = false;
-      adErrorText.value = '广告暂不可用，稍后再试';
-    });
+  try {
+    if (!adUnitId.value) {
+      throw new Error('后台未配置微信激励视频广告位');
+    }
+    const session = await createAdRewardSession<Record<string, unknown>>();
+    const sessionId = String(session.sessionId || '');
+    if (!sessionId) throw new Error('广告会话创建失败');
+
+    const completed = await playRewardedVideo(adUnitId.value);
+    if (!completed) {
+      claimAdReward(sessionId, false).catch(() => undefined);
+      uni.showToast({ title: '完整观看后才可领取积分', icon: 'none' });
+      return;
+    }
+
+    const reward = await claimAdReward<Record<string, unknown>>(sessionId, true);
+    const points = Number(reward.rewardPoints || rewardPerWatch.value || 0);
+    uni.showToast({ title: points ? `+${points} 积分` : '奖励已到账', icon: 'none' });
+    loadStatus();
+    loadHistory();
+  } catch (error) {
+    const message = error instanceof Error && error.message ? error.message : '广告暂不可用，稍后再试';
+    adErrorText.value = message;
+    uni.showToast({ title: message, icon: 'none' });
+  } finally {
+    isLoadingAd.value = false;
+  }
+}
+
+function playRewardedVideo(unitId: string): Promise<boolean> {
+  const wxApi = (globalThis as unknown as { wx?: any }).wx;
+  if (typeof wxApi?.createRewardedVideoAd !== 'function') {
+    return Promise.reject(new Error('当前平台不支持激励视频广告'));
+  }
+
+  const videoAd = wxApi.createRewardedVideoAd({ adUnitId: unitId });
+  return new Promise<boolean>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      if (typeof videoAd.offClose === 'function') videoAd.offClose(onClose);
+      if (typeof videoAd.offError === 'function') videoAd.offError(onError);
+    };
+    const finish = (handler: (value: any) => void, value: any) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      handler(value);
+    };
+    const onClose = (res: { isEnded?: boolean }) => {
+      finish(resolve, res?.isEnded !== false);
+    };
+    const onError = (err: { errMsg?: string }) => {
+      finish(reject, new Error(err?.errMsg || '激励视频广告加载失败'));
+    };
+
+    videoAd.onClose(onClose);
+    videoAd.onError(onError);
+    Promise.resolve(videoAd.load())
+      .then(() => Promise.resolve(videoAd.show()))
+      .catch((error) => finish(reject, error));
+  });
 }
 </script>
 

@@ -2,6 +2,7 @@ import fs from 'fs';
 import http from 'http';
 import path from 'path';
 import { spawn, spawnSync } from 'child_process';
+import dotenv from 'dotenv';
 
 export interface Pm2RuntimeOptions {
   appRoot: string;
@@ -49,23 +50,47 @@ function commandName(command: string): string {
   return command;
 }
 
+function commandInvocation(command: string, args: string[]): { command: string; args: string[] } {
+  const executable = commandName(command);
+  if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(executable)) {
+    return {
+      command: process.env.ComSpec || 'cmd.exe',
+      args: ['/d', '/c', executable, ...args],
+    };
+  }
+  return { command: executable, args };
+}
+
+function normalizeCommandOutput(output: string): string {
+  if (!/Unreachable code/i.test(output)) return output;
+  return [
+    'Node.js/PM2 运行环境异常：检测到 Node 内部错误 "Unreachable code"。',
+    '请切换到 Node.js 20 LTS 或稳定的 Node.js 22 LTS，重新执行 npm ci --include=dev && npm run build 后再启动 PM2。',
+    `原始输出：${output}`,
+  ].join(' ');
+}
+
 export function pm2Home(appRoot: string): string {
   return path.join(path.resolve(appRoot), '.pm2');
 }
 
 export function pm2RuntimeEnv(options: Pick<Pm2RuntimeOptions, 'appRoot' | 'port'>): NodeJS.ProcessEnv {
   const root = path.resolve(options.appRoot);
+  const envFile = path.join(root, 'current', 'server', '.env');
+  const fileEnv = fs.existsSync(envFile) ? dotenv.parse(fs.readFileSync(envFile, 'utf8')) : {};
   return {
     ...process.env,
+    ...fileEnv,
     HOME: root,
     PM2_HOME: pm2Home(root),
     NODE_ENV: 'production',
-    PORT: String(options.port),
+    PORT: String(fileEnv.PORT || options.port),
   };
 }
 
 function runFixedCommand(command: string, args: string[], env: NodeJS.ProcessEnv): Pm2CommandResult {
-  const result = spawnSync(command, args, {
+  const invocation = commandInvocation(command, args);
+  const result = spawnSync(invocation.command, invocation.args, {
     encoding: 'utf8',
     shell: false,
     windowsHide: true,
@@ -117,7 +142,8 @@ export function preparePm2RuntimeDirs(options: Pm2RuntimeOptions): string[] {
 }
 
 export function checkPm2Version(options: Pick<Pm2RuntimeOptions, 'appRoot' | 'port'>): { exists: boolean; version?: string; error?: string } {
-  const result = spawnSync(commandName('pm2'), ['--version'], {
+  const invocation = commandInvocation('pm2', ['--version']);
+  const result = spawnSync(invocation.command, invocation.args, {
     encoding: 'utf8',
     shell: false,
     windowsHide: true,
@@ -134,7 +160,8 @@ export function checkPm2Version(options: Pick<Pm2RuntimeOptions, 'appRoot' | 'po
 export function runPm2Command(args: string[], options: Pm2RuntimeOptions): Promise<Pm2CommandResult> {
   return new Promise((resolve, reject) => {
     let settled = false;
-    const child = spawn(commandName('pm2'), args, {
+    const invocation = commandInvocation('pm2', args);
+    const child = spawn(invocation.command, invocation.args, {
       cwd: path.resolve(options.serverDir),
       shell: false,
       windowsHide: true,
@@ -180,7 +207,7 @@ export function runPm2Command(args: string[], options: Pm2RuntimeOptions): Promi
 async function runPm2Checked(args: string[], options: Pm2RuntimeOptions): Promise<Pm2CommandResult> {
   const result = await runPm2Command(args, options);
   if (result.code !== 0) {
-    const output = `${result.stdout}\n${result.stderr}`.trim();
+    const output = normalizeCommandOutput(`${result.stdout}\n${result.stderr}`.trim());
     throw new Error(`pm2 ${args.join(' ')} 执行失败，退出码 ${result.code}${output ? `：${output}` : ''}`);
   }
   return result;
@@ -280,7 +307,7 @@ export async function ensurePm2AppStarted(options: Pm2RuntimeOptions): Promise<P
     }
   }
 
-  await runPm2Checked(['start', 'dist/index.js', '--name', options.appName, '--update-env'], options);
+  await runPm2Checked(['start', 'dist/index.js', '--name', options.appName, '--update-env', '--max-restarts', '30', '--restart-delay', '3000'], options);
   await runPm2Checked(['save'], options);
 
   const { status, healthy } = await waitForOnlineHealth(options);

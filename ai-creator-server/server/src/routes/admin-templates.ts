@@ -27,8 +27,12 @@ router.get('/templates', adminAuthMiddleware, async (req: Request, res: Response
     const where = ['t.deleted_at IS NULL', "t.source = 'official'"];
     const params: any[] = [];
     if (templateType) {
-      where.push('t.template_type = ?');
-      params.push(templateType);
+      if (templateType === 'inspiration') {
+        where.push("(t.template_type = 'inspiration' OR JSON_EXTRACT(t.display_config, '$.inspiration') IS NOT NULL)");
+      } else {
+        where.push('t.template_type = ?');
+        params.push(templateType);
+      }
     }
     const [countRow] = await query<any>(
       `SELECT COUNT(*) AS total FROM templates t WHERE ${where.join(' AND ')}`,
@@ -234,6 +238,54 @@ router.delete('/templates/:id(\\d+)', adminAuthMiddleware, async (req: Request, 
   }
 });
 
+router.delete('/templates/batch', adminAuthMiddleware, async (req: Request, res: Response) => {
+  try {
+    const ids = normalizeIdList(req.body?.ids);
+    if (!ids.length) {
+      error(res, ErrorCodes.PARAM_ERROR, '请选择要删除的模板');
+      return;
+    }
+    const placeholders = ids.map(() => '?').join(',');
+    const [result] = await query<any>(
+      `UPDATE templates
+          SET status = 'offline', review_status = 'approved', is_enabled = 0, deleted_at = NOW(3), updated_at = NOW(3)
+        WHERE id IN (${placeholders}) AND source = 'official' AND deleted_at IS NULL`,
+      ids,
+    );
+    success(res, { deleted: true, count: Number(result?.affectedRows || 0) });
+  } catch (err: any) {
+    console.error('[admin-templates] batch delete failed:', err);
+    error(res, ErrorCodes.SERVER_ERROR, '批量删除模板失败');
+  }
+});
+
+router.put('/templates/batch/display-config', adminAuthMiddleware, async (req: Request, res: Response) => {
+  try {
+    const ids = normalizeIdList(req.body?.ids);
+    if (!ids.length) {
+      error(res, ErrorCodes.PARAM_ERROR, '请选择要设置展示位置的模板');
+      return;
+    }
+    const displayConfig = normalizeDisplayConfig(req.body?.displayConfig ?? req.body?.display_config);
+    if (!displayConfig) {
+      error(res, ErrorCodes.PARAM_ERROR, '请选择至少一个展示位置');
+      return;
+    }
+    const isRecommended = Object.values(displayConfig).some((item: any) => item?.pinned) ? 1 : 0;
+    const placeholders = ids.map(() => '?').join(',');
+    const [result] = await query<any>(
+      `UPDATE templates
+          SET display_config = ?, is_recommended = ?, updated_at = NOW(3)
+        WHERE id IN (${placeholders}) AND source = 'official' AND deleted_at IS NULL`,
+      [JSON.stringify(displayConfig), isRecommended, ...ids],
+    );
+    success(res, { updated: true, count: Number(result?.affectedRows || 0) });
+  } catch (err: any) {
+    console.error('[admin-templates] batch display config failed:', err);
+    error(res, ErrorCodes.SERVER_ERROR, '批量设置展示位置失败');
+  }
+});
+
 function normalizeAdminTemplateBody(body: any) {
   const templateType = normalizeTemplateType(body.templateType ?? body.template_type);
   const displayConfig = body.displayConfig ?? body.display_config ?? null;
@@ -283,6 +335,30 @@ function firstText(...values: any[]): string | undefined {
 function toNullableId(value: any): number | null {
   const id = Number(value);
   return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+function normalizeIdList(value: any): number[] {
+  const source = Array.isArray(value) ? value : [];
+  const ids = source
+    .map((item) => Number(item))
+    .filter((id) => Number.isInteger(id) && id > 0);
+  return Array.from(new Set(ids)).slice(0, 100);
+}
+
+function normalizeDisplayConfig(value: any): Record<string, { pinned: boolean; pinOrder: number }> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const entries = Object.entries(value)
+    .map(([key, config]) => {
+      const safeKey = String(key || '').replace(/[^a-zA-Z0-9_]/g, '');
+      if (!safeKey) return null;
+      const item = config && typeof config === 'object' ? config as Record<string, any> : {};
+      return [safeKey, {
+        pinned: item.pinned === true,
+        pinOrder: Number.isFinite(Number(item.pinOrder)) ? Math.max(0, Number(item.pinOrder)) : 0,
+      }] as const;
+    })
+    .filter(Boolean) as Array<readonly [string, { pinned: boolean; pinOrder: number }]>;
+  return entries.length ? Object.fromEntries(entries) : null;
 }
 
 export default router;

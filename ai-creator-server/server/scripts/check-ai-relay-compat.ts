@@ -417,8 +417,30 @@ function checkBaseUrlJoin(): void {
   assertEqual('join avoid duplicate v1', joinBasePath('https://domain.com/v1', '/v1/images/generations'), 'https://domain.com/v1/images/generations');
 }
 
+function checkUploadContract(): void {
+  const filesRoute = fs.readFileSync(path.resolve(__dirname, '../src/routes/files.ts'), 'utf8');
+  assert(filesRoute.includes('MAX_UPLOAD_FILE_SIZE = Math.max(MAX_IMAGE_FILE_SIZE, MAX_VIDEO_FILE_SIZE)'), 'user upload multer limit is not using the larger image/video limit');
+  assert(filesRoute.includes('validateFileSize(size, contentType, { image: MAX_IMAGE_FILE_SIZE, video: MAX_VIDEO_FILE_SIZE })'), 'direct upload credential is not validating size by MIME type');
+  assert(filesRoute.includes('validateFileSize(file.size, file.mimetype, { image: MAX_IMAGE_FILE_SIZE, video: MAX_VIDEO_FILE_SIZE })'), 'server relay upload is not validating size by MIME type');
+  assert(filesRoute.includes("'ref_video'"), 'files route does not allow ref_video category');
+
+  const adapterTypes = fs.readFileSync(path.resolve(__dirname, '../src/services/storage/adapter.interface.ts'), 'utf8');
+  assert(adapterTypes.includes("| 'ref_video'"), 'FileCategory type does not include ref_video');
+}
+
+function checkProviderPollingSchedulerContract(): void {
+  const polling = fs.readFileSync(path.resolve(__dirname, '../src/services/video-polling.service.ts'), 'utf8');
+  assert(polling.includes("task_type IN ('image', 'video')"), 'provider polling is not scanning both image and video tasks');
+  assert(polling.includes("return scanAndPollVideoTasks();"), 'provider polling does not run a startup scan');
+  assert(polling.includes('m.config AS model_config'), 'provider polling recovery is not loading model config');
+  assert(polling.includes('modelConfig.max_polling_minutes || defaultMaxRunningMinutes'), 'provider polling recovery is not respecting per-model max polling minutes');
+  assert(polling.includes("task.task_type === 'video' ? 'video' : 'image'"), 'provider polling is not saving outputs by task type');
+}
+
 async function main(): Promise<void> {
   checkBaseUrlJoin();
+  checkUploadContract();
+  checkProviderPollingSchedulerContract();
   await checkOpenAICompatibleUrlResult();
   await checkOpenAICompatibleBase64Result();
   await checkRelaySyncUrls();

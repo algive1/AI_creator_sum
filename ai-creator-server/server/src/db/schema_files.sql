@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS files (
   etag VARCHAR(64) NOT NULL DEFAULT '' COMMENT '对象存储ETag',
   access_url VARCHAR(1024) NOT NULL DEFAULT '' COMMENT '原始访问地址',
   cdn_url VARCHAR(1024) NOT NULL DEFAULT '' COMMENT 'CDN加速地址',
-  file_category VARCHAR(32) NOT NULL DEFAULT 'general' COMMENT 'avatar/ref_image/template_cover/ai_output/ai_video/general',
+  file_category VARCHAR(32) NOT NULL DEFAULT 'general' COMMENT 'avatar/ref_image/ref_video/template_cover/ai_output/ai_video/general',
   visibility VARCHAR(16) NOT NULL DEFAULT 'private' COMMENT 'private/public',
   ref_type VARCHAR(32) NULL COMMENT '关联业务类型: task_output/template/user',
   ref_id VARCHAR(64) NULL COMMENT '关联业务ID',

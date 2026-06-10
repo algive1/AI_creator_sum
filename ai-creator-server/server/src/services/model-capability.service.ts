@@ -1,5 +1,6 @@
 import { query, queryOne } from '../utils/db';
 import { parseJson } from '../utils/content-helpers';
+import { appCache } from '../utils/ttl-cache';
 
 const CAPABILITY_ALIASES: Record<string, string> = {
   image_create: 'text_to_image',
@@ -21,6 +22,17 @@ const CAPABILITY_ALIASES: Record<string, string> = {
   script_generate: 'script_generate',
   prompt_generate: 'prompt_generate',
   storyboard_generate: 'storyboard_generate',
+};
+
+const FEATURE_REQUIREMENTS: Record<string, { capabilities: string[]; modelTypes: string[] }> = {
+  image_create: { capabilities: ['text_to_image'], modelTypes: ['image', 'multimodal'] },
+  image_to_image: { capabilities: ['image_to_image'], modelTypes: ['image', 'multimodal'] },
+  image_edit: { capabilities: ['image_edit'], modelTypes: ['image', 'multimodal'] },
+  video_create: { capabilities: ['text_to_video'], modelTypes: ['video', 'multimodal'] },
+  image_to_video: { capabilities: ['image_to_video'], modelTypes: ['video', 'multimodal'] },
+  first_last_frame_video: { capabilities: ['first_last_frame_video'], modelTypes: ['video', 'multimodal'] },
+  video_edit: { capabilities: ['video_edit'], modelTypes: ['video', 'multimodal'] },
+  prompt_optimize: { capabilities: ['prompt_optimize', 'text_generation', 'text_chat'], modelTypes: ['text', 'multimodal'] },
 };
 
 export function normalizeCapabilityKey(key: string): string {
@@ -74,6 +86,27 @@ export async function getModelCapabilitySet(modelId: number): Promise<{ explicit
 export async function modelHasCapability(modelId: number, expected: string | string[]): Promise<boolean> {
   const capabilitySet = await getModelCapabilitySet(modelId);
   return hasAnyCapability(capabilitySet.capabilities, expected);
+}
+
+export async function modelSupportsFeature(modelId: number, featureKey: string, modelType?: string): Promise<boolean> {
+  const requirement = FEATURE_REQUIREMENTS[featureKey];
+  if (!requirement) return true;
+  const normalizedType = String(modelType || '').trim().toLowerCase();
+  if (normalizedType && !requirement.modelTypes.includes(normalizedType)) return false;
+  const capabilitySet = await getModelCapabilitySet(modelId);
+  return hasAnyCapability(capabilitySet.capabilities, requirement.capabilities);
+}
+
+export async function getModelFeaturesList(status = 'active'): Promise<any[]> {
+  const normalizedStatus = String(status || 'active').trim();
+  return appCache.remember(
+    `model_features:list:${normalizedStatus}`,
+    30 * 60 * 1000,
+    () => query<any>(
+      'SELECT id, feature_key, feature_name, sort_order, status FROM model_features WHERE status = ? ORDER BY sort_order',
+      [normalizedStatus],
+    ),
+  );
 }
 
 export function hasAnyCapability(capabilities: Set<string>, expected: string | string[]): boolean {

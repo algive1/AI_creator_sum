@@ -2,8 +2,9 @@
 // 腾讯云 COS 存储适配器
 
 import * as crypto from "crypto";
+import { Stream } from "stream";
+import COS from "cos-nodejs-sdk-v5";
 import { IStorageAdapter, UploadResult, CredentialOptions, CredentialResult } from "./adapter.interface";
-import { streamToBuffer } from "./stream-helpers";
 
 interface CosConfig {
   secretId: string;
@@ -17,14 +18,71 @@ interface CosConfig {
 
 function getConfig(): CosConfig {
   return {
-    secretId: process.env.COS_SECRET_ID || "",
-    secretKey: process.env.COS_SECRET_KEY || "",
-    bucket: process.env.COS_BUCKET || "",
-    region: process.env.COS_REGION || "ap-guangzhou",
-    cdnDomain: process.env.COS_CDN_DOMAIN || "",
-    stsEndpoint: process.env.COS_STS_ENDPOINT || "sts.tencentcloudapi.com",
+    secretId: String(process.env.COS_SECRET_ID || "").trim(),
+    secretKey: String(process.env.COS_SECRET_KEY || "").trim(),
+    bucket: String(process.env.COS_BUCKET || "").trim(),
+    region: String(process.env.COS_REGION || "ap-guangzhou").trim(),
+    cdnDomain: String(process.env.COS_CDN_DOMAIN || "").trim(),
+    stsEndpoint: String(process.env.COS_STS_ENDPOINT || "sts.tencentcloudapi.com").trim(),
     stsDurationSeconds: parseInt(process.env.COS_STS_DURATION_SECONDS || "1800", 10),
   };
+}
+
+function createClient(cfg: CosConfig): COS {
+  return new COS({
+    SecretId: cfg.secretId,
+    SecretKey: cfg.secretKey,
+  });
+}
+
+function putObject(client: COS, params: COS.PutObjectParams): Promise<COS.PutObjectResult> {
+  return new Promise((resolve, reject) => {
+    client.putObject(params, (err, data) => {
+      if (err) reject(err);
+      else resolve(data);
+    });
+  });
+}
+
+function deleteObject(client: COS, params: COS.DeleteObjectParams): Promise<COS.DeleteObjectResult> {
+  return new Promise((resolve, reject) => {
+    client.deleteObject(params, (err, data) => {
+      if (err) reject(err);
+      else resolve(data);
+    });
+  });
+}
+
+function getBucketAppId(bucket: string): string {
+  const match = bucket.match(/-(\d+)$/);
+  if (!match) {
+    throw new Error("COS_BUCKET must include the APPID suffix, for example my-bucket-1250000000");
+  }
+  return match[1];
+}
+
+function getObjectResource(cfg: CosConfig, key: string): string {
+  return `qcs::cos:${cfg.region}:uid/${getBucketAppId(cfg.bucket)}:${cfg.bucket}/${key}`;
+}
+
+function getDefaultCosBaseUrl(cfg: CosConfig): string {
+  return `https://${cfg.bucket}.cos.${cfg.region}.myqcloud.com`;
+}
+
+function cosDownloadExpireSeconds(cfg: CosConfig): number {
+  const configured = parseInt(String(process.env.COS_DOWNLOAD_EXPIRE_SECONDS || process.env.COS_PRESIGN_EXPIRE_SECONDS || ''), 10);
+  if (Number.isFinite(configured) && configured > 0) return configured;
+  if (Number.isFinite(cfg.stsDurationSeconds) && cfg.stsDurationSeconds > 0) return cfg.stsDurationSeconds;
+  return 1800;
+}
+
+function normalizeHttpsBaseUrl(value: string, fallback: string): string {
+  const text = String(value || '').trim().replace(/\/+$/, '');
+  if (!text) return fallback;
+  if (/^https:\/\//i.test(text)) return text;
+  if (/^http:\/\//i.test(text)) return text.replace(/^http:/i, 'https:');
+  if (text.startsWith('//')) return `https:${text}`;
+  return `https://${text.replace(/^\/+/, '')}`;
 }
 
 // 简易的腾讯云 API 调用（STS GetFederationToken）
@@ -81,6 +139,7 @@ async function callStsApi(cfg: CosConfig, policy: object, durationSeconds = cfg.
       "Content-Type": "application/json; charset=utf-8",
       "Host": host,
       "X-TC-Action": action,
+      "X-TC-Region": cfg.region,
       "X-TC-Version": version,
       "X-TC-Timestamp": String(timestamp),
       "Authorization": authorization,
@@ -107,45 +166,6 @@ async function callStsApi(cfg: CosConfig, policy: object, durationSeconds = cfg.
   };
 }
 
-// 腾讯云 COS Object PUT (使用临时密钥)
-async function cosPutObject(
-  cfg: CosConfig,
-  key: string,
-  body: Buffer,
-  contentType: string,
-  cred: { tmpSecretId: string; tmpSecretKey: string; sessionToken: string },
-): Promise<string> {
-  const host = `${cfg.bucket}.cos.${cfg.region}.myqcloud.com`;
-  const url = `https://${host}/${encodeURIComponent(key)}`;
-  const date = new Date().toUTCString();
-
-  // COS 签名 (HMAC-SHA1)
-  const signTime = `${Math.floor(Date.now() / 1000) - 60};${Math.floor(Date.now() / 1000) + 3600}`;
-  const signKey = crypto.createHmac("sha1", cred.tmpSecretKey).update(signTime).digest();
-  const httpString = `put\n/${encodeURIComponent(key)}\n\nhost=${host}\n`;
-  const stringToSign = `sha1\n${signTime}\n${crypto.createHash("sha1").update(httpString).digest("hex")}\n`;
-  const signature = crypto.createHmac("sha1", signKey).update(stringToSign).digest("hex");
-
-  const resp = await fetch(url, {
-    method: "PUT",
-    headers: {
-      "Content-Type": contentType,
-      "Host": host,
-      "Date": date,
-      "Authorization": `q-sign-algorithm=sha1&q-ak=${cred.tmpSecretId}&q-sign-time=${signTime}&q-key-time=${signTime}&q-header-list=host&q-url-param-list=&q-signature=${signature}`,
-      "x-cos-security-token": cred.sessionToken,
-    },
-    body,
-  });
-
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`COS putObject failed: ${resp.status} ${text}`);
-  }
-
-  return resp.headers.get("etag") || "";
-}
-
 export class CosAdapter implements IStorageAdapter {
   readonly provider = "tencent_cos";
 
@@ -155,23 +175,19 @@ export class CosAdapter implements IStorageAdapter {
 
   async upload(key: string, body: Buffer, contentType: string): Promise<UploadResult> {
     const cfg = this.cfg;
-    // 获取临时密钥
-    const cred = await callStsApi(cfg, {
-      version: "2.0",
-      statement: [{
-        effect: "allow",
-        action: ["name/cos:PutObject"],
-        resource: [`qcs::cos:${cfg.region}:uid/*:${cfg.bucket}/${key}`],
-      }],
+    const result = await putObject(createClient(cfg), {
+      Bucket: cfg.bucket,
+      Region: cfg.region,
+      Key: key,
+      Body: body,
+      ContentType: contentType,
     });
-
-    const etag = await cosPutObject(cfg, key, body, contentType, cred);
-    const cdn = cfg.cdnDomain || `https://${cfg.bucket}.cos.${cfg.region}.myqcloud.com`;
+    const cdn = normalizeHttpsBaseUrl(cfg.cdnDomain, getDefaultCosBaseUrl(cfg));
     const cdnUrl = `${cdn.replace(/\/$/, "")}/${key}`;
     return {
-      url: `https://${cfg.bucket}.cos.${cfg.region}.myqcloud.com/${key}`,
+      url: `${getDefaultCosBaseUrl(cfg)}/${key}`,
       cdnUrl,
-      etag,
+      etag: result.ETag,
     };
   }
 
@@ -179,45 +195,55 @@ export class CosAdapter implements IStorageAdapter {
     key: string,
     stream: NodeJS.ReadableStream,
     contentType: string,
-    _size: number,
+    size: number,
   ): Promise<UploadResult> {
-    const buffer = await streamToBuffer(stream, contentType);
-    return this.upload(key, buffer, contentType);
+    const cfg = this.cfg;
+    const result = await putObject(createClient(cfg), {
+      Bucket: cfg.bucket,
+      Region: cfg.region,
+      Key: key,
+      Body: stream as unknown as Stream,
+      ContentType: contentType,
+      ...(size > 0 ? { ContentLength: size } : {}),
+    });
+    const cdn = normalizeHttpsBaseUrl(cfg.cdnDomain, getDefaultCosBaseUrl(cfg));
+    return {
+      url: `${getDefaultCosBaseUrl(cfg)}/${key}`,
+      cdnUrl: `${cdn.replace(/\/$/, "")}/${key}`,
+      etag: result.ETag,
+    };
   }
 
   async delete(key: string): Promise<void> {
     const cfg = this.cfg;
-    const host = `${cfg.bucket}.cos.${cfg.region}.myqcloud.com`;
-    const url = `https://${host}/${encodeURIComponent(key)}`;
-    const date = new Date().toUTCString();
-
-    const signTime = `${Math.floor(Date.now() / 1000) - 60};${Math.floor(Date.now() / 1000) + 3600}`;
-    const signKey = crypto.createHmac("sha1", cfg.secretKey).update(signTime).digest();
-    const httpString = `delete\n/${encodeURIComponent(key)}\n\nhost=${host}\n`;
-    const stringToSign = `sha1\n${signTime}\n${crypto.createHash("sha1").update(httpString).digest("hex")}\n`;
-    const signature = crypto.createHmac("sha1", signKey).update(stringToSign).digest("hex");
-
-    const resp = await fetch(url, {
-      method: "DELETE",
-      headers: {
-        "Host": host,
-        "Date": date,
-        "Authorization": `q-sign-algorithm=sha1&q-ak=${cfg.secretId}&q-sign-time=${signTime}&q-key-time=${signTime}&q-header-list=host&q-url-param-list=&q-signature=${signature}`,
-      },
+    await deleteObject(createClient(cfg), {
+      Bucket: cfg.bucket,
+      Region: cfg.region,
+      Key: key,
     });
-    if (!resp.ok && resp.status !== 204) {
-      const text = await resp.text();
-      throw new Error(`COS delete failed: ${resp.status} ${text}`);
-    }
   }
 
   getAccessUrl(key: string): string {
     const cfg = this.cfg;
-    return `https://${cfg.bucket}.cos.${cfg.region}.myqcloud.com/${key}`;
+    const fallback = `${getDefaultCosBaseUrl(cfg)}/${key}`;
+    try {
+      return createClient(cfg).getObjectUrl({
+        Bucket: cfg.bucket,
+        Region: cfg.region,
+        Key: key,
+        Sign: true,
+        Method: "GET",
+        Expires: cosDownloadExpireSeconds(cfg),
+        Protocol: "https:",
+      }) || fallback;
+    } catch {
+      return fallback;
+    }
   }
 
   getCdnUrl(key: string): string {
-    const cdn = this.cfg.cdnDomain || this.getAccessUrl(key);
+    const cfg = this.cfg;
+    const cdn = normalizeHttpsBaseUrl(cfg.cdnDomain, getDefaultCosBaseUrl(cfg));
     const base = cdn.replace(/\/$/, "");
     return `${base}/${key}`;
   }
@@ -230,7 +256,7 @@ export class CosAdapter implements IStorageAdapter {
       statement: [{
         effect: "allow",
         action: ["name/cos:PutObject"],
-        resource: [`qcs::cos:${cfg.region}:uid/*:${cfg.bucket}/${options.storageKey}`],
+        resource: [getObjectResource(cfg, options.storageKey)],
       }],
     }, expireSeconds);
 

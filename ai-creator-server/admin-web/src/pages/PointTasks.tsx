@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Alert, Button, Card, Form, Input, InputNumber, message, Modal, Popconfirm, Select, Space, Switch, Table, Tabs, Tag } from 'antd';
 import { EditOutlined, GiftOutlined, ShoppingOutlined } from '@ant-design/icons';
 import api from '../services/api';
+import { EllipsisText, nowrapActionStyle } from '../utils/tableCells';
 
 interface PointPackage {
   id: number;
@@ -111,8 +112,10 @@ export default function PointTasks() {
   // 三个配置表单
   const [checkinForm] = Form.useForm();
   const [adsForm] = Form.useForm();
+  const [bonusForm] = Form.useForm();
   const [checkinSaving, setCheckinSaving] = useState(false);
   const [adsSaving, setAdsSaving] = useState(false);
+  const [bonusSaving, setBonusSaving] = useState(false);
 
   // ===== 积分套餐 =====
   const fetchPackages = async () => {
@@ -244,10 +247,10 @@ export default function PointTasks() {
   };
 
   const packageColumns = [
-    { title: '套餐名称', dataIndex: 'name', width: 140 },
+    { title: '套餐名称', dataIndex: 'name', width: 170, render: (v: string) => <EllipsisText value={v} maxWidth={148} strong /> },
     { title: '积分数量', dataIndex: 'points', width: 100 },
     { title: '售价', dataIndex: 'priceCents', width: 90, render: (v: number) => `¥${(Number(v || 0) / 100).toFixed(2)}` },
-    { title: '描述', dataIndex: 'description', width: 100, render: (v: string) => v || '-' },
+    { title: '描述', dataIndex: 'description', width: 220, render: (v: string) => <EllipsisText value={v} maxWidth={198} /> },
     {
       title: '营销活动',
       dataIndex: 'firstPurchaseBonusType',
@@ -261,7 +264,7 @@ export default function PointTasks() {
     {
       title: '操作', width: 210,
       render: (_: any, r: PointPackage) => (
-        <Space>
+        <Space style={nowrapActionStyle}>
           <Button size="small" icon={<EditOutlined />} onClick={() => openPackageEdit(r)}>编辑</Button>
           <Switch checked={r.enabled} onChange={() => togglePackageStatus(r)} checkedChildren="开" unCheckedChildren="关" />
           <Popconfirm title="确认删除此套餐？" onConfirm={() => deletePackage(r)}>
@@ -274,11 +277,11 @@ export default function PointTasks() {
 
   const taskColumns = [
     { title: '任务标识', dataIndex: 'taskKey', width: 150 },
-    { title: '任务名称', dataIndex: 'title', width: 180 },
+    { title: '任务名称', dataIndex: 'title', width: 220, render: (v: string) => <EllipsisText value={v} maxWidth={198} strong /> },
     { title: '分组', dataIndex: 'group', width: 90, render: (v: string) => v === 'daily' ? <Tag color="blue">每日</Tag> : <Tag color="purple">成长</Tag> },
     { title: '展示积分', dataIndex: 'rewardPoints', width: 90 },
     { title: '图标', dataIndex: 'icon', width: 90 },
-    { title: '按钮文案', dataIndex: 'actionText', width: 100 },
+    { title: '按钮文案', dataIndex: 'actionText', width: 130, render: (v: string) => <EllipsisText value={v} maxWidth={108} /> },
     { title: '周期', dataIndex: 'resetCycle', width: 100, render: (v: string) => v === 'once' ? '仅一次' : '每日' },
     { title: '排序', dataIndex: 'sortOrder', width: 70 },
     { title: '状态', dataIndex: 'status', width: 80, render: (v: string) => v === 'active' ? <Tag color="green">启用</Tag> : <Tag>停用</Tag> },
@@ -286,7 +289,7 @@ export default function PointTasks() {
       title: '操作',
       width: 210,
       render: (_: any, r: PointTask) => (
-        <Space>
+        <Space style={nowrapActionStyle}>
           <Button size="small" icon={<EditOutlined />} onClick={() => openTaskEdit(r)}>编辑</Button>
           <Switch checked={r.status === 'active'} onChange={() => toggleTaskStatus(r)} checkedChildren="开" unCheckedChildren="关" />
           <Popconfirm title="确认删除此任务？已有记录的任务只能停用。" onConfirm={() => deleteTask(r)}>
@@ -331,6 +334,19 @@ export default function PointTasks() {
       });
     } catch {
       // 分组可能为空，正常
+    }
+  };
+
+  const loadBonusConfig = async () => {
+    try {
+      const r: any = await api.get('/settings/points');
+      const configs: ConfigItem[] = r.data || [];
+      const map = configsToMap(configs);
+      bonusForm.setFieldsValue({
+        'points.new_user_bonus_points': parseNumberConfig(map['points.new_user_bonus_points']?.value, 50),
+      });
+    } catch {
+      bonusForm.setFieldsValue({ 'points.new_user_bonus_points': 50 });
     }
   };
 
@@ -382,6 +398,22 @@ export default function PointTasks() {
     }
   };
 
+  const saveBonusConfig = async () => {
+    setBonusSaving(true);
+    try {
+      const values = await bonusForm.validateFields();
+      await api.post('/settings/points', {
+        'points.new_user_bonus_points': String(values['points.new_user_bonus_points'] ?? 50),
+      });
+      message.success('新用户奖励已保存');
+    } catch (e: any) {
+      if (e?.errorFields) return;
+      message.error(e?.response?.data?.message || '保存失败');
+    } finally {
+      setBonusSaving(false);
+    }
+  };
+
   const renderRewardRows = (name: string, addText: string) => (
     <Form.List name={name}>
       {(fields, { add, remove }) => (
@@ -411,7 +443,7 @@ export default function PointTasks() {
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message="签到奖励会保存为后端已支持的 JSON 数组，不再要求运营手写逗号分隔内容。"
+        message="签到奖励会保存为后端已支持的 JSON 数组；超级签到广告只校验播放，不发放广告积分，也不占用广告积分次数。"
       />
       <Form form={checkinForm} layout="vertical">
         <Space size="large" wrap>
@@ -438,7 +470,7 @@ export default function PointTasks() {
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message="当前后端广告奖励按“每次观看固定积分 + 每日次数上限”计算，暂不支持第 N 次观看不同奖励。"
+        message="当前后端广告奖励按“每次观看固定积分 + 每日次数上限”计算；这里的次数只用于看广告得积分，超级签到独立统计。"
       />
       <Form form={adsForm} layout="vertical">
         <Space size="large" wrap>
@@ -449,10 +481,31 @@ export default function PointTasks() {
           <Form.Item name="ad.reward.max_daily_count" label="每日最多奖励次数" rules={[{ required: true, message: '请输入每日次数上限' }]}>
             <InputNumber min={0} precision={0} style={{ width: 180 }} />
           </Form.Item>
-          <Form.Item name="ad.reward.ad_unit_id" label="微信广告位 ID" extra="在微信公众平台申请激励视频广告位后获得。">
+          <Form.Item name="ad.reward.ad_unit_id" label="微信广告位 ID" extra="在微信公众平台申请激励视频广告位后获得；广告积分和超级签到都会用它播放广告。">
             <Input style={{ width: 280 }} />
           </Form.Item>
         </Space>
+      </Form>
+    </Card>
+  );
+
+  const renderBonusConfig = () => (
+    <Card extra={<Button type="primary" loading={bonusSaving} onClick={saveBonusConfig}>保存新用户奖励</Button>}>
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="该配置只影响后续首次登录/注册的新用户，已注册用户不会自动补发或扣回。"
+      />
+      <Form form={bonusForm} layout="vertical">
+        <Form.Item
+          name="points.new_user_bonus_points"
+          label="新用户首次登录赠送积分"
+          rules={[{ required: true, message: '请输入赠送积分' }]}
+          extra="默认 50。保存后后端注册流程会实时读取该值。"
+        >
+          <InputNumber min={0} max={1000000} precision={0} addonAfter="积分" style={{ width: 220 }} />
+        </Form.Item>
       </Form>
     </Card>
   );
@@ -478,7 +531,7 @@ export default function PointTasks() {
                 <Card style={{ marginBottom: 16 }}>
                   <Button type="primary" icon={<GiftOutlined />} onClick={openTaskCreate}>新增任务</Button>
                 </Card>
-                <Table rowKey="id" columns={taskColumns} dataSource={tasks} loading={taskLoading} pagination={false} />
+                <Table rowKey="id" columns={taskColumns} dataSource={tasks} loading={taskLoading} pagination={false} tableLayout="fixed" scroll={{ x: 1300 }} />
               </>
             ),
           },
@@ -490,7 +543,7 @@ export default function PointTasks() {
                 <Card style={{ marginBottom: 16 }}>
                   <Button type="primary" icon={<ShoppingOutlined />} onClick={openPackageCreate}>新增套餐</Button>
                 </Card>
-                <Table rowKey="id" columns={packageColumns} dataSource={packages} loading={loading} pagination={false} />
+                <Table rowKey="id" columns={packageColumns} dataSource={packages} loading={loading} pagination={false} tableLayout="fixed" scroll={{ x: 1180 }} />
               </>
             ),
           },
@@ -500,6 +553,11 @@ export default function PointTasks() {
             children: renderCheckinConfig(),
           },
           {
+            key: 'bonus',
+            label: '新用户奖励',
+            children: renderBonusConfig(),
+          },
+          {
             key: 'ads',
             label: '广告配置',
             children: renderAdsConfig(),
@@ -507,6 +565,7 @@ export default function PointTasks() {
         ]}
         onChange={(key) => {
           if (key === 'checkin') loadCheckinConfig();
+          else if (key === 'bonus') loadBonusConfig();
           else if (key === 'ads') loadAdsConfig();
         }}
       />

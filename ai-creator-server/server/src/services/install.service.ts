@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import { spawn, spawnSync } from 'child_process';
 import mysql from 'mysql2/promise';
 import bcrypt from 'bcryptjs';
+import dotenv from 'dotenv';
 import { setInstallCacheInstalled } from '../middleware/install';
 import { config } from '../utils/config';
 import { resetDbPool } from '../utils/db';
@@ -141,6 +142,9 @@ const REQUIRED_COLUMNS: Record<string, string[]> = {
     'ai_implicit_label_kept',
     'platform_watermark_removed',
   ],
+  point_accounts: [
+    'total_refunded',
+  ],
   signin_records: [
     'normal_signed_at',
     'super_signed_at',
@@ -149,6 +153,7 @@ const REQUIRED_COLUMNS: Record<string, string[]> = {
     'normal_is_makeup',
   ],
   ad_reward_logs: [
+    'ad_scene',
     'expires_at',
     'claimed_at',
   ],
@@ -190,11 +195,15 @@ const REQUIRED_COLUMNS: Record<string, string[]> = {
 };
 
 const REQUIRED_INDEXES: Record<string, string[]> = {
-  ai_tasks: ['idx_video_poll'],
+  ad_reward_logs: ['idx_ad_reward_scene_user_date'],
+  ai_tasks: ['idx_video_poll', 'idx_user_status_created'],
+  ai_task_outputs: ['uk_task_output_index'],
+  point_logs: ['idx_user_created'],
   member_plan_rights: ['uk_plan_right', 'idx_icon_file'],
   member_benefit_icons: ['uk_icon_key', 'idx_status_sort'],
   templates: ['idx_templates_public', 'idx_templates_feature'],
-  member_orders: ['idx_order_pay_status', 'idx_order_type_created'],
+  member_orders: ['idx_order_pay_status', 'idx_order_type_created', 'idx_user_status_created'],
+  user_memberships: ['idx_user_status_expire'],
 };
 
 interface DbConfig { host: string; port: number; database: string; user: string; password: string; prefix: string; autoCreate: boolean }
@@ -321,9 +330,35 @@ function serverDir(): string {
   return path.resolve(__dirname, '../..');
 }
 
+function hasProjectRootShape(dir: string): boolean {
+  return fs.existsSync(path.join(dir, 'server', 'package.json')) &&
+    fs.existsSync(path.join(dir, 'admin-web', 'package.json'));
+}
+
 function appRootDir(): string {
-  const configured = process.env.APP_ROOT_DIR || config.release.appRootDir || DEFAULT_APP_ROOT_DIR;
-  return fs.existsSync(configured) ? configured : path.resolve(serverDir(), '..');
+  const envRoot = String(process.env.APP_ROOT_DIR || '').trim();
+  if (envRoot && fs.existsSync(envRoot)) return path.resolve(envRoot);
+
+  const serverParent = path.resolve(serverDir(), '..');
+  const configured = String(config.release.appRootDir || '').trim();
+  const configuredRoot = configured ? path.resolve(configured) : '';
+  const configuredIsServerDir = configuredRoot && path.resolve(configuredRoot) === path.resolve(serverDir());
+
+  if (configuredRoot && !configuredIsServerDir && fs.existsSync(configuredRoot)) {
+    return configuredRoot;
+  }
+  if (hasProjectRootShape(serverParent)) return serverParent;
+  if (configuredRoot && fs.existsSync(configuredRoot)) return configuredRoot;
+  if (fs.existsSync(DEFAULT_APP_ROOT_DIR)) return DEFAULT_APP_ROOT_DIR;
+  return serverParent;
+}
+
+function runtimeServerDir(): string {
+  const currentServer = path.join(appRootDir(), 'current', 'server');
+  if (fs.existsSync(path.join(currentServer, 'dist', 'index.js'))) {
+    return assertPathInsideAppRoot(currentServer);
+  }
+  return serverDir();
 }
 
 function taskDir(): string {
@@ -415,6 +450,179 @@ function writeEnvValues(values: Record<string, string>): { backupPath: string | 
   return { backupPath, envPath: file };
 }
 
+function applyRuntimeEnvValues(values: Record<string, string>): void {
+  for (const [key, value] of Object.entries(values)) process.env[key] = value;
+  if (values.PORT) config.port = normalizePort(values.PORT, config.port || 3000);
+  if (values.NODE_ENV) config.nodeEnv = values.NODE_ENV;
+  if (values.DB_HOST) config.db.host = values.DB_HOST;
+  if (values.DB_PORT) config.db.port = normalizePort(values.DB_PORT, config.db.port || 3306);
+  if (values.DB_NAME) config.db.database = values.DB_NAME;
+  if (values.DB_USER) config.db.user = values.DB_USER;
+  if (values.DB_PASSWORD) config.db.password = values.DB_PASSWORD;
+  if (values.JWT_SECRET) config.jwt.secret = values.JWT_SECRET;
+  if (values.ENCRYPTION_KEY) config.encryption.key = values.ENCRYPTION_KEY;
+  if (values.STORAGE_PROVIDER) config.storage.provider = values.STORAGE_PROVIDER;
+  if (values.LOCAL_UPLOAD_DIR) config.storage.localUploadDir = values.LOCAL_UPLOAD_DIR;
+  if (values.LOCAL_BASE_URL) config.storage.localBaseUrl = values.LOCAL_BASE_URL;
+  if (values.APP_ROOT_DIR) config.release.appRootDir = values.APP_ROOT_DIR;
+  if (values.UPDATE_PACKAGES_DIR) config.release.updatePackagesDir = values.UPDATE_PACKAGES_DIR;
+  if (values.PM2_APP_NAME) config.release.pm2AppName = values.PM2_APP_NAME;
+  if (values.HEALTH_CHECK_URL) config.release.healthCheckUrl = values.HEALTH_CHECK_URL;
+}
+
+function reloadRuntimeEnvFromFile(file = envPath()): void {
+  if (!fs.existsSync(file)) return;
+  applyRuntimeEnvValues(dotenv.parse(fs.readFileSync(file, 'utf8')));
+}
+
+function reloadRuntimeEnvIfConfigWritten(): void {
+  if (isPersistentStepCompleted('writeConfig')) reloadRuntimeEnvFromFile();
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function powershellQuote(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function powershellArray(values: string[]): string {
+  return `@(${values.map(powershellQuote).join(', ')})`;
+}
+
+function pathExistsOrSymlink(targetPath: string): boolean {
+  try {
+    fs.lstatSync(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function initialReleaseVersion(): string {
+  const version =
+    tryReadReleaseVersion(path.join(appRootDir(), 'release.json')) ||
+    tryReadReleaseVersion(path.join(serverDir(), 'package.json'));
+  return SEMVER_VERSION_RE.test(version) ? version : '0.0.0';
+}
+
+function shouldCopyInitialReleasePath(sourcePath: string): boolean {
+  const appRoot = path.resolve(appRootDir());
+  const relative = path.relative(appRoot, path.resolve(sourcePath)).replace(/\\/g, '/');
+  const segments = relative.split('/').filter(Boolean);
+  if (segments.includes('node_modules')) return false;
+  if (segments.some(segment => [
+    'runtime',
+    'logs',
+    'backups',
+    '.pm2',
+    'uploads',
+    'update-packages',
+    'releases',
+    'shared',
+    'current',
+    '.git',
+    '.codex-qa',
+    '.release-staging',
+  ].includes(segment))) {
+    return false;
+  }
+  if (segments.some(segment => /^codex[^/]*$/i.test(segment))) return false;
+
+  const basename = path.basename(sourcePath);
+  if (basename === '.env') return false;
+  if (basename.startsWith('.env.') && !['.env.example', '.env.production.example'].includes(basename)) return false;
+  if (/\.(log|tmp|temp|cache|bak|swp)$/i.test(basename) || basename.endsWith('~')) return false;
+  return true;
+}
+
+function allocateInitialReleaseDir(version: string): string {
+  const releasesDir = assertPathInsideAppRoot(path.join(appRootDir(), 'releases'));
+  fs.mkdirSync(releasesDir, { recursive: true });
+  const base = path.join(releasesDir, `initial-${version}-${timestampForFile()}`);
+  if (!fs.existsSync(base)) return base;
+  for (let i = 1; i <= 99; i += 1) {
+    const candidate = `${base}-${i}`;
+    if (!fs.existsSync(candidate)) return candidate;
+  }
+  throw new Error('Unable to allocate initial release directory');
+}
+
+function linkOrCopyFile(source: string, target: string): void {
+  if (pathExistsOrSymlink(target)) fs.rmSync(target, { force: true });
+  try {
+    fs.symlinkSync(source, target, 'file');
+  } catch {
+    fs.copyFileSync(source, target);
+  }
+}
+
+function createDirectoryLink(target: string, linkPath: string): void {
+  const resolvedTarget = path.resolve(target);
+  const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+  fs.symlinkSync(resolvedTarget, linkPath, linkType);
+}
+
+function linkInitialServerNodeModules(releaseDir: string): string | null {
+  const source = path.join(appRootDir(), 'server', 'node_modules');
+  const target = path.join(releaseDir, 'server', 'node_modules');
+  if (!fs.existsSync(source)) return null;
+  if (pathExistsOrSymlink(target)) fs.rmSync(target, { recursive: true, force: true });
+  try {
+    createDirectoryLink(source, target);
+  } catch (err: any) {
+    throw new Error(`无法为初始运行目录创建 server/node_modules 链接：${err?.message || String(err)}。请在 server 目录执行 npm ci --include=dev 后重试安装。`);
+  }
+  return target;
+}
+
+function createInitialReleaseSnapshot(releaseDir: string): void {
+  const appRoot = appRootDir();
+  fs.mkdirSync(releaseDir, { recursive: false });
+  for (const item of ['server', 'admin-web', 'scripts', 'docs']) {
+    const source = path.join(appRoot, item);
+    if (!fs.existsSync(source)) continue;
+    fs.cpSync(source, path.join(releaseDir, item), {
+      recursive: true,
+      dereference: false,
+      filter: shouldCopyInitialReleasePath,
+    });
+  }
+  linkInitialServerNodeModules(releaseDir);
+  fs.writeFileSync(path.join(releaseDir, 'release.json'), JSON.stringify({
+    version: initialReleaseVersion(),
+    packageType: 'server-admin',
+    buildTime: new Date().toISOString(),
+    name: 'AI Creator initial install',
+    description: 'Initial runtime snapshot created by install wizard',
+  }, null, 2) + '\n', 'utf8');
+}
+
+function ensureInitialRuntimeLayout(): { releaseDir: string; sharedEnv: string; currentPath: string } {
+  const appRoot = appRootDir();
+  const sharedDir = assertPathInsideAppRoot(path.join(appRoot, 'shared'));
+  const sharedEnv = assertPathInsideAppRoot(path.join(sharedDir, '.env'));
+  fs.mkdirSync(sharedDir, { recursive: true });
+  fs.copyFileSync(envPath(), sharedEnv);
+  try { fs.chmodSync(sharedEnv, 0o600); } catch { /* best-effort on Windows */ }
+
+  const current = currentReleasePath();
+  if (pathExistsOrSymlink(current)) {
+    const stat = fs.lstatSync(current);
+    if (!stat.isSymbolicLink()) {
+      throw new Error(`current exists but is not a symbolic link: ${current}`);
+    }
+    return { releaseDir: fs.realpathSync(current), sharedEnv, currentPath: current };
+  }
+
+  const releaseDir = allocateInitialReleaseDir(initialReleaseVersion());
+  createInitialReleaseSnapshot(releaseDir);
+  linkOrCopyFile(sharedEnv, path.join(releaseDir, 'server', '.env'));
+  createDirectoryLink(releaseDir, current);
+  return { releaseDir, sharedEnv, currentPath: current };
+}
+
 function applyRuntimeInstallConfig(payload: NormalizedInstallPayload, secrets: { jwtSecret: string; encryptionKey: string }): void {
   applyRuntimeDbConfig(payload.db);
 
@@ -450,6 +658,20 @@ function sanitizeLog(message: string): string {
     .replace(/(DB_PASSWORD|JWT_SECRET|ENCRYPTION_KEY|password|passwd|pwd|secret|token|api[_-]?key)\s*=\s*("[^"]*"|'[^']*'|[^\s&]+)/gi, '$1=******')
     .replace(/(Access denied for user '[^']+'@'[^']+' \(using password: )YES(\))/gi, '$1******$2')
     .slice(0, 4000);
+}
+
+function normalizeNodeRuntimeError(message: string): string {
+  if (!/Unreachable code/i.test(message)) return message;
+  return [
+    `Node.js/PM2 运行环境异常（当前 Node ${process.version}）：检测到 Node 内部错误 "Unreachable code"。`,
+    '请在服务器切换到 Node.js 20 LTS 或稳定的 Node.js 22 LTS，重新执行 npm ci --include=dev && npm run build 后，再回到安装向导重试启动服务。',
+    '如果是重新上传文件和数据库的新部署，请同时确认 /www/wwwroot/ai-creator/current、shared/.env、shared/.env.installed 和 .pm2 均属于本次部署，旧残留会导致安装状态误判。',
+    `原始错误：${message}`,
+  ].join(' ');
+}
+
+function installErrorText(err: any): string {
+  return normalizeNodeRuntimeError(err?.message || String(err));
 }
 
 function emptyInstallState(): PersistentInstallState {
@@ -714,10 +936,10 @@ export async function checkEnvironment() {
     name: 'admin-web/dist/index.html',
     key: 'admin_dist',
     current: fs.existsSync(adminDist) ? adminDist : 'not found',
-    required: 'release 包必须包含',
+    required: '解压后需完成服务器构建',
     passed: fs.existsSync(adminDist),
     level: 'required',
-    suggestion: fs.existsSync(adminDist) ? undefined : '当前部署包缺少构建产物，请使用 release 构建包，或点击高级操作重新构建。',
+    suggestion: fs.existsSync(adminDist) ? undefined : '当前部署目录缺少构建产物，请点击高级操作执行 npm ci && npm run build，或按部署文档先在服务器构建。',
   });
 
   const serverDist = path.join(serverDir(), 'dist', 'index.js');
@@ -725,10 +947,10 @@ export async function checkEnvironment() {
     name: 'server/dist/index.js',
     key: 'server_dist',
     current: fs.existsSync(serverDist) ? serverDist : 'not found',
-    required: 'release 包必须包含',
+    required: '解压后需完成服务器构建',
     passed: fs.existsSync(serverDist),
     level: 'required',
-    suggestion: fs.existsSync(serverDist) ? undefined : '当前部署包缺少构建产物，请使用 release 构建包，或点击高级操作重新构建。',
+    suggestion: fs.existsSync(serverDist) ? undefined : '当前部署目录缺少构建产物，请点击高级操作执行 npm ci && npm run build，或按部署文档先在服务器构建。',
   });
 
   const hasDbEnv = ['DB_HOST', 'DB_PORT', 'DB_USER', 'DB_NAME'].every(key => String(process.env[key] || '').trim());
@@ -906,6 +1128,7 @@ export async function executeInit(onProgress?: (step: InstallTaskStepKey) => voi
 
     onProgress?.('init_config');
     step = await runStep('系统配置', async () => {
+      const localUploadDir = process.env.LOCAL_UPLOAD_DIR || config.storage.localUploadDir || path.join(appRootDir(), 'uploads');
       const configs = [
         ['site.name', sys.siteName, 'general', 0],
         ['site.timezone', sys.timezone, 'general', 0],
@@ -929,13 +1152,14 @@ export async function executeInit(onProgress?: (step: InstallTaskStepKey) => voi
         ['wechat_pay.timeout_minutes', '30', 'wechat_pay', 0],
         ['wechat_pay.verify_signature', 'true', 'wechat_pay', 0],
         ['storage.provider', sys.storageType, 'storage', 0],
-        ['storage.local.upload_dir', '/www/wwwroot/ai-creator/uploads', 'storage', 0],
+        ['storage.local.upload_dir', localUploadDir, 'storage', 0],
         ['storage.local.base_url', process.env.LOCAL_BASE_URL || config.storage.localBaseUrl || '/static', 'storage', 0],
         ['security.login_lock_count', '5', 'security', 0],
         ['security.captcha_enabled', 'true', 'security', 0],
         ['security.operation_log_enabled', 'true', 'security', 0],
         ['content.filter_enabled', 'true', 'general', 0],
         ['membership.enabled', 'true', 'general', 0],
+        ['membership.template_save_use_member_only', 'false', 'general', 0],
         ['ai.prompt_optimize.enabled', 'true', 'ai', 0],
         ['ai.script_generate.enabled', 'true', 'ai', 0],
         ['ai.prompt_generate.enabled', 'true', 'ai', 0],
@@ -1576,7 +1800,7 @@ async function ensurePm2Started(
 ) {
   return ensurePm2AppStarted({
     appRoot: appRootDir(),
-    serverDir: serverDir(),
+    serverDir: runtimeServerDir(),
     appName: currentPm2AppName(),
     port: normalizePort(port, 3000),
     onOutput,
@@ -1584,15 +1808,79 @@ async function ensurePm2Started(
   });
 }
 
+function pm2RebindWorkerPath(): string {
+  const workerPath = path.resolve(__dirname, '../scripts/install-pm2-rebind-worker.js');
+  if (!fs.existsSync(workerPath)) {
+    throw new Error('PM2 rebind worker script missing; run npm run build before installing.');
+  }
+  return workerPath;
+}
+
+function startDetachedPm2Rebind(contextPath: string): number {
+  if (process.platform !== 'win32') {
+    const command = `nohup ${shellQuote(process.execPath)} ${shellQuote(pm2RebindWorkerPath())} ${shellQuote(contextPath)} >/dev/null 2>&1 & echo $!`;
+    const result = spawnSync('sh', ['-c', command], {
+      cwd: appRootDir(),
+      env: { ...process.env },
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+    if (result.status !== 0 || result.error) {
+      throw new Error((result.stderr || result.stdout || result.error?.message || 'failed to start PM2 rebind worker').trim());
+    }
+    return Number(String(result.stdout || '').trim()) || 0;
+  }
+
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    `$p = Start-Process -FilePath ${powershellQuote(process.execPath)} -ArgumentList ${powershellArray([pm2RebindWorkerPath(), contextPath])} -WorkingDirectory ${powershellQuote(appRootDir())} -WindowStyle Hidden -PassThru`,
+    'Write-Output $p.Id',
+  ].join('; ');
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+    cwd: appRootDir(),
+    env: { ...process.env },
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (result.status !== 0 || result.error) {
+    throw new Error((result.stderr || result.stdout || result.error?.message || 'failed to start PM2 rebind worker').trim());
+  }
+  return Number(String(result.stdout || '').trim().split(/\r?\n/).pop()) || 0;
+}
+
+function schedulePm2RebindAfterInstall(task: InstallTaskSnapshot, port: number): { ok: boolean; message?: string } {
+  try {
+    const contextPath = assertPathInsideServer(path.join(taskDir(), `pm2-rebind-${task.id}.json`));
+    const logPath = assertPathInsideServer(path.join(taskDir(), `pm2-rebind-${task.id}.log`));
+    fs.writeFileSync(contextPath, JSON.stringify({
+      appRoot: appRootDir(),
+      serverDir: runtimeServerDir(),
+      appName: currentPm2AppName(),
+      port: normalizePort(port, 3000),
+      delayMs: 1500,
+      logPath,
+    }, null, 2) + '\n', 'utf8');
+    const pid = startDetachedPm2Rebind(contextPath);
+    appendTaskLog(task, `PM2 rebind worker started: pid=${pid || 'unknown'}, log=${logPath}`);
+    return { ok: true };
+  } catch (err: any) {
+    const message = `PM2 rebind worker failed to start: ${err?.message || String(err)}`;
+    appendTaskLog(task, message);
+    return { ok: false, message };
+  }
+}
+
 async function runInstallTask(task: InstallTaskSnapshot, rawPayload: any): Promise<void> {
   try {
     task.status = 'running';
     const payload = normalizeInstallPayload(rawPayload);
 
+    reloadRuntimeEnvIfConfigWritten();
     await assertInstallCanRun();
     applyCompletedInstallStateToTask(task);
 
     if (isPersistentStepCompleted('writeConfig') && fs.existsSync(envPath())) {
+      reloadRuntimeEnvFromFile();
       process.env.PORT = String(payload.port);
       config.port = payload.port;
       applyRuntimeDbConfig(payload.db);
@@ -1605,6 +1893,9 @@ async function runInstallTask(task: InstallTaskSnapshot, rawPayload: any): Promi
       markTaskStep(task, 'write_config', 'success', '配置已写入');
       markPersistentTaskStep('write_config', 'completed');
     }
+
+    const layout = ensureInitialRuntimeLayout();
+    appendTaskLog(task, `运行目录已准备: current=${layout.currentPath}, release=${layout.releaseDir}, sharedEnv=${layout.sharedEnv}`);
 
     if (isPersistentStepCompleted('testDatabase')) {
       applyRuntimeDbConfig(payload.db);
@@ -1697,10 +1988,17 @@ async function runInstallTask(task: InstallTaskSnapshot, rawPayload: any): Promi
       markPersistentTaskStep('write_lock', 'completed');
     }
 
+    const rebind = schedulePm2RebindAfterInstall(task, payload.port);
+    if (!rebind.ok) {
+      const message = rebind.message || 'PM2 rebind worker failed to start';
+      markPersistentTaskStep('pm2', 'failed', message);
+      finishPartialTask(task, { installed: false, partial: true, status: 'partial_success', adminPath: '/login' }, message);
+      return;
+    }
     finishTask(task, { installed: true, adminPath: '/login', pm2Action: currentStatus.service.ready ? 'already_running' : 'start' });
     setInstallCacheInstalled();
   } catch (err: any) {
-    const message = sanitizeLog(err?.message || String(err));
+    const message = sanitizeLog(installErrorText(err));
     markPersistentTaskStep(task.step || 'write_config', 'failed', message);
     markTaskStep(task, task.step || 'write_config', 'failed', message);
     appendTaskLog(task, message);
@@ -1712,12 +2010,14 @@ async function runPm2RetryTask(task: InstallTaskSnapshot, rawPayload: any): Prom
     task.status = 'running';
     applyCompletedInstallStateToTask(task);
     task.step = 'pm2';
+    reloadRuntimeEnvIfConfigWritten();
     await assertInstallCanRun({ allowRepairState: true });
 
     const status = await evaluateInstallStatus();
     if (!status.database.ready) {
       throw new Error(status.message || '基础安装未完成，不能只重试 PM2');
     }
+    reloadRuntimeEnvFromFile();
 
     const requestedPort = rawPayload?.port ?? rawPayload?.PORT ?? status.service.port ?? config.port ?? 3000;
     const port = normalizePort(requestedPort, 3000);
@@ -1749,7 +2049,7 @@ async function runPm2RetryTask(task: InstallTaskSnapshot, rawPayload: any): Prom
     finishTask(task, { installed: true, adminPath: '/login', pm2Action: pm2.action, pm2Home: pm2.pm2Home });
     setInstallCacheInstalled();
   } catch (err: any) {
-    const message = sanitizeLog(err?.message || String(err));
+    const message = sanitizeLog(installErrorText(err));
     markPersistentTaskStep(task.step || 'pm2', 'failed', message);
     markTaskStep(task, task.step || 'pm2', 'failed', message);
     appendTaskLog(task, message);
@@ -1770,7 +2070,7 @@ export async function startInstallTask(rawPayload: any): Promise<InstallTaskSnap
   const task = createTask('install');
   applyCompletedInstallStateToTask(task);
   runInstallTask(task, rawPayload).catch(err => {
-    const message = sanitizeLog(err?.message || String(err));
+    const message = sanitizeLog(installErrorText(err));
     markTaskStep(task, task.step || 'write_config', 'failed', message);
   });
   return task;
@@ -1781,7 +2081,7 @@ export async function startPm2RetryTask(rawPayload: any): Promise<InstallTaskSna
   const task = createTask('install');
   applyCompletedInstallStateToTask(task);
   runPm2RetryTask(task, rawPayload || {}).catch(err => {
-    const message = sanitizeLog(err?.message || String(err));
+    const message = sanitizeLog(installErrorText(err));
     markTaskStep(task, task.step || 'pm2', 'failed', message);
   });
   return task;
@@ -1809,7 +2109,7 @@ async function runBuildTask(task: InstallTaskSnapshot): Promise<void> {
 
     finishTask(task, { built: true });
   } catch (err: any) {
-    const message = sanitizeLog(err?.message || String(err));
+    const message = sanitizeLog(installErrorText(err));
     markTaskStep(task, task.step || 'build_admin', 'failed', message);
     appendTaskLog(task, message);
   }
@@ -1819,7 +2119,7 @@ export async function startBuildTask(): Promise<InstallTaskSnapshot> {
   await assertInstallCanRun();
   const task = createTask('build');
   runBuildTask(task).catch(err => {
-    const message = sanitizeLog(err?.message || String(err));
+    const message = sanitizeLog(installErrorText(err));
     markTaskStep(task, task.step || 'build_admin', 'failed', message);
   });
   return task;

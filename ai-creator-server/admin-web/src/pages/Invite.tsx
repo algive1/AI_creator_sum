@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Button, Card, Descriptions, Form, InputNumber, Modal, Space, Switch, Table, Tabs, Tag, Typography, message } from 'antd';
 import { EditOutlined, ReloadOutlined } from '@ant-design/icons';
 import api from '../services/api';
+import { EllipsisText, TimeText } from '../utils/tableCells';
 
 const { Text } = Typography;
 
@@ -147,26 +148,26 @@ export default function Invite() {
   }, [refreshAll]);
 
   const relationColumns = [
-    { title: '邀请人', dataIndex: 'inviterNickname', width: 160 },
-    { title: '被邀请人', dataIndex: 'inviteeNicknameMasked', width: 140 },
+    { title: '邀请人', dataIndex: 'inviterNickname', width: 160, render: (v: string) => <EllipsisText value={v} maxWidth={138} /> },
+    { title: '被邀请人', dataIndex: 'inviteeNicknameMasked', width: 140, render: (v: string) => <EllipsisText value={v} maxWidth={118} /> },
     { title: '邀请码', dataIndex: 'inviteCode', width: 120, render: (v: string) => <Text code>{v}</Text> },
     { title: '状态', dataIndex: 'status', width: 90, render: (v: string) => <Tag color={statusColors[v] || 'default'}>{relationStatusLabels[v] || v}</Tag> },
     { title: '来源', dataIndex: 'source', width: 110, render: (v: string) => sourceLabels[v] || v },
-    { title: '绑定时间', dataIndex: 'boundAt', width: 170, render: (v: string) => v || '-' },
-    { title: '创建时间', dataIndex: 'createdAt', width: 170 },
-    { title: '失效原因', dataIndex: 'invalidReason', ellipsis: true, render: (v: string) => v || '-' },
+    { title: '绑定时间', dataIndex: 'boundAt', width: 170, render: (v: string) => v ? <TimeText value={v} /> : '-' },
+    { title: '创建时间', dataIndex: 'createdAt', width: 170, render: (v: string) => <TimeText value={v} /> },
+    { title: '失效原因', dataIndex: 'invalidReason', width: 220, ellipsis: true, render: (v: string) => <EllipsisText value={v} maxWidth={198} /> },
   ];
 
   const rewardColumns = [
-    { title: '邀请人', dataIndex: 'inviterNickname', width: 160 },
-    { title: '被邀请人', dataIndex: 'inviteeNicknameMasked', width: 140 },
+    { title: '邀请人', dataIndex: 'inviterNickname', width: 160, render: (v: string) => <EllipsisText value={v} maxWidth={138} /> },
+    { title: '被邀请人', dataIndex: 'inviteeNicknameMasked', width: 140, render: (v: string) => <EllipsisText value={v} maxWidth={118} /> },
     { title: '奖励类型', dataIndex: 'rewardType', width: 130, render: (v: string) => <Tag color="blue">{rewardTypeLabels[v] || v}</Tag> },
     { title: '积分', dataIndex: 'points', width: 90, render: (v: number) => <span style={{ color: '#cf1322', fontWeight: 600 }}>+{v}</span> },
     { title: '状态', dataIndex: 'status', width: 90, render: (v: string) => <Tag color={statusColors[v] || 'default'}>{rewardStatusLabels[v] || v}</Tag> },
-    { title: '原因', dataIndex: 'reason', width: 160, render: (v: string) => v || '-' },
-    { title: '关联订单', dataIndex: 'relatedOrderId', width: 140, render: (v: string) => v || '-' },
-    { title: '奖励时间', dataIndex: 'grantedAt', width: 170, render: (v: string) => v || '-' },
-    { title: '创建时间', dataIndex: 'createdAt', width: 170 },
+    { title: '原因', dataIndex: 'reason', width: 220, render: (v: string) => <EllipsisText value={v} maxWidth={198} /> },
+    { title: '关联订单', dataIndex: 'relatedOrderId', width: 160, render: (v: string) => <EllipsisText value={v} maxWidth={138} /> },
+    { title: '奖励时间', dataIndex: 'grantedAt', width: 170, render: (v: string) => v ? <TimeText value={v} /> : '-' },
+    { title: '创建时间', dataIndex: 'createdAt', width: 170, render: (v: string) => <TimeText value={v} /> },
   ];
 
   const tabs = [
@@ -186,6 +187,8 @@ export default function Invite() {
             total: relationPagination.total,
             onChange: (page) => fetchRelations(page),
           }}
+          tableLayout="fixed"
+          scroll={{ x: 1290 }}
         />
       ),
     },
@@ -205,6 +208,8 @@ export default function Invite() {
             total: rewardPagination.total,
             onChange: (page) => fetchRewardLogs(page),
           }}
+          tableLayout="fixed"
+          scroll={{ x: 1390 }}
         />
       ),
     },

@@ -56,6 +56,7 @@ export interface IStorageAdapter {
 export type FileCategory =
   | 'avatar'
   | 'ref_image'
+  | 'ref_video'
   | 'template_cover'
   | 'ai_output'
   | 'ai_video'

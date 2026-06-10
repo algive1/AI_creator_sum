@@ -102,7 +102,7 @@ export default function LaunchCheck() {
             message.warning(kind === 'image' ? '没有启用的生图模型' : '没有启用的生视频模型');
             return;
           }
-          await api.post(`/config-check/ai-models/test-${kind}`, { modelId: model.id });
+          await api.post(`/config-check/ai-models/test-${kind}`, { modelId: model.id, confirmRealCost: true });
           message.success('AI 模型测试已返回成功');
           fetchOverview();
         } finally {

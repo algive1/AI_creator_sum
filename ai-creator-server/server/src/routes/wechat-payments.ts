@@ -14,7 +14,7 @@ router.post('/wechat/jsapi', authMiddleware, async (req: Request, res: Response)
   try {
     const orderNo = String(req.body?.orderNo || '').trim();
     if (!orderNo) {
-      error(res, ErrorCodes.PARAM_ERROR, 'Missing orderNo');
+      error(res, ErrorCodes.PARAM_ERROR, '缺少订单号');
       return;
     }
     const result = await startWechatJsapiPayment(orderNo, req.user!.userId);
@@ -24,7 +24,7 @@ router.post('/wechat/jsapi', authMiddleware, async (req: Request, res: Response)
       error(res, err.code, err.message);
       return;
     }
-    error(res, ErrorCodes.WECHAT_PREPAY_FAILED, err?.message || 'Failed to create WeChat prepay order');
+    error(res, ErrorCodes.WECHAT_PREPAY_FAILED, err?.message || '创建微信预支付订单失败');
   }
 });
 
@@ -32,7 +32,7 @@ router.post('/wechat/query', authMiddleware, async (req: Request, res: Response)
   try {
     const orderNo = String(req.body?.orderNo || '').trim();
     if (!orderNo) {
-      error(res, ErrorCodes.PARAM_ERROR, 'Missing orderNo');
+      error(res, ErrorCodes.PARAM_ERROR, '缺少订单号');
       return;
     }
     const result = await queryAndSyncWechatOrder(orderNo, req.user!.userId, false);
@@ -42,7 +42,7 @@ router.post('/wechat/query', authMiddleware, async (req: Request, res: Response)
       error(res, err.code, err.message);
       return;
     }
-    error(res, ErrorCodes.SERVER_ERROR, err?.message || 'Failed to query WeChat order');
+    error(res, ErrorCodes.SERVER_ERROR, err?.message || '查询微信支付订单失败');
   }
 });
 

@@ -1,7 +1,10 @@
 <template>
   <view class="generation-actions">
     <button class="generate-cta" :class="{ disabled: disabled || loading }" :disabled="disabled || loading" @tap="onGenerate">
-      <text class="generate-cta-title">{{ loading ? loadingTitle : title }}</text>
+      <view class="generate-cta-main">
+        <text v-if="loading" class="generate-spinner"></text>
+        <text class="generate-cta-title">{{ loading ? loadingTitle : title }}</text>
+      </view>
       <text class="generate-cta-cost">{{ cost }}</text>
     </button>
   </view>
@@ -56,6 +59,24 @@ function onGenerate() {
   opacity: 0.72;
 }
 
+.generate-cta-main {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12rpx;
+  min-width: 0;
+}
+
+.generate-spinner {
+  width: 26rpx;
+  height: 26rpx;
+  box-sizing: border-box;
+  border: 4rpx solid rgba(255, 255, 255, 0.34);
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  animation: generate-spin 0.82s linear infinite;
+}
+
 .generate-cta-title {
   font-size: 30rpx;
   font-weight: 900;
@@ -67,5 +88,11 @@ function onGenerate() {
   color: rgba(255, 255, 255, 0.82);
   font-size: 22rpx;
   font-weight: 700;
+}
+
+@keyframes generate-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 </style>

@@ -2,13 +2,13 @@ import fs from 'fs';
 import path from 'path';
 import zlib from 'zlib';
 import os from 'os';
-import { config } from '../utils/config';
 import { SettingsService } from './settings.service';
 
 interface EmailConfig {
   enabled: boolean;
   host: string;
   port: number;
+  secure: boolean;
   user: string;
   pass: string;
   from: string;
@@ -17,21 +17,47 @@ interface EmailConfig {
 
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024; // 超过 20MB 不发附件，只发通知
 
+function parsePort(value: string): number {
+  const port = parseInt(String(value || ''), 10);
+  return Number.isFinite(port) && port > 0 ? port : 465;
+}
+
 async function loadConfig(): Promise<EmailConfig> {
-  const [enabled, from, to] = await Promise.all([
+  const [enabled, host, port, secure, user, pass, from, to] = await Promise.all([
     SettingsService.getBoolean('backup.email.enabled', false),
+    SettingsService.getString('backup.email.smtp_host', ''),
+    SettingsService.getString('backup.email.smtp_port', '465'),
+    SettingsService.getBoolean('backup.email.smtp_secure', true),
+    SettingsService.getString('backup.email.smtp_user', ''),
+    SettingsService.getString('backup.email.smtp_pass', ''),
     SettingsService.getString('backup.email.from', ''),
     SettingsService.getString('backup.email.to', ''),
   ]);
 
   return {
     enabled,
-    host: process.env.BACKUP_EMAIL_SMTP_HOST || '',
-    port: parseInt(process.env.BACKUP_EMAIL_SMTP_PORT || '465', 10),
-    user: process.env.BACKUP_EMAIL_SMTP_USER || '',
-    pass: process.env.BACKUP_EMAIL_SMTP_PASS || '',
+    host,
+    port: parsePort(port),
+    secure,
+    user,
+    pass,
     from,
     to,
+  };
+}
+
+export async function getBackupEmailConfigForAdmin() {
+  const cfg = await loadConfig();
+  return {
+    enabled: cfg.enabled,
+    host: cfg.host,
+    port: cfg.port,
+    secure: cfg.secure,
+    user: cfg.user,
+    from: cfg.from,
+    to: cfg.to,
+    passConfigured: !!cfg.pass,
+    passMasked: cfg.pass ? SettingsService.maskValue(cfg.pass, 'backup.email.smtp_pass') : '',
   };
 }
 
@@ -68,7 +94,7 @@ export async function sendBackupByEmail(backupPath: string): Promise<boolean> {
     const transporter = nodemailer.default.createTransport({
       host: cfg.host,
       port: cfg.port,
-      secure: cfg.port === 465,
+      secure: cfg.secure,
       auth: { user: cfg.user, pass: cfg.pass },
     });
 

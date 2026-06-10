@@ -10,24 +10,35 @@ interface QueueItem {
 
 const queue: QueueItem[] = [];
 let isRunning = false;
-const MAX_CONCURRENT = 3;
+const MAX_CONCURRENT = positiveInt(process.env.TASK_CONCURRENCY, 3);
+const MAX_QUEUE_LENGTH = positiveInt(process.env.TASK_QUEUE_MAX_LENGTH, 500);
 let activeCount = 0;
 const queuedTaskIds = new Set<number>();
 const runningTaskIds = new Set<number>();
 
-export function enqueue(taskId: number, data: any, handler: TaskHandler): void {
+function positiveInt(value: any, fallback: number): number {
+  const parsed = parseInt(String(value || ''), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export function enqueue(taskId: number, data: any, handler: TaskHandler): boolean {
   if (process.env.CHECK_DISABLE_QUEUE === 'true' && process.env.NODE_ENV === 'development') {
     console.log(`[Queue] 任务 #${taskId} 已创建，自检模式跳过异步执行`);
-    return;
+    return true;
   }
   if (queuedTaskIds.has(taskId) || runningTaskIds.has(taskId)) {
     console.log(`[Queue] 任务 #${taskId} 已入队或正在执行，跳过重复队列`);
-    return;
+    return true;
+  }
+  if (queue.length >= MAX_QUEUE_LENGTH) {
+    console.warn(`[Queue] 队列已满，拒绝任务 #${taskId} 入队，队列长度: ${queue.length}`);
+    return false;
   }
   queuedTaskIds.add(taskId);
   queue.push({ taskId, data, handler });
-  console.log(`[Queue] 任务 #${taskId} 已入队，队列长度: ${queue.length}`);
+  logQueueStatus(`[Queue] 任务 #${taskId} 已入队`);
   processQueue();
+  return true;
 }
 
 async function processQueue(): Promise<void> {
@@ -41,7 +52,7 @@ async function processQueue(): Promise<void> {
     runningTaskIds.add(item.taskId);
 
     activeCount++;
-    console.log(`[Queue] 开始处理任务 #${item.taskId}，活跃任务: ${activeCount}`);
+    logQueueStatus(`[Queue] 开始处理任务 #${item.taskId}`);
 
     // 异步执行，不阻塞队列。
     item.handler(item.data)
@@ -49,7 +60,7 @@ async function processQueue(): Promise<void> {
       .finally(() => {
         activeCount--;
         runningTaskIds.delete(item.taskId);
-        console.log(`[Queue] 任务 #${item.taskId} 完成，活跃任务: ${activeCount}`);
+        logQueueStatus(`[Queue] 任务 #${item.taskId} 完成`);
         processQueue();
       });
   }
@@ -99,5 +110,9 @@ export function wrapWithTransfer(
 }
 
 export function getQueueStatus() {
-  return { queued: queue.length, active: activeCount };
+  return { queued: queue.length, active: activeCount, concurrency: MAX_CONCURRENT, maxQueued: MAX_QUEUE_LENGTH };
+}
+
+function logQueueStatus(prefix: string): void {
+  console.log(`${prefix}，等待队列: ${queue.length}，活跃任务: ${activeCount}/${MAX_CONCURRENT}`);
 }

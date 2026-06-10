@@ -51,6 +51,7 @@ import {
   StopOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
+import { useLocation } from 'react-router-dom';
 import api from '../services/api';
 
 const { Text, Title } = Typography;
@@ -137,12 +138,34 @@ const DEFAULT_TIER_TYPE_LABELS = ['专业', '超清', '艺术', '快速'];
 const EDIT_SECTIONS = ['基础设置', '模型绑定', '模型参数', '前台展示', '高级设置'];
 const DEFAULT_MAX_REFERENCE_IMAGES = 4;
 
+const VIDEO_UPLOAD_MODE_OPTIONS = [
+  { label: '自动推导', value: '' },
+  { label: '文生视频，无需素材', value: 'none' },
+  { label: '首图视频，单张首图', value: 'first_frame' },
+  { label: '图生视频，多参考图', value: 'reference_images' },
+  { label: '首尾帧视频，开始帧和结束帧', value: 'first_last' },
+  { label: '视频编辑，源视频', value: 'source_video' },
+];
+
+const REQUIRED_REFERENCE_OPTIONS = [
+  { label: '自动按最少素材数判断', value: 'auto' },
+  { label: '需要上传素材', value: 'true' },
+  { label: '不强制上传素材', value: 'false' },
+];
+
 const TIER_TYPE_OPTIONS = [
   { label: '专业', value: '专业' },
   { label: '超清', value: '超清' },
   { label: '艺术', value: '艺术' },
   { label: '快速', value: '快速' },
   { label: '自定义', value: '自定义' },
+];
+
+const PRICING_MODE_OPTIONS = [
+  { label: '固定价', value: 'fixed' },
+  { label: '参数矩阵', value: 'matrix' },
+  { label: '按秒矩阵', value: 'per_second_matrix' },
+  { label: 'Token 预扣', value: 'token_preauth' },
 ];
 
 const TEMPLATE_OPTIONS = [
@@ -205,6 +228,12 @@ interface ModelBinding {
   failoverOnError?: boolean;
   failoverOnTimeout?: boolean;
   failoverOnRateLimit?: boolean;
+  modelStatus?: string;
+  providerStatus?: string;
+  providerConfigured?: boolean;
+  capabilityOk?: boolean;
+  canUse?: boolean;
+  unusableReason?: string;
 }
 
 interface FeatureItem {
@@ -238,6 +267,8 @@ interface TierItem {
   iconUrl?: string;
   iconFileId?: number | null;
   pointsCost?: number;
+  pricingMode?: string;
+  pricingRules?: Record<string, unknown> | null;
   isDefault?: boolean;
   isRecommended?: boolean;
   sortOrder?: number;
@@ -249,6 +280,10 @@ interface TierItem {
     maxReferenceImages?: number;
     maxImages?: number;
     maxDurationSeconds?: number;
+    inputMode?: string | null;
+    minReferenceImages?: number | null;
+    referenceUploadMode?: string | null;
+    requiredReference?: boolean | null;
   } | null;
 }
 
@@ -265,6 +300,113 @@ const parseModelConfig = (config: RealModelItem['config']) => {
   } catch {
     return {};
   }
+};
+
+const formatPricingRulesForForm = (value: unknown) => {
+  if (!value) return '';
+  if (typeof value === 'string') {
+    try {
+      return JSON.stringify(JSON.parse(value), null, 2);
+    } catch {
+      return value;
+    }
+  }
+  return JSON.stringify(value, null, 2);
+};
+
+const parsePricingRulesForSubmit = (value: unknown) => {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  const parsed = JSON.parse(text);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('定价规则 JSON 必须是对象');
+  }
+  return parsed;
+};
+
+const readPricingRulesObject = (value: unknown): Record<string, any> => {
+  if (!value) return {};
+  if (typeof value === 'object' && !Array.isArray(value)) return value as Record<string, any>;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+};
+
+const compactObject = (source: Record<string, unknown>) => Object.fromEntries(
+  Object.entries(source).filter(([, value]) => value !== undefined && value !== null && value !== ''),
+);
+
+const pricingRulesToBuilderFields = (value: unknown) => {
+  const rules = readPricingRulesObject(value);
+  const defaultParams = readPricingRulesObject(rules.defaultParams);
+  const rows = Array.isArray(rules.rules)
+    ? rules.rules.map((rule: any) => {
+        const conditions = readPricingRulesObject(rule?.conditions);
+        return {
+          duration: conditions.duration,
+          quality: conditions.quality || conditions.resolution,
+          audioMode: conditions.audioMode,
+          pointsCost: rule?.pointsCost,
+          unitPoints: rule?.unitPoints,
+          preauthPoints: rule?.preauthPoints,
+          label: rule?.label,
+        };
+      })
+    : [];
+  return {
+    pricingDefaultParams: {
+      duration: defaultParams.duration,
+      quality: defaultParams.quality || defaultParams.resolution,
+      audioMode: defaultParams.audioMode,
+    },
+    pricingPreauthPoints: rules.preauthPoints,
+    pricingRuleRows: rows.length ? rows : [{}],
+  };
+};
+
+const buildPricingRulesFromBuilder = (values: Record<string, any>) => {
+  const mode = String(values.pricingMode || 'fixed');
+  if (mode === 'fixed') return null;
+  if (mode === 'token_preauth') {
+    return {
+      mode,
+      preauthPoints: Number(values.pricingPreauthPoints || values.pointsCost || 0),
+      settlement: 'manual_later',
+    };
+  }
+  const defaultParams = compactObject({
+    duration: values.pricingDefaultParams?.duration,
+    quality: values.pricingDefaultParams?.quality,
+    audioMode: values.pricingDefaultParams?.audioMode,
+  });
+  const rows = Array.isArray(values.pricingRuleRows) ? values.pricingRuleRows : [];
+  const rules = rows.map((row: Record<string, any>) => {
+    const conditions = compactObject({
+      duration: row?.duration,
+      quality: row?.quality,
+      audioMode: row?.audioMode,
+    });
+    const priceField = mode === 'per_second_matrix'
+      ? { unitPoints: Number(row?.unitPoints || 0) }
+      : { pointsCost: Number(row?.pointsCost || 0) };
+    return compactObject({
+      label: row?.label,
+      conditions,
+      ...priceField,
+    });
+  }).filter((row) => Object.keys(row.conditions as Record<string, unknown> || {}).length > 0);
+  return compactObject({
+    mode,
+    defaultParams,
+    defaultUnitPoints: mode === 'per_second_matrix' ? Number(values.defaultUnitPoints || 0) || undefined : undefined,
+    rules,
+  });
 };
 
 const normalizeCapabilityList = (value: unknown) => {
@@ -308,7 +450,64 @@ const modelSupportsFeature = (model: RealModelItem, featureKey: string) => {
   return required.some((item) => caps.includes(normalizeCapabilityKey(item)));
 };
 
+const isVideoFeatureKey = (featureKey?: string) => FEATURE_TYPES[featureKey || ''] === 'video';
+
+const isReferenceTier = (tier?: Pick<TierItem, 'tierKey' | 'tierName'> | null) => {
+  const text = `${tier?.tierKey || ''} ${tier?.tierName || ''}`.toLowerCase();
+  return text.includes('reference') || text.includes('cankao') || text.includes('参考');
+};
+
+const defaultUploadModeForFeature = (featureKey: string, tier?: Pick<TierItem, 'tierKey' | 'tierName'> | null) => {
+  if (featureKey === 'video_create') return 'none';
+  if (featureKey === 'image_to_video') return isReferenceTier(tier) ? 'reference_images' : 'first_frame';
+  if (featureKey === 'first_last_frame_video') return 'first_last';
+  if (featureKey === 'video_edit') return 'source_video';
+  return '';
+};
+
+const inputModeForUploadMode = (uploadMode?: string | null) => {
+  if (uploadMode === 'none') return 'text';
+  if (uploadMode === 'first_frame') return 'first_frame';
+  if (uploadMode === 'reference_images') return 'reference_images';
+  if (uploadMode === 'first_last') return 'first_last';
+  if (uploadMode === 'source_video') return 'source_video';
+  return null;
+};
+
+const minReferenceImagesForUploadMode = (uploadMode?: string | null) => {
+  if (uploadMode === 'first_last') return 2;
+  if (uploadMode === 'first_frame' || uploadMode === 'reference_images' || uploadMode === 'source_video') return 1;
+  return 0;
+};
+
+const uploadModeLabel = (uploadMode?: string | null) => {
+  const option = VIDEO_UPLOAD_MODE_OPTIONS.find((item) => item.value === (uploadMode || ''));
+  return option?.label || uploadMode || '自动推导';
+};
+
+const uploadModeTagColor = (uploadMode?: string | null) => {
+  if (uploadMode === 'first_frame') return 'cyan';
+  if (uploadMode === 'reference_images') return 'purple';
+  if (uploadMode === 'first_last') return 'geekblue';
+  if (uploadMode === 'source_video') return 'orange';
+  if (uploadMode === 'none') return 'default';
+  return 'blue';
+};
+
+const requiredReferenceFormValue = (value: boolean | null | undefined) => {
+  if (value === true) return 'true';
+  if (value === false) return 'false';
+  return 'auto';
+};
+
+const requiredReferenceSubmitValue = (value: string | undefined) => {
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return null;
+};
+
 export default function FeatureConfig() {
+  const location = useLocation();
   const [features, setFeatures] = useState<FeatureItem[]>([]);
   const [tiers, setTiers] = useState<TierItem[]>([]);
   const [models, setModels] = useState<RealModelItem[]>([]);
@@ -399,6 +598,10 @@ export default function FeatureConfig() {
   }, [activeFeature, features]);
 
   useEffect(() => { fetchFeatures(); fetchModels(); }, [fetchFeatures, fetchModels]);
+  useEffect(() => {
+    const feature = new URLSearchParams(location.search).get('feature');
+    if (feature && ORDERED_FEATURES.includes(feature)) setActiveFeature(feature);
+  }, [location.search]);
   useEffect(() => { fetchTiers(); }, [fetchTiers]);
 
   const featureTabs = useMemo(() => {
@@ -427,10 +630,17 @@ export default function FeatureConfig() {
       message.warning('当前功能暂未初始化，无法新增入口');
       return;
     }
+    const uploadMode = defaultUploadModeForFeature(activeFeature);
+    const minReferenceImages = minReferenceImagesForUploadMode(uploadMode);
     setEditing(null);
     form.resetFields();
     form.setFieldsValue({
       pointsCost: 1,
+      pricingMode: 'fixed',
+      pricingRules: '',
+      pricingDefaultParams: {},
+      pricingPreauthPoints: undefined,
+      pricingRuleRows: [{}],
       sortOrder: 0,
       qualityMultipliers: { '1K': 1.0, '2K': 2.0, '4K': 4.0 },
       isDefault: false,
@@ -442,6 +652,9 @@ export default function FeatureConfig() {
       fallbackPriority: 1,
       maxEntries: 1,
       maxReferenceImages: DEFAULT_MAX_REFERENCE_IMAGES,
+      referenceUploadMode: uploadMode,
+      minReferenceImages,
+      requiredReference: requiredReferenceFormValue(minReferenceImages > 0),
       timeoutSeconds: 120,
       concurrencyLimit: 5,
     });
@@ -454,18 +667,26 @@ export default function FeatureConfig() {
     const bindings = tier.bindings || [];
     const primary = bindings.find((binding) => binding.bindingType === 'primary') || bindings[0] || null;
     const fallbacks = bindings.filter((binding) => binding.modelId !== primary?.modelId);
+    const pricingBuilderFields = pricingRulesToBuilderFields(tier.pricingRules);
+    const uploadMode = tier.capabilities?.referenceUploadMode || defaultUploadModeForFeature(tier.featureKey || activeFeature, tier);
     form.setFieldsValue({
       tierName: tier.tierName,
       tierKey: tier.tierKey,
       description: tier.description,
       tag: tier.tag,
       pointsCost: tier.pointsCost,
+      pricingMode: tier.pricingMode || 'fixed',
+      pricingRules: formatPricingRulesForForm(tier.pricingRules),
+      ...pricingBuilderFields,
       isDefault: tier.isDefault,
       isRecommended: tier.isRecommended,
       sortOrder: tier.sortOrder,
       status: tier.status,
       maxEntries: tier.maxEntries || 3,
       maxReferenceImages: tier.capabilities?.maxReferenceImages || DEFAULT_MAX_REFERENCE_IMAGES,
+      referenceUploadMode: uploadMode,
+      minReferenceImages: tier.capabilities?.minReferenceImages ?? minReferenceImagesForUploadMode(uploadMode),
+      requiredReference: requiredReferenceFormValue(tier.capabilities?.requiredReference),
       tierType: tier.tag || '自定义',
       badge: tier.tag,
       displayColor: '#1677ff',
@@ -478,6 +699,50 @@ export default function FeatureConfig() {
       qualityMultipliers: tier.qualityMultipliers || {},
     });
     setModalOpen(true);
+  };
+
+  const buildBindingPayload = (
+    primaryModelId: number | undefined,
+    fallbackModelIds: number[] = [],
+    failoverOnError = true,
+    fallbackPriority = 1,
+  ) => {
+    if (!primaryModelId) return [];
+    return [
+      {
+        modelId: Number(primaryModelId),
+        bindingType: 'primary',
+        fallbackOrder: 0,
+        failoverOnError: failoverOnError !== false,
+        failoverOnTimeout: failoverOnError !== false,
+        failoverOnRateLimit: failoverOnError !== false,
+      },
+      ...fallbackModelIds.map((modelId: number, index: number) => ({
+        modelId: Number(modelId),
+        bindingType: 'fallback',
+        fallbackOrder: Number(fallbackPriority || 1) + index,
+        failoverOnError: failoverOnError !== false,
+        failoverOnTimeout: failoverOnError !== false,
+        failoverOnRateLimit: failoverOnError !== false,
+      })),
+    ];
+  };
+
+  const validateBindingPayload = (bindings: Array<{ modelId: number }>) => {
+    const seen = new Set<number>();
+    for (const binding of bindings) {
+      if (seen.has(binding.modelId)) return '同一个模型不能重复绑定';
+      seen.add(binding.modelId);
+      const model = models.find((item) => item.id === binding.modelId);
+      if (!model) return `模型#${binding.modelId} 未同步，请刷新模型列表`;
+      if (model.status !== 'active') return `模型 ${model.name || binding.modelId} 未启用`;
+      if (!modelSupportsFeature(model, activeFeature)) return `模型 ${model.name || binding.modelId} 不支持${FEATURE_LABELS[activeFeature] || activeFeature}`;
+    }
+    return '';
+  };
+
+  const applyTierBindings = (tierId: number, bindings: ModelBinding[]) => {
+    setTiers((items) => items.map((item) => item.id === tierId ? { ...item, bindings } : item));
   };
 
   const save = async () => {
@@ -493,6 +758,13 @@ export default function FeatureConfig() {
       const qualityMultipliers = qualities.length
         ? Object.fromEntries(qualities.map((quality, index) => [quality, Number(values.qualityMultipliers?.[quality] || index + 1)]))
         : values.qualityMultipliers || {};
+      let pricingRules: Record<string, unknown> | null = null;
+      try {
+        pricingRules = parsePricingRulesForSubmit(values.pricingRules);
+      } catch (err: any) {
+        message.error(err?.message || '定价规则 JSON 格式错误');
+        return;
+      }
       const body = {
         featureId,
         tierName: values.tierName,
@@ -500,6 +772,8 @@ export default function FeatureConfig() {
         description: values.description,
         tag: values.tierType === '自定义' ? values.badge || values.tag || '自定义' : values.tierType || values.tag,
         pointsCost: values.pointsCost,
+        pricingMode: values.pricingMode || 'fixed',
+        pricingRules,
         isDefault: !!values.isDefault,
         isRecommended: !!values.isRecommended,
         sortOrder: values.sortOrder,
@@ -512,6 +786,12 @@ export default function FeatureConfig() {
         message.error('备用模型不能和主模型重复');
         return;
       }
+      const bindingPayload = buildBindingPayload(values.primaryModelId, fallbackModelIds, values.failoverOnError, values.fallbackPriority);
+      const bindingError = validateBindingPayload(bindingPayload);
+      if (bindingError) {
+        message.error(bindingError);
+        return;
+      }
       let savedTierId = editing?.id;
       if (editing) await api.put('/model-tiers/' + editing.id, body);
       else {
@@ -520,34 +800,22 @@ export default function FeatureConfig() {
       }
       if (savedTierId) {
         try {
+          const uploadMode = values.referenceUploadMode || null;
           await api.put('/model-tiers/' + savedTierId + '/capabilities', {
             maxReferenceImages: Number(values.maxReferenceImages || DEFAULT_MAX_REFERENCE_IMAGES),
+            inputMode: inputModeForUploadMode(uploadMode),
+            referenceUploadMode: uploadMode,
+            minReferenceImages: values.minReferenceImages === undefined || values.minReferenceImages === null ? null : Number(values.minReferenceImages),
+            requiredReference: requiredReferenceSubmitValue(values.requiredReference),
           });
         } catch (e: any) {
-          message.warning(e?.response?.data?.message || '入口已保存，但参考图上限保存失败');
+          message.warning(e?.response?.data?.message || '入口已保存，但视频上传能力保存失败');
         }
       }
-      if (savedTierId && values.primaryModelId) {
-        await api.put('/model-tiers/' + savedTierId + '/bindings', {
-          bindings: [
-            {
-              modelId: values.primaryModelId,
-              bindingType: 'primary',
-              fallbackOrder: 0,
-              failoverOnError: values.failoverOnError !== false,
-              failoverOnTimeout: values.failoverOnError !== false,
-              failoverOnRateLimit: values.failoverOnError !== false,
-            },
-            ...fallbackModelIds.map((modelId: number, index: number) => ({
-              modelId,
-              bindingType: 'fallback',
-              fallbackOrder: Number(values.fallbackPriority || 1) + index,
-              failoverOnError: values.failoverOnError !== false,
-              failoverOnTimeout: values.failoverOnError !== false,
-              failoverOnRateLimit: values.failoverOnError !== false,
-            })),
-          ],
-        });
+      if (savedTierId) {
+        const bindingResult: any = await api.put('/model-tiers/' + savedTierId + '/bindings', { bindings: bindingPayload });
+        const nextBindings = Array.isArray(bindingResult?.data?.bindings) ? bindingResult.data.bindings as ModelBinding[] : null;
+        if (nextBindings) applyTierBindings(savedTierId, nextBindings);
       }
       message.success(editing ? '已保存' : '已创建');
       setModalOpen(false);
@@ -558,6 +826,15 @@ export default function FeatureConfig() {
     } finally {
       setSaving(false);
     }
+  };
+
+  const applyPricingBuilder = () => {
+    const values = form.getFieldsValue(true);
+    const rules = buildPricingRulesFromBuilder(values);
+    form.setFieldsValue({
+      pricingRules: rules ? JSON.stringify(rules, null, 2) : '',
+    });
+    message.success('已生成动态定价 JSON，请保存入口配置后生效');
   };
 
   const openCopyTier = (tier?: TierItem | null) => {
@@ -596,6 +873,8 @@ export default function FeatureConfig() {
         description: copySourceTier.description || '',
         tag: copySourceTier.tag || '',
         pointsCost: values.copyPricing ? copySourceTier.pointsCost ?? 1 : 1,
+        pricingMode: values.copyPricing ? copySourceTier.pricingMode || 'fixed' : 'fixed',
+        pricingRules: values.copyPricing ? copySourceTier.pricingRules || null : null,
         isDefault: false,
         isRecommended: false,
         sortOrder: values.sortOrder || 0,
@@ -692,8 +971,8 @@ export default function FeatureConfig() {
     if (statusUpdatingIds.includes(id)) return;
     setStatusUpdatingIds((ids) => [...ids, id]);
     try {
-      await api.put('/model-tiers/' + id, { status: 'inactive' });
-      message.success('入口已处理');
+      await api.delete('/model-tiers/' + id);
+      message.success('入口已删除');
       fetchTiers();
     } catch (e: any) {
       message.error(e?.response?.data?.message || '删除入口失败');
@@ -737,7 +1016,7 @@ export default function FeatureConfig() {
             <Descriptions.Item label="入口名称">{tier.tierName || `入口#${tier.id}`}</Descriptions.Item>
             <Descriptions.Item label="所属功能">{FEATURE_LABELS[tier.featureKey || activeFeature] || tier.featureName || activeFeature}</Descriptions.Item>
           </Descriptions>
-          <Text type="secondary">当前后端未提供物理删除接口，本操作会将入口停用处理，绑定关系仍保留。</Text>
+          <Text type="secondary">删除会同时移除该入口的能力配置和模型绑定关系，操作后不可恢复。</Text>
         </Space>
       ),
       okText: '删除',
@@ -819,7 +1098,9 @@ export default function FeatureConfig() {
           failoverOnRateLimit: values.failoverOnError !== false,
         })),
       ];
-      await api.put('/model-tiers/' + bindTier.id + '/bindings', { bindings });
+      const bindingResult: any = await api.put('/model-tiers/' + bindTier.id + '/bindings', { bindings });
+      const nextBindings = Array.isArray(bindingResult?.data?.bindings) ? bindingResult.data.bindings as ModelBinding[] : null;
+      if (nextBindings) applyTierBindings(bindTier.id, nextBindings);
       message.success('绑定已保存');
       setBindModal(false);
       fetchTiers();
@@ -937,6 +1218,8 @@ export default function FeatureConfig() {
         description: tier.description,
         tag: tier.tag,
         pointsCost: tier.pointsCost,
+        pricingMode: tier.pricingMode || 'fixed',
+        pricingRules: tier.pricingRules || null,
         sortOrder: tier.sortOrder,
         status: tier.status,
         qualityMultipliers: tier.qualityMultipliers || {},
@@ -968,7 +1251,7 @@ export default function FeatureConfig() {
     }
     const parsed = JSON.parse(text);
     const incomingTiers = Array.isArray(parsed?.tiers) ? parsed.tiers : Array.isArray(parsed) ? parsed : [];
-    const allowedKeys = new Set(['tierName', 'tierKey', 'description', 'tag', 'pointsCost', 'sortOrder', 'status', 'qualityMultipliers', 'bindings']);
+    const allowedKeys = new Set(['tierName', 'tierKey', 'description', 'tag', 'pointsCost', 'pricingMode', 'pricingRules', 'sortOrder', 'status', 'qualityMultipliers', 'bindings']);
     const unsupportedFields = Array.from(new Set<string>(incomingTiers.flatMap((tier: Record<string, unknown>) => Object.keys(tier).filter((key) => !allowedKeys.has(key) && key !== 'id' && key !== 'featureKey' && key !== 'featureName'))));
     const conflicts = incomingTiers
       .map((tier: TierItem) => tier.tierName)
@@ -1033,6 +1316,15 @@ export default function FeatureConfig() {
     return { color: 'success', text: '可用' };
   };
 
+  const bindingStatusMeta = (binding?: ModelBinding | null) => {
+    if (!binding) return { color: 'default', text: '未绑定' };
+    if (binding.canUse === true) return { color: 'success', text: '可展示' };
+    if (binding.canUse === false) return { color: 'warning', text: binding.unusableReason || '需检查' };
+    return modelStatusMeta(binding.modelId);
+  };
+
+  const hasUsableBinding = (tier: TierItem) => (tier.bindings || []).some((binding) => bindingStatusMeta(binding).text === '可展示' || bindingStatusMeta(binding).text === '可用');
+
   const restorePreviewTemplate = TEMPLATE_OPTIONS.find((item) => item.value === (FEATURE_TYPES[activeFeature] === 'video' ? 'video-basic' : 'standard-image')) || TEMPLATE_OPTIONS[0];
 
   const columns: ColumnsType<TierItem> = [
@@ -1094,6 +1386,24 @@ export default function FeatureConfig() {
       render: (_value, record, index) => <Tag color="blue">{tierTypeLabel(record, index)}</Tag>,
     },
     {
+      title: '素材方式',
+      key: 'uploadMode',
+      width: 150,
+      render: (_value, record) => {
+        const featureKey = record.featureKey || activeFeature;
+        if (!isVideoFeatureKey(featureKey)) return <Text type="secondary">不涉及</Text>;
+        const uploadMode = record.capabilities?.referenceUploadMode || defaultUploadModeForFeature(featureKey, record);
+        const minReference = record.capabilities?.minReferenceImages ?? minReferenceImagesForUploadMode(uploadMode);
+        const maxReference = record.capabilities?.maxReferenceImages || DEFAULT_MAX_REFERENCE_IMAGES;
+        return (
+          <Space direction="vertical" size={2}>
+            <Tag color={uploadModeTagColor(uploadMode)}>{uploadModeLabel(uploadMode)}</Tag>
+            <Text type="secondary" style={{ fontSize: 12 }}>最少 {minReference}，最多 {maxReference}</Text>
+          </Space>
+        );
+      },
+    },
+    {
       title: '绑定真实模型',
       key: 'models',
       width: 180,
@@ -1101,11 +1411,11 @@ export default function FeatureConfig() {
       render: (_value, record) => {
         const names = modelNames(record);
         if (!names) return <Tag color="red">未绑定</Tag>;
-        const unavailable = (record.bindings || []).some((binding) => modelStatusMeta(binding.modelId).text !== '可用');
+        const unavailable = !hasUsableBinding(record);
         return (
           <Space size={4}>
             <Tooltip title={names}><Text ellipsis style={{ maxWidth: 120 }}>{names}</Text></Tooltip>
-            {unavailable && <Tag color="warning">需检查</Tag>}
+            {unavailable ? <Tag color="warning">需检查</Tag> : <Tag color="success">可展示</Tag>}
           </Space>
         );
       },
@@ -1294,7 +1604,7 @@ export default function FeatureConfig() {
               showIcon
               icon={<InfoCircleOutlined />}
               message="配置说明"
-              description="前台按照排序从小到大展示模型入口；只有已绑定真实模型的入口才会在前台显示；如果同一入口绑定多个模型，将按优先级自动选择可用模型提供服务。"
+              description="前台按照排序从小到大展示模型入口；只有启用、已绑定可用模型、供应商 Base URL/API Key 已配置且能力匹配的入口才会在小程序显示。"
               style={{ marginBottom: 16, borderRadius: 8 }}
             />
 
@@ -1369,11 +1679,12 @@ export default function FeatureConfig() {
               {tiers.slice(0, 6).map((tier, index) => {
                 const bound = !!tier.bindings?.length;
                 const disabled = tier.status !== 'active';
+                const usable = hasUsableBinding(tier);
                 return (
                   <div key={tier.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
                     <Text ellipsis style={{ maxWidth: 150 }}>{tier.tierName || `${DEFAULT_TIER_TYPE_LABELS[index % 4]}入口`}</Text>
-                    <Tag color={disabled ? 'default' : bound ? 'success' : 'warning'}>
-                      {disabled ? '未启用' : bound ? '已绑定' : '未绑定'}
+                    <Tag color={disabled ? 'default' : usable ? 'success' : bound ? 'warning' : 'error'}>
+                      {disabled ? '未启用' : usable ? '可展示' : bound ? '需检查' : '未绑定'}
                     </Tag>
                   </div>
                 );
@@ -1386,8 +1697,16 @@ export default function FeatureConfig() {
             <Space direction="vertical" style={{ width: '100%' }}>
               <Button block icon={<CopyOutlined />} onClick={() => openCopyTier(selectedTier)}>从当前入口复制</Button>
               <Button block icon={<DownloadOutlined />} onClick={openExportModal}>导出当前配置</Button>
-              <Button block icon={<ImportOutlined />} onClick={showImportDialog}>导入配置</Button>
-              <Button block danger icon={<UploadOutlined />} onClick={openRestoreDefaults}>恢复默认配置</Button>
+              <Tooltip title="当前后端未提供导入执行接口，仅保留预检代码，入口暂不开放">
+                <span>
+                  <Button block icon={<ImportOutlined />} disabled>导入配置</Button>
+                </span>
+              </Tooltip>
+              <Tooltip title="当前后端未提供恢复默认接口，为避免覆盖现有入口，入口暂不开放">
+                <span>
+                  <Button block danger icon={<UploadOutlined />} disabled>恢复默认配置</Button>
+                </span>
+              </Tooltip>
             </Space>
           </Card>
         </div>
@@ -1475,7 +1794,12 @@ export default function FeatureConfig() {
           <Divider orientation="left" plain>价格与展示</Divider>
           <Row gutter={16}>
             <Col xs={24} md={8}>
-              <Form.Item name="pointsCost" label="1K 消耗积分" rules={[{ required: true, message: '请输入 1K 消耗积分' }]}><InputNumber min={0} style={{ width: '100%' }} /></Form.Item>
+              <Form.Item name="pointsCost" label="默认/兜底消耗积分" rules={[{ required: true, message: '请输入消耗积分' }]}><InputNumber min={0} style={{ width: '100%' }} /></Form.Item>
+            </Col>
+            <Col xs={24} md={8}>
+              <Form.Item name="pricingMode" label="定价模式" initialValue="fixed">
+                <Select options={PRICING_MODE_OPTIONS} />
+              </Form.Item>
             </Col>
             <Col xs={24} md={8}>
               <Form.Item name={['qualityMultipliers', '2K']} label="2K 倍率"><InputNumber min={0.1} step={0.1} style={{ width: '100%' }} /></Form.Item>
@@ -1495,9 +1819,142 @@ export default function FeatureConfig() {
               </Form.Item>
             </Col>
           </Row>
-          <Alert type="info" showIcon style={{ marginBottom: 16 }} message="2K/4K 字段当前按倍率保存到 qualityMultipliers；展示颜色字段后端暂未支持，不会提交。" />
+          <Form.Item shouldUpdate={(prev, cur) => prev.pricingMode !== cur.pricingMode}>
+            {({ getFieldValue }) => {
+              const mode = getFieldValue('pricingMode') || 'fixed';
+              if (mode === 'fixed') {
+                return <Alert type="info" showIcon style={{ marginBottom: 16 }} message="固定价入口只使用默认/兜底消耗积分，不需要动态规则。" />;
+              }
+              return (
+                <div style={{ border: '1px solid #f0f0f0', borderRadius: 8, padding: 12, marginBottom: 16 }}>
+                  <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                    <Text strong>定价规则辅助编辑</Text>
+                    {mode === 'token_preauth' ? (
+                      <>
+                        <Row gutter={12}>
+                          <Col xs={24} md={8}>
+                            <Form.Item name="pricingPreauthPoints" label="预扣创作点" extra="任务完成后不按 token 自动补扣或退款。">
+                              <InputNumber min={0} style={{ width: '100%' }} />
+                            </Form.Item>
+                          </Col>
+                        </Row>
+                        <Alert type="warning" showIcon message="Token 数量和最终成本以小马侧为准，本系统只做预扣和成本快照留存。" />
+                      </>
+                    ) : (
+                      <>
+                        <Row gutter={12}>
+                          <Col xs={24} md={8}>
+                            <Form.Item name={['pricingDefaultParams', 'duration']} label="默认时长"><Input placeholder="例如 8s" /></Form.Item>
+                          </Col>
+                          <Col xs={24} md={8}>
+                            <Form.Item name={['pricingDefaultParams', 'quality']} label="默认清晰度"><Input placeholder="例如 720p" /></Form.Item>
+                          </Col>
+                          <Col xs={24} md={8}>
+                            <Form.Item name={['pricingDefaultParams', 'audioMode']} label="默认声音"><Select allowClear options={[{ label: '有声', value: 'audio' }, { label: '无声', value: 'silent' }]} /></Form.Item>
+                          </Col>
+                        </Row>
+                        <Form.List name="pricingRuleRows">
+                          {(fields, { add, remove }) => (
+                            <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                              {fields.map((field) => (
+                                <Row key={field.key} gutter={8} align="top">
+                                  <Col xs={12} md={4}>
+                                    <Form.Item name={[field.name, 'duration']} label="时长"><Input placeholder="8s" /></Form.Item>
+                                  </Col>
+                                  <Col xs={12} md={4}>
+                                    <Form.Item name={[field.name, 'quality']} label="清晰度"><Input placeholder="720p" /></Form.Item>
+                                  </Col>
+                                  <Col xs={12} md={4}>
+                                    <Form.Item name={[field.name, 'audioMode']} label="声音"><Select allowClear options={[{ label: '有声', value: 'audio' }, { label: '无声', value: 'silent' }]} /></Form.Item>
+                                  </Col>
+                                  <Col xs={12} md={4}>
+                                    <Form.Item name={[field.name, mode === 'per_second_matrix' ? 'unitPoints' : 'pointsCost']} label={mode === 'per_second_matrix' ? '每秒点数' : '本规则点数'}>
+                                      <InputNumber min={0} style={{ width: '100%' }} />
+                                    </Form.Item>
+                                  </Col>
+                                  <Col xs={18} md={6}>
+                                    <Form.Item name={[field.name, 'label']} label="备注"><Input placeholder="可选" /></Form.Item>
+                                  </Col>
+                                  <Col xs={6} md={2}>
+                                    <Form.Item label=" ">
+                                      <Button danger icon={<DeleteOutlined />} onClick={() => remove(field.name)} disabled={fields.length <= 1} />
+                                    </Form.Item>
+                                  </Col>
+                                </Row>
+                              ))}
+                              <Space>
+                                <Button icon={<PlusOutlined />} onClick={() => add({})}>添加规则</Button>
+                                <Button type="primary" onClick={applyPricingBuilder}>生成 JSON</Button>
+                              </Space>
+                            </Space>
+                          )}
+                        </Form.List>
+                      </>
+                    )}
+                    {mode === 'token_preauth' && <Button type="primary" onClick={applyPricingBuilder}>生成 JSON</Button>}
+                  </Space>
+                </div>
+              );
+            }}
+          </Form.Item>
+          <Form.Item
+            name="pricingRules"
+            label="动态定价规则 JSON（最终保存值）"
+            extra="辅助编辑会覆盖这里；需要复杂条件时可直接编辑 JSON。视频真实扣费以后端重算为准。"
+          >
+            <Input.TextArea rows={8} placeholder={'{\n  "mode": "matrix",\n  "defaultParams": { "duration": "5s", "quality": "720P" },\n  "rules": [\n    { "conditions": { "duration": "10s", "quality": "1080P" }, "pointsCost": 60 }\n  ]\n}'} />
+          </Form.Item>
+          <Alert type="info" showIcon style={{ marginBottom: 16 }} message="2K/4K 字段仍保存到旧的 qualityMultipliers，展示颜色字段后端暂未支持。" />
 
           <Divider orientation="left" plain>高级设置</Divider>
+          {isVideoFeatureKey(activeFeature) ? (
+            <>
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 16 }}
+                message="视频上传能力会直接影响小程序选项卡和上传卡片。保存后，公开档位接口会下发这些能力。"
+              />
+              <Row gutter={16}>
+                <Col xs={24} md={8}>
+                  <Form.Item
+                    name="referenceUploadMode"
+                    label="上传入口类型"
+                    extra="首图视频进入小程序“首图视频”；多参考图进入小程序“图生视频”。"
+                  >
+                    <Select
+                      options={VIDEO_UPLOAD_MODE_OPTIONS}
+                      onChange={(value) => {
+                        const minReferenceImages = minReferenceImagesForUploadMode(value);
+                        form.setFieldsValue({
+                          minReferenceImages,
+                          requiredReference: requiredReferenceFormValue(minReferenceImages > 0),
+                        });
+                      }}
+                    />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={8}>
+                  <Form.Item
+                    name="minReferenceImages"
+                    label="最少素材数"
+                    extra="用于小程序提交前校验，0 表示该入口不要求上传素材。"
+                  >
+                    <InputNumber min={0} max={12} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={8}>
+                  <Form.Item
+                    name="requiredReference"
+                    label="素材是否必填"
+                    extra="自动时按最少素材数判断；也可以手动覆盖。"
+                  >
+                    <Select options={REQUIRED_REFERENCE_OPTIONS} />
+                  </Form.Item>
+                </Col>
+              </Row>
+            </>
+          ) : null}
           <Row gutter={16}>
             <Col xs={24} md={8}>
               <Form.Item name="maxEntries" label="最大生成数量">
@@ -1508,7 +1965,7 @@ export default function FeatureConfig() {
               <Form.Item
                 name="maxReferenceImages"
                 label="参考图上限"
-                extra="未明确配置时默认最多 4 张；首尾帧、图片编辑、视频编辑不使用该上限。"
+                extra="多参考图视频会按该值限制上传数量；首图视频固定 1 张，首尾帧固定 2 张。"
               >
                 <InputNumber min={1} max={12} style={{ width: '100%' }} />
               </Form.Item>
@@ -1803,6 +2260,7 @@ export default function FeatureConfig() {
           {tiers.length === 0 && <Empty description="当前功能暂无入口" />}
           {tiers.map((tier, index) => {
             const bound = !!tier.bindings?.length;
+            const usable = hasUsableBinding(tier);
             return (
               <Card key={tier.id} size="small" style={{ borderRadius: 8 }}>
                 <Space direction="vertical" size={8} style={{ width: '100%' }}>
@@ -1810,7 +2268,7 @@ export default function FeatureConfig() {
                     <Tag color="blue">{tierTypeLabel(tier, index)}</Tag>
                     <Text strong>{tier.tierName || '-'}</Text>
                     <Tag color={tier.status === 'active' ? 'success' : 'default'}>{tier.status === 'active' ? '启用' : '停用'}</Tag>
-                    <Tag color={bound ? 'success' : 'warning'}>{bound ? '已绑定模型' : '未绑定模型'}</Tag>
+                    <Tag color={usable ? 'success' : bound ? 'warning' : 'error'}>{usable ? '小程序可展示' : bound ? '绑定需检查' : '未绑定模型'}</Tag>
                   </Space>
                   <Text type="secondary">{tier.description || '暂无说明'}</Text>
                   <Descriptions size="small" column={{ xs: 1, md: 3 }}>
@@ -1837,7 +2295,7 @@ export default function FeatureConfig() {
             type="info"
             showIcon
             message="基于当前真实接口数据检查"
-            description="检查项包括入口启用状态、是否绑定模型、绑定模型是否启用、最近测试状态。"
+            description="检查项包括入口启用状态、是否绑定模型、模型/供应商状态、供应商 Base URL/API Key 以及能力是否匹配。"
           />
           {tiers.length === 0 && <Empty description="当前功能暂无入口" />}
           {tiers.map((tier) => {
@@ -1846,8 +2304,8 @@ export default function FeatureConfig() {
               tier.status !== 'active' ? '入口未启用' : '',
               bindings.length === 0 ? '未绑定真实模型' : '',
               ...bindings.map((binding) => {
-                const meta = modelStatusMeta(binding.modelId);
-                return meta.text === '可用' ? '' : `${binding.modelName || `模型#${binding.modelId}`}：${meta.text}`;
+                const meta = bindingStatusMeta(binding);
+                return meta.text === '可用' || meta.text === '可展示' ? '' : `${binding.modelName || `模型#${binding.modelId}`}：${meta.text}`;
               }),
             ].filter(Boolean);
             return (
@@ -1860,7 +2318,7 @@ export default function FeatureConfig() {
                   {issues.length ? (
                     <Space wrap>{issues.map((issue) => <Tag key={issue} color="warning">{issue}</Tag>)}</Space>
                   ) : (
-                    <Text type="secondary">入口已启用，且绑定模型状态可用。</Text>
+                    <Text type="secondary">入口已启用，且绑定模型可在小程序展示。</Text>
                   )}
                   <Space>
                     <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(tier)}>编辑</Button>

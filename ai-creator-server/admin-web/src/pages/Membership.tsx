@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Alert, Table, Button, Modal, Tabs, Form, Input, InputNumber, Select, Tag, Space, message, Popconfirm, Card, Upload, Avatar } from 'antd';
 import { PlusOutlined, EditOutlined, CrownOutlined, UploadOutlined, LinkOutlined, PictureOutlined } from '@ant-design/icons';
 import api from '../services/api';
+import { EllipsisText, nowrapActionStyle } from '../utils/tableCells';
 
 const DURATION_TYPES = [
   { label: '月卡', value: 'month', days: 30 },
@@ -81,6 +82,8 @@ export default function Membership() {
   const [form] = Form.useForm();
   const [versionForm] = Form.useForm();
   const [iconLinkForm] = Form.useForm();
+  const [planSaving, setPlanSaving] = useState(false);
+  const [versionSaving, setVersionSaving] = useState(false);
 
   const fetchBenefitIcons = async () => {
     const iconRes: any = await api.get('/membership/benefit-icons');
@@ -162,6 +165,8 @@ export default function Membership() {
   };
 
   const handleSave = async () => {
+    if (planSaving) return;
+    setPlanSaving(true);
     try {
       const values = await form.validateFields();
       const version = versions.find(v => v.id === values.versionId);
@@ -193,25 +198,29 @@ export default function Membership() {
         monthlyPoints: 0,
         giftPoints: 0,
         grantMode: 'immediate',
-        pointsExpireType: 'with_membership',
+        pointsExpireType: 'none',
       };
       const featureDiscounts = buildFeatureDiscounts(values.featureDiscounts || {});
 
       if (editingPlan) {
         await api.put('/membership/plans/' + editingPlan.id, body);
-        await api.put('/membership/plans/' + editingPlan.id + '/rights', { rights });
-        await api.put('/membership/plans/' + editingPlan.id + '/points', pointRule);
-        await api.put('/membership/plans/' + editingPlan.id + '/feature-discounts', { featureDiscounts });
+        await Promise.all([
+          api.put('/membership/plans/' + editingPlan.id + '/rights', { rights }),
+          api.put('/membership/plans/' + editingPlan.id + '/points', pointRule),
+          api.put('/membership/plans/' + editingPlan.id + '/feature-discounts', { featureDiscounts }),
+        ]);
       } else {
         await api.post('/membership/plans', { ...body, rights, pointRule, featureDiscounts });
       }
 
       message.success(editingPlan ? '已保存' : '已创建');
       setModalOpen(false);
-      fetchAll();
+      void fetchAll();
     } catch (e: any) {
       if (e?.errorFields) return;
       message.error('保存失败: ' + (e?.response?.data?.message || e?.message || ''));
+    } finally {
+      setPlanSaving(false);
     }
   };
 
@@ -219,7 +228,7 @@ export default function Membership() {
     try {
       await api.put('/membership/plans/' + plan.id, { status: plan.status === 'active' ? 'inactive' : 'active' });
       message.success('状态已更新');
-      fetchAll();
+      void fetchAll();
     } catch {
       message.error('状态更新失败');
     }
@@ -239,6 +248,8 @@ export default function Membership() {
   };
 
   const handleVersionSave = async () => {
+    if (versionSaving) return;
+    setVersionSaving(true);
     try {
       const values = await versionForm.validateFields();
       const body = {
@@ -252,10 +263,12 @@ export default function Membership() {
       else await api.post('/membership/versions', body);
       message.success('版本已保存');
       setVersionModalOpen(false);
-      fetchAll();
+      void fetchAll();
     } catch (e: any) {
       if (e?.errorFields) return;
       message.error('保存版本失败: ' + (e?.response?.data?.message || e?.message || ''));
+    } finally {
+      setVersionSaving(false);
     }
   };
 
@@ -296,7 +309,7 @@ export default function Membership() {
         source: 'upload',
       });
       if (fieldName !== undefined) setRightIcon(fieldName, url, fileId);
-      await fetchBenefitIcons();
+      void fetchBenefitIcons();
       onSuccess?.(uploaded);
       message.success('图标已上传并保存到图标库');
     } catch (e: any) {
@@ -320,7 +333,7 @@ export default function Membership() {
       });
       message.success('图标链接已加入图标库');
       setIconLinkModalOpen(false);
-      fetchBenefitIcons();
+      void fetchBenefitIcons();
     } catch (e: any) {
       if (e?.errorFields) return;
       message.error('保存图标链接失败: ' + (e?.response?.data?.message || e?.message || ''));
@@ -385,9 +398,9 @@ export default function Membership() {
   };
 
   const versionColumns = [
-    { title: '版本名称', dataIndex: 'name', width: 140 },
+    { title: '版本名称', dataIndex: 'name', width: 160, render: (v: string) => <EllipsisText value={v} maxWidth={138} strong /> },
     { title: '版本 Key', dataIndex: 'versionKey', width: 120 },
-    { title: '描述', dataIndex: 'description' },
+    { title: '描述', dataIndex: 'description', width: 260, render: (v: string) => <EllipsisText value={v} maxWidth={238} /> },
     { title: '状态', dataIndex: 'status', width: 80, render: (v: string) => v === 'active' ? <Tag color="green">启用</Tag> : <Tag>停用</Tag> },
     { title: '排序', dataIndex: 'sortOrder', width: 70 },
     { title: '操作', width: 90, render: (_: any, r: Version) => <Button size="small" icon={<EditOutlined />} onClick={() => openEditVersion(r)}>编辑</Button> },
@@ -400,13 +413,13 @@ export default function Membership() {
       width: 72,
       render: (url: string) => <Avatar shape="square" size={36} src={url} icon={<PictureOutlined />} />,
     },
-    { title: '名称', dataIndex: 'name', width: 140 },
+    { title: '名称', dataIndex: 'name', width: 160, render: (v: string) => <EllipsisText value={v} maxWidth={138} /> },
     { title: '来源', dataIndex: 'source', width: 90, render: (v: string) => <Tag>{v === 'seed' ? '种子' : v === 'upload' ? '上传' : '链接'}</Tag> },
-    { title: '链接', dataIndex: 'iconUrl', ellipsis: true },
+    { title: '链接', dataIndex: 'iconUrl', width: 360, ellipsis: true, render: (v: string) => <EllipsisText value={v} maxWidth={338} code /> },
   ];
 
   const columns = [
-    { title: '套餐名称', dataIndex: 'name', width: 160 },
+    { title: '套餐名称', dataIndex: 'name', width: 180, render: (v: string) => <EllipsisText value={v} maxWidth={158} strong /> },
     { title: '版本', dataIndex: 'versionName', width: 90, render: (v: string) => <Tag>{v}</Tag> },
     { title: '周期', width: 90, render: (_: any, r: Plan) => durationLabel(r.durationType, r.durationDays) },
     { title: '价格', dataIndex: 'price', width: 120, render: (v: number, r: Plan) => (
@@ -421,7 +434,7 @@ export default function Membership() {
     {
       title: '操作', width: 180,
       render: (_: any, r: Plan) => (
-        <Space>
+        <Space style={nowrapActionStyle}>
           <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(r)}>编辑</Button>
           <Popconfirm title={r.status === 'active' ? '确认停用该套餐？' : '确认启用该套餐？'} onConfirm={() => toggleStatus(r)}>
             <Button size="small" danger={r.status === 'active'}>{r.status === 'active' ? '停用' : '启用'}</Button>
@@ -442,7 +455,7 @@ export default function Membership() {
       </Card>
 
       <Card title="会员版本" style={{ marginBottom: 16 }}>
-        <Table rowKey="id" columns={versionColumns} dataSource={versions} loading={loading} pagination={false} size="small" />
+        <Table rowKey="id" columns={versionColumns} dataSource={versions} loading={loading} pagination={false} size="small" tableLayout="fixed" scroll={{ x: 880 }} />
       </Card>
 
       <Card
@@ -467,12 +480,12 @@ export default function Membership() {
           style={{ marginBottom: 12 }}
           message="权益图标库用于会员权益配置。小程序优先展示后台返回图标，图片加载失败时自动使用本地默认图标。"
         />
-        <Table rowKey="id" columns={iconColumns} dataSource={benefitIcons} loading={loading} pagination={{ pageSize: 8 }} size="small" />
+        <Table rowKey="id" columns={iconColumns} dataSource={benefitIcons} loading={loading} pagination={{ pageSize: 8 }} size="small" tableLayout="fixed" scroll={{ x: 720 }} />
       </Card>
 
-      <Table rowKey="id" columns={columns} dataSource={plans} loading={loading} pagination={false} />
+      <Table rowKey="id" columns={columns} dataSource={plans} loading={loading} pagination={false} tableLayout="fixed" scroll={{ x: 920 }} />
 
-      <Modal title={editingVersion ? '编辑会员版本' : '新增会员版本'} open={versionModalOpen} onCancel={() => setVersionModalOpen(false)} onOk={handleVersionSave} destroyOnClose>
+      <Modal title={editingVersion ? '编辑会员版本' : '新增会员版本'} open={versionModalOpen} onCancel={() => setVersionModalOpen(false)} onOk={handleVersionSave} confirmLoading={versionSaving} destroyOnClose>
         <Form form={versionForm} layout="vertical" style={{ marginTop: 16 }}>
           <Form.Item name="name" label="版本名称" rules={[{ required: true, message: '请输入版本名称' }]}>
             <Input placeholder="例如：标准版 / 专业版" />
@@ -492,7 +505,7 @@ export default function Membership() {
         </Form>
       </Modal>
 
-      <Modal title={editingPlan ? '编辑套餐 - ' + editingPlan.name : '新增套餐'} open={modalOpen} onCancel={() => setModalOpen(false)} onOk={handleSave} width={820} destroyOnClose>
+      <Modal title={editingPlan ? '编辑套餐 - ' + editingPlan.name : '新增套餐'} open={modalOpen} onCancel={() => setModalOpen(false)} onOk={handleSave} confirmLoading={planSaving} width={820} destroyOnClose>
         <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
           <Tabs items={[
             {
@@ -580,7 +593,7 @@ export default function Membership() {
                     type="info"
                     showIcon
                     style={{ marginBottom: 16 }}
-                    message="当前购买链路只支持会员积分一次性发放，分期字段已隐藏。"
+                    message="当前购买链路只支持会员积分一次性发放；积分过期策略尚未上线，不会随会员到期自动扣回。"
                   />
                   <Form.Item
                     name="immediatePoints"

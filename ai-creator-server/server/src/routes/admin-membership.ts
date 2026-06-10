@@ -12,6 +12,7 @@ import {
 } from '../services/member-benefit-icons.service';
 
 const router = Router();
+const POINTS_EXPIRE_TYPE_DISABLED = 'none';
 
 // GET /membership/benefit-icons - list icon library
 router.get('/membership/benefit-icons', adminAuthMiddleware, async (_req: Request, res: Response) => {
@@ -171,7 +172,9 @@ router.get('/membership/plans/:id(\\d+)', adminAuthMiddleware, async (req: Reque
         monthlyPoints: pointRule.monthly_points,
         giftPoints: pointRule.gift_points,
         grantMode: pointRule.grant_mode,
-        pointsExpireType: pointRule.points_expire_type,
+        pointsExpireType: POINTS_EXPIRE_TYPE_DISABLED,
+        pointsExpireDays: null,
+        pointsExpireEnabled: false,
         pointsDiscountRate: pointRule.points_discount_rate,
       } : null,
       featureDiscounts,
@@ -181,12 +184,14 @@ router.get('/membership/plans/:id(\\d+)', adminAuthMiddleware, async (req: Reque
 
 // POST /membership/plans - create plan with rights and point rules
 router.post('/membership/plans', adminAuthMiddleware, async (req: Request, res: Response) => {
+  const conn = await getConnection();
   try {
     const { versionId, name, planKey, durationType, durationDays, price, originalPrice, tag, description, sortOrder, status, rights, pointRule, featureDiscounts } = req.body;
     if (!versionId || !name || !planKey || !durationType || !durationDays || !price) {
       error(res, ErrorCodes.PARAM_ERROR, '缺少套餐必要参数'); return;
     }
-    const [r] = await query<any>(
+    await conn.beginTransaction();
+    const [r] = await conn.execute(
       'INSERT INTO member_plans (version_id, name, plan_key, duration_type, duration_days, price, original_price, tag, description, sort_order, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [versionId, name, planKey, durationType, durationDays, price, originalPrice || price, tag || '', description || '', sortOrder || 0, status || 'active']
     );
@@ -194,34 +199,31 @@ router.post('/membership/plans', adminAuthMiddleware, async (req: Request, res: 
 
     if (rights && Array.isArray(rights)) {
       for (const rt of rights) {
-        await query(
+        await conn.execute(
           `INSERT INTO member_plan_rights
            (plan_id, right_key, right_name, right_value, right_category, icon_url, icon_file_id, sort_order)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            planId,
-            rt.rightKey,
-            rt.rightName,
-            rt.rightValue,
-            rt.rightCategory || 'general',
-            rt.iconUrl || '',
-            rt.iconFileId || null,
-            rt.sortOrder || 0,
-          ],
+          [planId, rt.rightKey, rt.rightName, rt.rightValue, rt.rightCategory || 'general', rt.iconUrl || '', rt.iconFileId || null, rt.sortOrder || 0],
         );
       }
     }
     if (pointRule) {
-      await query(
+      await conn.execute(
         'INSERT INTO member_plan_point_rules (plan_id, total_points, immediate_points, monthly_points, gift_points, grant_mode, points_expire_type, points_discount_rate) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [planId, pointRule.totalPoints || 0, pointRule.immediatePoints || 0, pointRule.monthlyPoints || 0, pointRule.giftPoints || 0, pointRule.grantMode || 'immediate', pointRule.pointsExpireType || 'with_membership', pointRule.pointsDiscountRate || 1]
+        [planId, pointRule.totalPoints || 0, pointRule.immediatePoints || 0, pointRule.monthlyPoints || 0, pointRule.giftPoints || 0, pointRule.grantMode || 'immediate', POINTS_EXPIRE_TYPE_DISABLED, pointRule.pointsDiscountRate || 1]
       );
     }
     if (Array.isArray(featureDiscounts)) {
-      await replacePlanFeatureDiscounts(planId, featureDiscounts);
+      await replacePlanFeatureDiscounts(conn, planId, featureDiscounts);
     }
+    await conn.commit();
     success(res, { id: planId });
-  } catch (e: any) { error(res, ErrorCodes.SERVER_ERROR, '创建会员套餐失败: ' + (e.message || '')); }
+  } catch (e: any) {
+    await conn.rollback();
+    error(res, ErrorCodes.SERVER_ERROR, '创建会员套餐失败: ' + (e.message || ''));
+  } finally {
+    conn.release();
+  }
 });
 
 // PUT /membership/plans/:id - update basic plan info
@@ -287,7 +289,7 @@ router.put('/membership/plans/:id(\\d+)/rights', adminAuthMiddleware, async (req
 router.put('/membership/plans/:id(\\d+)/points', adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id);
-    const { totalPoints, immediatePoints, monthlyPoints, giftPoints, grantMode, pointsExpireType, pointsDiscountRate } = req.body;
+    const { totalPoints, immediatePoints, monthlyPoints, giftPoints, grantMode, pointsDiscountRate } = req.body;
     const existing = await queryOne<any>('SELECT id, points_discount_rate FROM member_plan_point_rules WHERE plan_id = ?', [id]);
     const nextDiscountRate = pointsDiscountRate === undefined
       ? Number(existing?.points_discount_rate ?? 1)
@@ -295,12 +297,12 @@ router.put('/membership/plans/:id(\\d+)/points', adminAuthMiddleware, async (req
     if (existing) {
       await query(
         'UPDATE member_plan_point_rules SET total_points=?, immediate_points=?, monthly_points=?, gift_points=?, grant_mode=?, points_expire_type=?, points_discount_rate=? WHERE plan_id=?',
-        [totalPoints ?? 0, immediatePoints ?? 0, monthlyPoints ?? 0, giftPoints ?? 0, grantMode || 'immediate', pointsExpireType || 'with_membership', nextDiscountRate, id]
+        [totalPoints ?? 0, immediatePoints ?? 0, monthlyPoints ?? 0, giftPoints ?? 0, grantMode || 'immediate', POINTS_EXPIRE_TYPE_DISABLED, nextDiscountRate, id]
       );
     } else {
       await query(
         'INSERT INTO member_plan_point_rules (plan_id, total_points, immediate_points, monthly_points, gift_points, grant_mode, points_expire_type, points_discount_rate) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [id, totalPoints || 0, immediatePoints || 0, monthlyPoints || 0, giftPoints || 0, grantMode || 'immediate', pointsExpireType || 'with_membership', nextDiscountRate]
+        [id, totalPoints || 0, immediatePoints || 0, monthlyPoints || 0, giftPoints || 0, grantMode || 'immediate', POINTS_EXPIRE_TYPE_DISABLED, nextDiscountRate]
       );
     }
     success(res, { updated: true });

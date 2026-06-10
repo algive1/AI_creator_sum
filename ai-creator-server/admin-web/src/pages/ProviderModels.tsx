@@ -27,6 +27,7 @@ import {
   Input,
   InputNumber,
   Modal,
+  Pagination,
   Row,
   Select,
   Space,
@@ -41,9 +42,11 @@ import {
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 
 import api from '../services/api';
 import { MODEL_TYPE_LABELS } from '../utils/adminLabels';
+import { EllipsisText, TimeText } from '../utils/tableCells';
 
 const { Text, Title } = Typography;
 const { TextArea } = Input;
@@ -204,6 +207,11 @@ const MODEL_TYPE_OPTIONS = [
   { label: '多模态', value: 'multimodal' },
 ];
 
+const STATUS_FILTER_OPTIONS = [
+  { label: '启用', value: 'active' },
+  { label: '停用', value: 'inactive' },
+];
+
 const MODEL_CAPABILITY_OPTIONS = [
   { label: '文生图', value: 'text_to_image' },
   { label: '图生图', value: 'image_to_image' },
@@ -315,6 +323,29 @@ const isMaskedApiKeyValue = (value?: string) => !!value && /\*{3,}/.test(value);
 const safeText = (value?: string | number | null, fallback = '-') => {
   if (value === undefined || value === null || value === '') return fallback;
   return String(value);
+};
+
+const copyTextToClipboard = async (value: string) => {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand('copy');
+  document.body.removeChild(textarea);
+};
+
+const buildQuery = (params: Record<string, string | number | undefined | null>) => {
+  const search = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') search.set(key, String(value));
+  });
+  return search.toString();
 };
 
 const toProviderKey = (name: string) =>
@@ -461,11 +492,23 @@ const getRequestErrorMessage = (error: unknown, fallback: string) => {
 };
 
 const ProviderModels = () => {
+  const navigate = useNavigate();
   const [providers, setProviders] = useState<ProviderItem[]>([]);
   const [models, setModels] = useState<ModelItem[]>([]);
+  const [modelTableRows, setModelTableRows] = useState<ModelItem[]>([]);
   const [tiers, setTiers] = useState<TierItem[]>([]);
   const [loading, setLoading] = useState(false);
+  const [modelTableLoading, setModelTableLoading] = useState(false);
+  const [copyingProviderKeyId, setCopyingProviderKeyId] = useState<number | null>(null);
   const [selectedProviderId, setSelectedProviderId] = useState<number | null>(null);
+  const [providerKeyword, setProviderKeyword] = useState('');
+  const [providerTypeFilter, setProviderTypeFilter] = useState<string | undefined>();
+  const [providerStatusFilter, setProviderStatusFilter] = useState<string | undefined>();
+  const [providerPagination, setProviderPagination] = useState({ page: 1, pageSize: 20, total: 0 });
+  const [modelKeyword, setModelKeyword] = useState('');
+  const [modelTypeFilter, setModelTypeFilter] = useState<string | undefined>();
+  const [modelStatusFilter, setModelStatusFilter] = useState<string | undefined>();
+  const [modelPagination, setModelPagination] = useState({ page: 1, pageSize: 10, total: 0 });
   const [providerModalOpen, setProviderModalOpen] = useState(false);
   const [modelModalOpen, setModelModalOpen] = useState(false);
   const [editingProvider, setEditingProvider] = useState<ProviderItem | null>(null);
@@ -580,13 +623,29 @@ const ProviderModels = () => {
 
   const fetchProviders = useCallback(async () => {
     try {
-      const res = await api.get('/models/providers');
-      setProviders(res.data || []);
+      const query = buildQuery({
+        paginate: 1,
+        page: providerPagination.page,
+        pageSize: providerPagination.pageSize,
+        keyword: providerKeyword.trim(),
+        providerType: providerTypeFilter,
+        status: providerStatusFilter,
+      });
+      const res = await api.get('/models/providers?' + query);
+      const payload = res.data || {};
+      const list = Array.isArray(payload) ? payload : payload.list || [];
+      setProviders(list);
+      setProviderPagination((prev) => ({
+        ...prev,
+        page: payload.pagination?.page || prev.page,
+        pageSize: payload.pagination?.pageSize || prev.pageSize,
+        total: payload.pagination?.total ?? list.length,
+      }));
     } catch (error) {
       logRequestError('获取供应商列表失败', error);
       message.error('获取供应商列表失败');
     }
-  }, []);
+  }, [providerKeyword, providerPagination.page, providerPagination.pageSize, providerStatusFilter, providerTypeFilter]);
 
   const fetchModels = useCallback(async () => {
     try {
@@ -597,6 +656,41 @@ const ProviderModels = () => {
       message.error('获取真实模型列表失败');
     }
   }, []);
+
+  const fetchModelTable = useCallback(async () => {
+    if (!selectedProviderId) {
+      setModelTableRows([]);
+      setModelPagination((prev) => ({ ...prev, total: 0 }));
+      return;
+    }
+    setModelTableLoading(true);
+    try {
+      const query = buildQuery({
+        paginate: 1,
+        page: modelPagination.page,
+        pageSize: modelPagination.pageSize,
+        providerId: selectedProviderId,
+        keyword: modelKeyword.trim(),
+        modelType: modelTypeFilter,
+        status: modelStatusFilter,
+      });
+      const res = await api.get('/real-models?' + query);
+      const payload = res.data || {};
+      const list = Array.isArray(payload) ? payload : payload.list || [];
+      setModelTableRows(list);
+      setModelPagination((prev) => ({
+        ...prev,
+        page: payload.pagination?.page || prev.page,
+        pageSize: payload.pagination?.pageSize || prev.pageSize,
+        total: payload.pagination?.total ?? list.length,
+      }));
+    } catch (error) {
+      logRequestError('获取模型资源列表失败', error);
+      message.error('获取模型资源列表失败');
+    } finally {
+      setModelTableLoading(false);
+    }
+  }, [modelKeyword, modelPagination.page, modelPagination.pageSize, modelStatusFilter, modelTypeFilter, selectedProviderId]);
 
   const fetchTiers = useCallback(async () => {
     try {
@@ -646,8 +740,13 @@ const ProviderModels = () => {
     }
     if (!selectedProviderId || !providers.some((provider) => provider.id === selectedProviderId)) {
       setSelectedProviderId(providers[0].id);
+      setModelPagination((prev) => ({ ...prev, page: 1 }));
     }
   }, [providers, selectedProviderId]);
+
+  useEffect(() => {
+    fetchModelTable();
+  }, [fetchModelTable]);
 
   useEffect(() => {
     if (!detailProvider) return;
@@ -753,7 +852,7 @@ const ProviderModels = () => {
         message.success('供应商已添加');
       }
       setProviderModalOpen(false);
-      await refreshAll();
+      void refreshAll();
     } catch (error) {
       if ((error as { errorFields?: unknown }).errorFields) return;
       logRequestError('保存供应商失败', error);
@@ -769,7 +868,7 @@ const ProviderModels = () => {
         status: normalizeStatus(provider.status) ? 'inactive' : 'active',
       });
       message.success('供应商状态已更新');
-      await refreshAll();
+      void refreshAll();
     } catch (error) {
       logRequestError('更新供应商状态失败', error);
       message.error('更新供应商状态失败');
@@ -791,7 +890,7 @@ const ProviderModels = () => {
       setDeleteTargetProvider(null);
       setDeleteConfirmName('');
       setSelectedProviderId(nextProvider?.id || null);
-      await refreshAll();
+      void refreshAll();
     } catch (error) {
       logRequestError('删除供应商失败', error);
       message.error(getRequestErrorMessage(error, '删除供应商失败，请确认是否仍有关联模型'));
@@ -831,7 +930,7 @@ const ProviderModels = () => {
       } else {
         message.error(data.message || '连接测试失败，请检查 Base URL 和 API Key');
       }
-      await fetchProviders();
+      void fetchProviders();
     } catch (error) {
       logRequestError('测试连接失败', error);
       setProviderTestStatus('failed');
@@ -956,8 +1055,7 @@ const ProviderModels = () => {
         message.success('模型已添加');
       }
       setModelModalOpen(false);
-      await fetchModels();
-      await fetchTiers();
+      void Promise.allSettled([fetchModels(), fetchModelTable(), fetchTiers()]);
     } catch (error) {
       if ((error as { errorFields?: unknown }).errorFields) return;
       logRequestError('保存模型失败', error);
@@ -973,7 +1071,7 @@ const ProviderModels = () => {
         status: normalizeStatus(model.status) ? 'inactive' : 'active',
       });
       message.success('模型状态已更新');
-      await fetchModels();
+      void Promise.allSettled([fetchModels(), fetchModelTable()]);
     } catch (error) {
       logRequestError('更新模型状态失败', error);
       message.error(getRequestErrorMessage(error, '更新模型状态失败'));
@@ -984,15 +1082,14 @@ const ProviderModels = () => {
     if (deletingModel) return;
     setDeletingModel(true);
     try {
-      await api.delete(`/models/${model.id}`);
+      await api.delete(`/real-models/${model.id}`);
       message.success('模型已删除');
       setModelDrawerOpen(false);
       setDetailModel(null);
       setDeleteModelOpen(false);
       setDeleteTargetModel(null);
       setDeleteModelConfirmName('');
-      await fetchModels();
-      await fetchTiers();
+      void Promise.allSettled([fetchModels(), fetchModelTable(), fetchTiers()]);
     } catch (error) {
       logRequestError('删除模型失败', error);
       message.error(getRequestErrorMessage(error, '删除模型失败'));
@@ -1038,7 +1135,7 @@ const ProviderModels = () => {
     const startedAt = Date.now();
     try {
       const payload = values ? buildModelTestPayload(values) : {};
-      const res = await api.post(`/real-models/${model.id}/test`, payload);
+      const res = await api.post(`/real-models/${model.id}/test`, { ...payload, confirmRealCost: true });
       const data = res.data || res || {};
       setModelTestResult({
         ...data,
@@ -1046,7 +1143,7 @@ const ProviderModels = () => {
       });
       setTestResult(JSON.stringify(sanitizeSensitive(data), null, 2));
       message.success('模型测试完成');
-      await fetchModels();
+      void Promise.allSettled([fetchModels(), fetchModelTable()]);
     } catch (error: any) {
       logRequestError('模型测试失败', error);
       setModelTestError({
@@ -1203,8 +1300,7 @@ const ProviderModels = () => {
       message.success('模型已复制');
       setCopyModelOpen(false);
       setCopySourceModel(null);
-      await fetchModels();
-      await fetchTiers();
+      void Promise.allSettled([fetchModels(), fetchModelTable(), fetchTiers()]);
     } catch (error) {
       if ((error as { errorFields?: unknown }).errorFields) return;
       logRequestError('复制模型失败', error);
@@ -1243,7 +1339,7 @@ const ProviderModels = () => {
       }
       setTestResult(results.join('\n'));
       message.success('批量测试已完成');
-      await fetchModels();
+      void Promise.allSettled([fetchModels(), fetchModelTable()]);
     } finally {
       setTestingModelId(null);
       setBatchTesting(false);
@@ -1269,9 +1365,28 @@ const ProviderModels = () => {
     });
   };
 
+  const copyProviderApiKey = async (provider: ProviderItem) => {
+    if (copyingProviderKeyId) return;
+    setCopyingProviderKeyId(provider.id);
+    try {
+      const res: any = await api.post(`/models/providers/${provider.id}/api-key/copy`);
+      const value = String(res.data?.value || '');
+      if (!value) {
+        message.warning('当前供应商未配置 API Key');
+        return;
+      }
+      await copyTextToClipboard(value);
+      message.success('API Key 已复制');
+    } catch (error) {
+      message.error(getRequestErrorMessage(error, '复制 API Key 失败'));
+    } finally {
+      setCopyingProviderKeyId(null);
+    }
+  };
+
   const copyModelId = async (model: ModelItem) => {
     try {
-      await navigator.clipboard?.writeText(model.apiModelName || '');
+      await copyTextToClipboard(model.apiModelName || '');
       message.success('模型标识已复制');
     } catch {
       message.info('当前浏览器不支持自动复制');
@@ -1422,7 +1537,7 @@ const ProviderModels = () => {
                   icon: <SyncOutlined />,
                 },
                 { key: 'delete', label: '删除', icon: <DeleteOutlined />, danger: true },
-                { key: 'logs', label: '查看日志', icon: <ApiOutlined /> },
+                { key: 'logs', label: '查看日志（未接入）', icon: <ApiOutlined />, disabled: true },
                 { key: 'detail', label: '查看详情', icon: <MoreOutlined /> },
               ],
               onClick: ({ key }) => {
@@ -1431,8 +1546,7 @@ const ProviderModels = () => {
                 if (key === 'toggle') {
                   confirmToggleModel(record);
                 }
-                if (key === 'logs') openModelLogs(record);
-                if (key === 'detail') showModelDetail(record);
+                  if (key === 'detail') showModelDetail(record);
                 if (key === 'delete') {
                   confirmDeleteModel(record);
                 }
@@ -1541,7 +1655,14 @@ const ProviderModels = () => {
           </Title>
           <Text type="secondary">管理接入的供应商和真实模型资源</Text>
         </Space>
-        <Button icon={<ReloadOutlined />} onClick={refreshAll} loading={loading}>
+        <Button
+          icon={<ReloadOutlined />}
+          onClick={async () => {
+            await refreshAll();
+            await fetchModelTable();
+          }}
+          loading={loading}
+        >
           刷新
         </Button>
       </div>
@@ -1557,13 +1678,50 @@ const ProviderModels = () => {
               </Button>
             }
           >
+            <Space wrap style={{ marginBottom: 12 }}>
+              <Input.Search
+                allowClear
+                placeholder="搜索名称、标识、Base URL"
+                value={providerKeyword}
+                onChange={(event) => {
+                  setProviderKeyword(event.target.value);
+                  setProviderPagination((prev) => ({ ...prev, page: 1 }));
+                }}
+                style={{ width: 260 }}
+              />
+              <Select
+                allowClear
+                placeholder="供应商类型"
+                value={providerTypeFilter}
+                options={PROVIDER_TYPE_OPTIONS}
+                onChange={(value) => {
+                  setProviderTypeFilter(value);
+                  setProviderPagination((prev) => ({ ...prev, page: 1 }));
+                }}
+                style={{ width: 150 }}
+              />
+              <Select
+                allowClear
+                placeholder="状态"
+                value={providerStatusFilter}
+                options={STATUS_FILTER_OPTIONS}
+                onChange={(value) => {
+                  setProviderStatusFilter(value);
+                  setProviderPagination((prev) => ({ ...prev, page: 1 }));
+                }}
+                style={{ width: 120 }}
+              />
+            </Space>
             {providers.length ? (
               <div className="provider-pill-list">
                 {providers.map((provider) => (
                   <Button
                     key={provider.id}
                     type={provider.id === selectedProviderId ? 'primary' : 'default'}
-                    onClick={() => setSelectedProviderId(provider.id)}
+                    onClick={() => {
+                      setSelectedProviderId(provider.id);
+                      setModelPagination((prev) => ({ ...prev, page: 1 }));
+                    }}
                   >
                     {provider.name}
                   </Button>
@@ -1576,6 +1734,16 @@ const ProviderModels = () => {
                 </Button>
               </Empty>
             )}
+            <Pagination
+              size="small"
+              current={providerPagination.page}
+              pageSize={providerPagination.pageSize}
+              total={providerPagination.total}
+              showSizeChanger
+              showTotal={(total) => `共 ${total} 个供应商`}
+              onChange={(page, pageSize) => setProviderPagination((prev) => ({ ...prev, page, pageSize }))}
+              style={{ marginTop: 12, textAlign: 'right' }}
+            />
           </Card>
 
           <Card
@@ -1608,7 +1776,7 @@ const ProviderModels = () => {
                           try {
                             const res: any = await api.post(`/models/providers/${currentProvider.id}/sync`);
                             message.success(res.data?.message || '同步完成');
-                            await refreshAll();
+                            void refreshAll();
                           } catch (err: any) {
                             message.error(err?.response?.data?.message || '同步失败');
                           }
@@ -1654,7 +1822,20 @@ const ProviderModels = () => {
                     </Text>
                   </Tooltip>
                 </Descriptions.Item>
-                <Descriptions.Item label="API Key">{maskApiKey()}</Descriptions.Item>
+                <Descriptions.Item label="API Key">
+                  <Space wrap>
+                    {maskApiKey(currentProvider.apiKeyMasked || (currentProvider.apiKeyConfigured ? undefined : '未配置'))}
+                    <Button
+                      size="small"
+                      icon={<CopyOutlined />}
+                      disabled={!currentProvider.apiKeyConfigured}
+                      loading={copyingProviderKeyId === currentProvider.id}
+                      onClick={() => copyProviderApiKey(currentProvider)}
+                    >
+                      复制
+                    </Button>
+                  </Space>
+                </Descriptions.Item>
                 <Descriptions.Item label="状态">
 	                  <Switch
 	                    checked={normalizeStatus(currentProvider.status)}
@@ -1700,19 +1881,66 @@ const ProviderModels = () => {
                 >
                   批量测试
                 </Button>
-                <Button icon={<ReloadOutlined />} onClick={fetchModels}>
+                <Button
+                  icon={<ReloadOutlined />}
+                  onClick={async () => {
+                    await fetchModels();
+                    await fetchModelTable();
+                  }}
+                >
                   刷新
                 </Button>
               </Space>
             }
           >
+            <Space wrap style={{ marginBottom: 12 }}>
+              <Input.Search
+                allowClear
+                placeholder="搜索模型名称或标识"
+                value={modelKeyword}
+                onChange={(event) => {
+                  setModelKeyword(event.target.value);
+                  setModelPagination((prev) => ({ ...prev, page: 1 }));
+                }}
+                style={{ width: 260 }}
+              />
+              <Select
+                allowClear
+                placeholder="模型类型"
+                value={modelTypeFilter}
+                options={MODEL_TYPE_OPTIONS}
+                onChange={(value) => {
+                  setModelTypeFilter(value);
+                  setModelPagination((prev) => ({ ...prev, page: 1 }));
+                }}
+                style={{ width: 130 }}
+              />
+              <Select
+                allowClear
+                placeholder="状态"
+                value={modelStatusFilter}
+                options={STATUS_FILTER_OPTIONS}
+                onChange={(value) => {
+                  setModelStatusFilter(value);
+                  setModelPagination((prev) => ({ ...prev, page: 1 }));
+                }}
+                style={{ width: 120 }}
+              />
+            </Space>
             <Table
               rowKey="id"
-              loading={loading}
+              loading={loading || modelTableLoading}
               columns={modelColumns}
-              dataSource={currentModels}
+              dataSource={modelTableRows}
               scroll={{ x: 1360 }}
-              pagination={{ pageSize: 10, showTotal: (total) => `共 ${total} 条` }}
+              pagination={{
+                current: modelPagination.page,
+                pageSize: modelPagination.pageSize,
+                total: modelPagination.total,
+                showSizeChanger: true,
+                showTotal: (total) => `共 ${total} 条`,
+                onChange: (page, pageSize) => setModelPagination((prev) => ({ ...prev, page, pageSize })),
+              }}
               locale={{ emptyText: <Empty description="当前供应商下暂无模型" /> }}
             />
             {testResult ? (
@@ -1745,7 +1973,15 @@ const ProviderModels = () => {
                 return (
                   <div
                     key={featureKey}
-                    style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => navigate(`/ai-models/features?feature=${encodeURIComponent(featureKey)}`)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        navigate(`/ai-models/features?feature=${encodeURIComponent(featureKey)}`);
+                      }
+                    }}
+                    style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }}
                   >
                     <Text>{FEATURE_LABELS[featureKey]}</Text>
                     {count === null ? <Tag>待检查</Tag> : <Tag color={count > 0 ? 'success' : 'default'}>已绑定 {count} 个模型</Tag>}
@@ -1996,7 +2232,7 @@ const ProviderModels = () => {
               <Descriptions.Item label="Base URL">
                 <Text code>{safeText(testingProvider.apiBaseUrl)}</Text>
               </Descriptions.Item>
-              <Descriptions.Item label="API Key">{maskApiKey()}</Descriptions.Item>
+              <Descriptions.Item label="API Key">{maskApiKey(testingProvider.apiKeyMasked || (testingProvider.apiKeyConfigured ? undefined : '未配置'))}</Descriptions.Item>
               <Descriptions.Item label="请求格式">{requestFormatLabel(providerRequestFormatValue(testingProvider))}</Descriptions.Item>
               <Descriptions.Item label="测试状态">{providerConnectionStatusTag(providerTestStatus)}</Descriptions.Item>
               <Descriptions.Item label="响应状态">{safeText(providerTestResult?.responseStatus, '未开始')}</Descriptions.Item>
@@ -2059,13 +2295,18 @@ const ProviderModels = () => {
       >
         {deleteTargetProvider ? (
           <Space direction="vertical" size={14} style={{ width: '100%' }}>
-            <Alert type="error" showIcon message="删除后该供应商及其关联模型可能无法恢复，请谨慎操作。" />
+            <Alert
+              type="error"
+              showIcon
+              message="删除供应商会同时软删除其下所有真实模型，并清除这些模型的功能页绑定和兜底规则。"
+              description="删除后小程序不会再展示绑定到这些模型的档位；如某个功能页只绑定了该供应商模型，用户将无法通过该档位提交任务。"
+            />
             {models.filter((model) => model.providerId === deleteTargetProvider.id).length ? (
               <Alert
                 type="warning"
                 showIcon
-                message="当前供应商下仍有关联模型，请先确认是否允许删除。"
-                description={`关联模型数量：${models.filter((model) => model.providerId === deleteTargetProvider.id).length} 个。若后端不允许删除，页面会显示接口返回错误。`}
+                message="当前供应商下仍有关联模型。"
+                description={`将同步软删除 ${models.filter((model) => model.providerId === deleteTargetProvider.id).length} 个模型，并解绑对应功能页档位。`}
               />
             ) : null}
             <Descriptions bordered size="small" column={1}>
@@ -2543,7 +2784,12 @@ const ProviderModels = () => {
       >
         {deleteTargetModel ? (
           <Space direction="vertical" size={14} style={{ width: '100%' }}>
-            <Alert type="error" showIcon message="删除后无法恢复，可能影响功能页绑定。" />
+            <Alert
+              type="error"
+              showIcon
+              message="删除模型会软删除该真实模型，并清除它的功能页绑定和兜底规则。"
+              description="如果功能页档位没有其他可用模型，小程序对应档位会不可用或无法提交任务。"
+            />
             {(bindingLookup.get(deleteTargetModel.id) || []).length ? (
               <Alert
                 type="warning"
@@ -2592,15 +2838,17 @@ const ProviderModels = () => {
           dataSource={modelLogs}
           locale={{ emptyText: <Empty description="当前版本暂未接入模型调用日志接口" /> }}
           columns={[
-            { title: '时间', dataIndex: 'createdAt', render: (value) => formatDate(value) },
-            { title: '调用功能', dataIndex: 'feature', render: (value) => safeText(value) },
-            { title: '用户或任务 ID', dataIndex: 'userOrTaskId', render: (value) => safeText(value) },
-            { title: '请求状态', dataIndex: 'status', render: (value) => <Tag>{safeText(value)}</Tag> },
-            { title: '响应时间', dataIndex: 'responseTime', render: (value) => (value ? `${value} ms` : '-') },
-            { title: '成本', dataIndex: 'cost', render: (value) => safeText(value) },
-            { title: '错误信息', dataIndex: 'errorMessage', render: (value) => safeText(value) },
+            { title: '时间', dataIndex: 'createdAt', width: 170, render: (value) => <TimeText value={value} /> },
+            { title: '调用功能', dataIndex: 'feature', width: 130, render: (value) => <EllipsisText value={value} maxWidth={108} /> },
+            { title: '用户或任务 ID', dataIndex: 'userOrTaskId', width: 140, render: (value) => <EllipsisText value={value} maxWidth={118} /> },
+            { title: '请求状态', dataIndex: 'status', width: 100, render: (value) => <Tag>{safeText(value)}</Tag> },
+            { title: '响应时间', dataIndex: 'responseTime', width: 110, render: (value) => (value ? `${value} ms` : '-') },
+            { title: '成本', dataIndex: 'cost', width: 100, render: (value) => safeText(value) },
+            { title: '错误信息', dataIndex: 'errorMessage', width: 260, render: (value) => <EllipsisText value={value} maxWidth={238} /> },
             { title: '查看详情', key: 'detail', render: () => <Button size="small" disabled>查看详情</Button> },
           ]}
+          tableLayout="fixed"
+          scroll={{ x: 1180 }}
         />
       </Drawer>
 
@@ -2639,7 +2887,20 @@ const ProviderModels = () => {
               <Descriptions.Item label="Base URL">
                 <Text code copyable>{safeText(detailProvider.apiBaseUrl)}</Text>
               </Descriptions.Item>
-              <Descriptions.Item label="API Key">{maskApiKey()}</Descriptions.Item>
+              <Descriptions.Item label="API Key">
+                <Space wrap>
+                  {maskApiKey(detailProvider.apiKeyMasked || (detailProvider.apiKeyConfigured ? undefined : '未配置'))}
+                  <Button
+                    size="small"
+                    icon={<CopyOutlined />}
+                    disabled={!detailProvider.apiKeyConfigured}
+                    loading={copyingProviderKeyId === detailProvider.id}
+                    onClick={() => copyProviderApiKey(detailProvider)}
+                  >
+                    复制
+                  </Button>
+                </Space>
+              </Descriptions.Item>
               <Descriptions.Item label="状态">
                 <Tag color={normalizeStatus(detailProvider.status) ? 'success' : 'default'}>
                   {normalizeStatus(detailProvider.status) ? '启用' : '停用'}
@@ -2686,11 +2947,10 @@ const ProviderModels = () => {
               menu={{
                 items: [
                   { key: 'copy', label: '复制模型', icon: <CopyOutlined /> },
-                  { key: 'logs', label: '查看日志', icon: <ApiOutlined /> },
+                  { key: 'logs', label: '查看日志（未接入）', icon: <ApiOutlined />, disabled: true },
                 ],
                 onClick: ({ key }) => {
                   if (key === 'copy') openCopyModel(detailModel);
-                  if (key === 'logs') openModelLogs(detailModel);
                 },
               }}
             >
@@ -2738,8 +2998,8 @@ const ProviderModels = () => {
               <Button block danger={normalizeStatus(detailModel.status)} onClick={() => confirmToggleModel(detailModel)}>
                 {normalizeStatus(detailModel.status) ? '停用模型' : '启用模型'}
               </Button>
-              <Button block icon={<ApiOutlined />} onClick={() => openModelLogs(detailModel)}>
-                查看日志
+              <Button block icon={<ApiOutlined />} disabled title="当前版本暂未接入模型调用日志查询接口">
+                查看日志（未接入）
               </Button>
               <Button block icon={<CopyOutlined />} onClick={() => openCopyModel(detailModel)}>
                 复制模型

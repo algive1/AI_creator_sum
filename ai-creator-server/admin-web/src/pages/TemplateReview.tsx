@@ -3,6 +3,7 @@ import { Button, Input, Modal, Select, Space, Table, message } from 'antd';
 
 const REJECT_REASONS = ['违规内容', '政治敏感', '色情低俗', '侵权内容', '低质内容', '其他'];
 import api from '../services/api';
+import { EllipsisText, nowrapActionStyle } from '../utils/tableCells';
 
 export default function TemplateReview() {
   const [data, setData] = useState<any[]>([]);
@@ -24,13 +25,13 @@ export default function TemplateReview() {
   };
 
   const cols = [
-    { title: '模板名称', dataIndex: 'title', width: 160 },
+    { title: '模板名称', dataIndex: 'title', width: 180, render: (v: string) => <EllipsisText value={v} maxWidth={158} strong /> },
     { title: '类型', dataIndex: 'templateType', width: 80, render: (v: string) => v === 'video' ? '视频' : '图片' },
-    { title: '提示词', dataIndex: 'prompt', ellipsis: true },
+    { title: '提示词', dataIndex: 'prompt', width: 320, ellipsis: true, render: (v: string) => <EllipsisText value={v} maxWidth={298} /> },
     { title: '用户', dataIndex: 'nickname', width: 100 },
     { title: '提交时间', dataIndex: 'createdAt', width: 170 },
     { title: '操作', width: 180, render: (_: any, r: any) => (
-      <Space>
+      <Space style={nowrapActionStyle}>
         <Button size="small" type="primary" onClick={() => approve(r.id)}>通过</Button>
         <Button size="small" danger onClick={() => setRejectModal({ id: r.id, reason: '违规内容', custom: '' })}>拒绝</Button>
       </Space>
@@ -40,7 +41,7 @@ export default function TemplateReview() {
   return (
     <div>
       <h2>模板审核</h2>
-      <Table rowKey="id" columns={cols} dataSource={data} loading={loading} size="middle" pagination={{ pageSize: 20 }} />
+      <Table rowKey="id" columns={cols} dataSource={data} loading={loading} size="middle" pagination={{ pageSize: 20 }} tableLayout="fixed" scroll={{ x: 1040 }} />
       <Modal title="审核拒绝" open={!!rejectModal} onOk={confirmReject} onCancel={() => setRejectModal(null)} destroyOnClose>
         <div style={{ marginTop: 12 }}>
           <div style={{ marginBottom: 8, fontWeight: 500 }}>拒绝原因：</div>

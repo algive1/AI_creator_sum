@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS ai_tasks (
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   UNIQUE INDEX uk_task_no (task_no),
+  INDEX idx_user_status_created (user_id, status, created_at),
   INDEX idx_user_type_status (user_id, task_type, status),
   INDEX idx_type_status (task_type, status, created_at),
   INDEX idx_status_created (status, created_at),
@@ -114,6 +115,7 @@ CREATE TABLE IF NOT EXISTS ai_task_outputs (
   prompt_used TEXT NULL,
   metadata JSON NOT NULL DEFAULT ('{}'),
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  UNIQUE INDEX uk_task_output_index (task_id, output_index),
   INDEX idx_task_id (task_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 

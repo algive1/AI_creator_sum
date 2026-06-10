@@ -9,7 +9,7 @@ const uniPlugin =
 
 export default defineConfig(({ mode, command }) => {
   const env = loadEnv(mode, process.cwd(), '');
-  if (command === 'build' && !String(env.VITE_API_BASE_URL || '').trim()) {
+  if (command === 'build' && mode === 'production' && !String(env.VITE_API_BASE_URL || '').trim()) {
     throw new Error('VITE_API_BASE_URL is required for production builds');
   }
 

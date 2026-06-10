@@ -24,7 +24,7 @@ export interface ImageTaskPayload {
 }
 
 export function getImageModels<T = { list: unknown[] }>(featureKey: string = FEATURE_KEYS.image) {
-  return get<T>('/public/model-tiers', { feature: featureKey }, { silent: true });
+  return get<T>('/public/model-tiers', { feature: featureKey }, { silent: true, cacheTtl: 60_000 });
 }
 
 export function createImageTask<T = Record<string, unknown>>(payload: ImageTaskPayload) {

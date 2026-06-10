@@ -4,8 +4,12 @@ import { Router, Request, Response } from 'express';
 import { adminAuthMiddleware } from '../middleware/auth';
 import { queryOne, query, getConnection } from '../utils/db';
 import { preloadStorageConfigs } from '../services/storage/storage-config-loader';
+import { StorageService } from '../services/storage/storage.service';
+import { SettingsService } from '../services/settings.service';
+import { pollProviderTaskIfDue } from '../services/video-polling.service';
 import { success, error } from '../utils/response';
 import { ErrorCodes } from '../types';
+import { sanitizeHelpHtml } from '../utils/html-sanitizer';
 
 const router = Router();
 const loginLimiter = rateLimit({ windowMs: 60_000, max: 10, standardHeaders: true, legacyHeaders: false, message: { code: 429, message: '登录尝试过于频繁，请稍后重试', data: null } });
@@ -20,18 +24,33 @@ router.post('/auth/login', loginLimiter, async (req: Request, res: Response) => 
     if (user.role_key !== 'super_admin') { error(res, ErrorCodes.FORBIDDEN, '仅超级管理员可登录后台', 403); return; }
     const jwt = require('jsonwebtoken');
     const cfg = require('../utils/config').config;
-    const token = jwt.sign({ userId: user.id, role: 'super_admin' }, cfg.jwt.secret, { expiresIn: cfg.jwt.expiresIn });
+    const token = jwt.sign({ userId: user.id, role: 'super_admin', clientType: 'web' }, cfg.jwt.secret, { expiresIn: cfg.jwt.expiresIn });
     await query('UPDATE admin_users SET last_login_at = NOW(3), last_login_ip = ? WHERE id = ?', [req.ip || '', user.id]);
-    success(res, { token, adminUser: { id: user.id, nickname: user.nickname, roleKey: user.role_key } });
+    success(res, { token, expiresIn: cfg.jwt.expiresIn, adminUser: { id: user.id, nickname: user.nickname, roleKey: user.role_key } });
   } catch { error(res, ErrorCodes.SERVER_ERROR, '登录失败'); }
 });
 
+router.post('/auth/refresh', adminAuthMiddleware, async (req: Request, res: Response) => {
+  try {
+    const jwt = require('jsonwebtoken');
+    const cfg = require('../utils/config').config;
+    const token = jwt.sign({ userId: req.user!.userId, role: 'super_admin', clientType: 'web' }, cfg.jwt.secret, { expiresIn: cfg.jwt.expiresIn });
+    success(res, { token, expiresIn: cfg.jwt.expiresIn });
+  } catch { error(res, ErrorCodes.SERVER_ERROR, '刷新登录状态失败'); }
+});
+
 // ===== 数据看板 =====
+let _dashboardCache: { data: Record<string, number>; until: number } | null = null;
+
 router.get('/stats/dashboard', adminAuthMiddleware, async (_req: Request, res: Response) => {
   try {
+    const now = Date.now();
+    if (_dashboardCache && _dashboardCache.until > now) {
+      return success(res, _dashboardCache.data);
+    }
     const today = new Date().toISOString().split('T')[0];
-    const [newUsers] = await query<any>('SELECT COUNT(*) as cnt FROM users WHERE DATE(created_at) = ?', [today]);
-    const [totalUsers] = await query<any>('SELECT COUNT(*) as cnt FROM users');
+    const [newUsers] = await query<any>('SELECT COUNT(*) as cnt FROM users WHERE deleted_at IS NULL AND DATE(created_at) = ?', [today]);
+    const [totalUsers] = await query<any>('SELECT COUNT(*) as cnt FROM users WHERE deleted_at IS NULL');
     const [payingMembers] = await query<any>("SELECT COUNT(DISTINCT user_id) as cnt FROM user_memberships WHERE status = 'active' AND expire_at > NOW(3)");
     const [revenue] = await query<any>("SELECT COALESCE(SUM(paid_amount),0) as total FROM member_orders WHERE status='paid' AND DATE(paid_at) = ?", [today]);
     const [queuedTasks] = await query<any>("SELECT COUNT(*) as cnt FROM ai_tasks WHERE status IN ('queued','processing')");
@@ -39,7 +58,7 @@ router.get('/stats/dashboard', adminAuthMiddleware, async (_req: Request, res: R
     const [todayFailed] = await query<any>("SELECT COUNT(*) as cnt FROM ai_tasks WHERE status = 'failed' AND DATE(created_at) = ?", [today]);
     const [todayPoints] = await query<any>("SELECT COALESCE(SUM(ABS(amount)),0) as total FROM point_logs WHERE type = 'spend' AND DATE(created_at) = ?", [today]);
     const [pendingAudit] = await query<any>('SELECT COUNT(*) as cnt FROM audit_logs WHERE audit_result = ?', ['pending']);
-    success(res, {
+    const data = {
       totalUsers: totalUsers?.cnt || 0,
       todayNewUsers: newUsers?.cnt || 0,
       payingMembers: payingMembers?.cnt || 0,
@@ -49,7 +68,9 @@ router.get('/stats/dashboard', adminAuthMiddleware, async (_req: Request, res: R
       todayFailed: todayFailed?.cnt || 0,
       todayPointsSpent: todayPoints?.total || 0,
       pendingAudits: pendingAudit?.cnt || 0,
-    });
+    };
+    _dashboardCache = { data, until: now + 30000 }; // 30 秒缓存
+    success(res, data);
   } catch { error(res, ErrorCodes.SERVER_ERROR, '获取看板失败'); }
 });
 
@@ -117,7 +138,7 @@ router.get('/users', adminAuthMiddleware, async (req: Request, res: Response) =>
 router.put('/users/:id(\\d+)/status', adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
     const { status } = req.body;
-    if (!['normal', 'banned'].includes(status)) { error(res, ErrorCodes.PARAM_ERROR, 'Invalid status'); return; }
+    if (!['normal', 'banned'].includes(status)) { error(res, ErrorCodes.PARAM_ERROR, '用户状态无效'); return; }
     await query('UPDATE users SET status = ?, updated_at = NOW(3) WHERE id = ?', [status, parseInt(req.params.id)]);
     await query('INSERT INTO admin_operation_logs (admin_user_id, action, target_type, target_id, created_at) VALUES (?, ?, ?, ?, NOW(3))', [req.user!.userId, status === 'banned' ? 'user.ban' : 'user.unban', 'user', req.params.id]);
     success(res, { userId: parseInt(req.params.id), status });
@@ -199,7 +220,7 @@ router.get('/users/:id(\\d+)', adminAuthMiddleware, async (req: Request, res: Re
   try {
     const uid = parseInt(req.params.id);
     const u = await queryOne<any>('SELECT * FROM users WHERE id = ?', [uid]);
-    if (!u) { error(res, ErrorCodes.NOT_FOUND, 'User not found', 404); return; }
+    if (!u) { error(res, ErrorCodes.NOT_FOUND, '用户不存在', 404); return; }
     const points = await queryOne<any>('SELECT * FROM point_accounts WHERE user_id = ?', [uid]);
     const memberships = await query<any>('SELECT um.*, mp.name as plan_name FROM user_memberships um JOIN member_plans mp ON mp.id = um.plan_id WHERE um.user_id = ? ORDER BY um.created_at DESC', [uid]);
     const pointLogs = await query<any>('SELECT * FROM point_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT 50', [uid]);
@@ -218,7 +239,7 @@ router.put('/users/:id(\\d+)/points', adminAuthMiddleware, async (req: Request, 
     try {
       await conn.beginTransaction();
       const [acc] = await conn.execute('SELECT balance, version FROM point_accounts WHERE user_id = ? FOR UPDATE', [uid]) as any;
-      if (!acc[0]) { await conn.rollback(); error(res, 1005, 'Account not found'); return; }
+      if (!acc[0]) { await conn.rollback(); error(res, 1005, '用户积分账户不存在', 404); return; }
       const balBefore = acc[0].balance; const balAfter = balBefore + amount;
       if (balAfter < 0) { await conn.rollback(); error(res, ErrorCodes.PARAM_ERROR, '余额不足扣减'); return; }
       const upd = amount > 0
@@ -238,6 +259,7 @@ router.put('/users/:id(\\d+)/points', adminAuthMiddleware, async (req: Request, 
 router.get('/tasks/:id(\\d+)', adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
     const tid = parseInt(req.params.id);
+    pollProviderTaskIfDue(tid).catch(() => undefined);
     const t = await queryOne<any>(
       `SELECT t.*, u.nickname, mt.tier_name, mt.tier_key, m.name AS actual_model_name,
               m.api_model_name, p.name AS provider_name, p.provider_type
@@ -249,7 +271,7 @@ router.get('/tasks/:id(\\d+)', adminAuthMiddleware, async (req: Request, res: Re
         WHERE t.id = ?`,
       [tid],
     );
-    if (!t) { error(res, ErrorCodes.NOT_FOUND, 'Task not found', 404); return; }
+    if (!t) { error(res, ErrorCodes.NOT_FOUND, '任务不存在', 404); return; }
     const input = await queryOne<any>('SELECT * FROM ai_task_inputs WHERE task_id = ?', [tid]);
     const outputs = await query<any>(
       `SELECT o.*, f.file_no, f.provider, f.cdn_url, f.file_size, f.mime_type
@@ -283,6 +305,33 @@ router.get('/tasks/:id(\\d+)', adminAuthMiddleware, async (req: Request, res: Re
 // ===== 文件管理 =====
 
 // GET /admin/files - 文件列表
+function requestBaseUrl(req: Request): string {
+  const configured = String(process.env.APP_PUBLIC_URL || process.env.PUBLIC_API_DOMAIN || process.env.SITE_API_DOMAIN || '').trim().replace(/\/+$/, '');
+  if (/^https?:\/\//i.test(configured)) return configured;
+  return `${req.protocol}://${req.get('host') || ''}`.replace(/\/+$/, '');
+}
+
+function absoluteFileUrl(req: Request, url: string): string {
+  const value = String(url || '').trim();
+  if (!value || /^https?:\/\//i.test(value)) return value;
+  return `${requestBaseUrl(req)}${value.startsWith('/') ? value : `/${value}`}`;
+}
+
+function adminFileContentUrl(fileNo: string): string {
+  return `/api/v1/admin/files/${encodeURIComponent(fileNo)}/content`;
+}
+
+function runtimeFileAccessUrl(req: Request, file: any): string {
+  if (!file?.storage_key) return '';
+  try {
+    const adapter = StorageService.getActiveAdapter();
+    if (file.provider && file.provider !== adapter.provider) return '';
+    return absoluteFileUrl(req, adapter.getAccessUrl(file.storage_key));
+  } catch {
+    return '';
+  }
+}
+
 router.get('/files', adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
     const { fileCategory, visibility, keyword, page, pageSize } = req.query as any;
@@ -291,9 +340,58 @@ router.get('/files', adminAuthMiddleware, async (req: Request, res: Response) =>
     if (fileCategory) { where += ' AND f.file_category = ?'; p.push(fileCategory); }
     if (visibility) { where += ' AND f.visibility = ?'; p.push(visibility); }
     if (keyword) { where += ' AND (f.original_name LIKE ? OR f.file_no LIKE ?)'; p.push('%' + keyword + '%', '%' + keyword + '%'); }
-    const list = await query<any>(`SELECT f.id, f.file_no, f.user_id, f.provider, f.original_name, f.mime_type, f.file_size, f.width, f.height, f.cdn_url, f.file_category, f.visibility, f.is_deleted, f.created_at, COALESCE(u.nickname, '') as nickname, (CASE WHEN f.ref_type = 'task_output' THEN CAST(f.ref_id AS UNSIGNED) ELSE NULL END) as task_id FROM files f LEFT JOIN users u ON u.id = f.user_id WHERE ${where} ORDER BY f.created_at DESC LIMIT ? OFFSET ?`, [...p, ps, off]);
+    const list = await query<any>(
+      `SELECT f.id, f.file_no, f.user_id, f.provider, f.storage_key, f.original_name, f.mime_type, f.file_size,
+              f.width, f.height, f.access_url, f.cdn_url, f.file_category, f.visibility, f.is_deleted,
+              f.ref_type, f.ref_id, f.created_at, COALESCE(u.nickname, '') as nickname,
+              (CASE WHEN f.ref_type = 'task_output' AND f.ref_id REGEXP '^[0-9]+$' THEN CAST(f.ref_id AS UNSIGNED) ELSE NULL END) as task_id,
+              COALESCE(NULLIF(o.prompt_used, ''), NULLIF(i.optimized_prompt, ''), i.prompt, '') as generated_prompt
+         FROM files f
+         LEFT JOIN users u ON u.id = f.user_id
+         LEFT JOIN ai_task_inputs i ON f.ref_type = 'task_output' AND f.ref_id REGEXP '^[0-9]+$' AND i.task_id = CAST(f.ref_id AS UNSIGNED)
+         LEFT JOIN ai_task_outputs o ON f.ref_type = 'task_output' AND f.ref_id REGEXP '^[0-9]+$' AND o.task_id = CAST(f.ref_id AS UNSIGNED) AND o.cos_key = f.storage_key
+        WHERE ${where}
+        ORDER BY f.created_at DESC
+        LIMIT ? OFFSET ?`,
+      [...p, ps, off],
+    );
     const [cnt] = await query<any>('SELECT COUNT(*) as total FROM files f WHERE ' + where, p);
-    success(res, { list: list.map((f: any) => ({ id: f.id, fileNo: f.file_no, userId: f.user_id, nickname: f.nickname, provider: f.provider, originalName: f.original_name, mimeType: f.mime_type, fileSize: f.file_size, width: f.width, height: f.height, cdnUrl: f.cdn_url, fileCategory: f.file_category, visibility: f.visibility, isDeleted: f.is_deleted, taskId: f.task_id, createdAt: f.created_at })), pagination: { page: pg, pageSize: ps, total: cnt?.total || 0, totalPages: Math.ceil((cnt?.total || 0) / ps) } });
+    success(res, { list: list.map((f: any) => {
+      const rawUrl = f.cdn_url || f.access_url || '';
+      const publicUrl = absoluteFileUrl(req, rawUrl);
+      const accessUrl = runtimeFileAccessUrl(req, f) || absoluteFileUrl(req, f.access_url || '');
+      const displayUrl = f.file_no ? adminFileContentUrl(f.file_no) : publicUrl;
+      return {
+        id: f.id,
+        fileNo: f.file_no,
+        userId: f.user_id,
+        nickname: f.nickname,
+        provider: f.provider,
+        storageKey: f.storage_key,
+        originalName: f.original_name,
+        mimeType: f.mime_type,
+        fileSize: f.file_size,
+        width: f.width,
+        height: f.height,
+        accessUrl,
+        cdnUrl: f.cdn_url,
+        rawUrl,
+        publicUrl,
+        displayUrl,
+        previewUrl: accessUrl || publicUrl || displayUrl,
+        copyUrl: publicUrl || accessUrl,
+        url: displayUrl,
+        fileCategory: f.file_category,
+        visibility: f.visibility,
+        isDeleted: f.is_deleted,
+        refType: f.ref_type,
+        refId: f.ref_id,
+        generated: f.ref_type === 'task_output',
+        generatedPrompt: f.generated_prompt || '',
+        taskId: f.task_id,
+        createdAt: f.created_at,
+      };
+    }), pagination: { page: pg, pageSize: ps, total: cnt?.total || 0, totalPages: Math.ceil((cnt?.total || 0) / ps) } });
   } catch { error(res, ErrorCodes.SERVER_ERROR, '获取文件列表失败'); }
 });
 
@@ -313,10 +411,18 @@ router.delete('/files/:id(\\d+)', adminAuthMiddleware, async (req: Request, res:
   try {
     const fid = parseInt(req.params.id);
     const file = await queryOne<any>('SELECT * FROM files WHERE id = ?', [fid]);
-    if (!file) { error(res, ErrorCodes.NOT_FOUND, 'File not found', 404); return; }
+    if (!file) { error(res, ErrorCodes.NOT_FOUND, '文件不存在', 404); return; }
     await query('UPDATE files SET is_deleted = 1, deleted_at = NOW(3), updated_at = NOW(3) WHERE id = ?', [fid]);
     await query('INSERT INTO file_delete_logs (file_id, user_id, operator_type, delete_type, storage_key, created_at) VALUES (?, ?, ?, ?, ?, NOW(3))', [fid, req.user!.userId, 'admin', 'soft', file.storage_key]);
     await query('INSERT INTO admin_operation_logs (admin_user_id, action, target_type, target_id, created_at) VALUES (?, ?, ?, ?, NOW(3))', [req.user!.userId, 'file.delete', 'file', fid.toString()]);
+    // 如果开启了云存储删除开关，同步删除云存储对象
+    try {
+      if (await SettingsService.getBoolean('storage.delete_cloud_object', false)) {
+        await StorageService.getActiveAdapter().delete(file.storage_key);
+      }
+    } catch (cloudErr: any) {
+      console.error(`[Admin] Failed to delete cloud object ${file.storage_key}:`, cloudErr?.message || cloudErr);
+    }
     success(res, { fileId: fid, deleted: true });
   } catch { error(res, ErrorCodes.SERVER_ERROR, '删除文件失败'); }
 });
@@ -334,6 +440,17 @@ router.post('/files/batch-delete', adminAuthMiddleware, async (req: Request, res
       await query('INSERT INTO file_delete_logs (file_id, user_id, operator_type, delete_type, storage_key, created_at) VALUES (?, ?, ?, ?, ?, NOW(3))', [f.id, req.user!.userId, 'admin', 'soft', f.storage_key]);
     }
     await query('INSERT INTO admin_operation_logs (admin_user_id, action, target_type, target_id, created_at) VALUES (?, ?, ?, ?, NOW(3))', [req.user!.userId, 'file.batch_delete', 'file', ids.join(',')]);
+    // 如果开启了云存储删除开关，同步删除云存储对象
+    try {
+      if (await SettingsService.getBoolean('storage.delete_cloud_object', false)) {
+        const adapter = StorageService.getActiveAdapter();
+        for (const f of files) {
+          try { await adapter.delete(f.storage_key); } catch { /* skip individual failures */ }
+        }
+      }
+    } catch (cloudErr: any) {
+      console.error('[Admin] Batch cloud delete failed:', cloudErr?.message || cloudErr);
+    }
     success(res, { deleted: ids.length });
   } catch { error(res, ErrorCodes.SERVER_ERROR, '批量删除文件失败'); }
 });
@@ -343,7 +460,7 @@ router.put('/files/:id(\\d+)/visibility', adminAuthMiddleware, async (req: Reque
   try {
     const fid = parseInt(req.params.id);
     const { visibility } = req.body;
-    if (!['public', 'private'].includes(visibility)) { error(res, ErrorCodes.PARAM_ERROR, 'Invalid visibility'); return; }
+    if (!['public', 'private'].includes(visibility)) { error(res, ErrorCodes.PARAM_ERROR, '可见性参数无效'); return; }
     await query('UPDATE files SET visibility = ?, updated_at = NOW(3) WHERE id = ?', [visibility, fid]);
     await query('INSERT INTO admin_operation_logs (admin_user_id, action, target_type, target_id, created_at) VALUES (?, ?, ?, ?, NOW(3))', [req.user!.userId, 'file.update_visibility', 'file', fid.toString()]);
     success(res, { fileId: fid, visibility });
@@ -477,8 +594,7 @@ function validateMiniappHelpSettings(body: Record<string, any>): Record<string, 
   if (body['miniapp_help.content_html'] !== undefined) {
     const value = String(body['miniapp_help.content_html'] || '').trim();
     if (value.length > 50000) throw new Error('使用帮助内容超出长度限制');
-    if (/<\s*script/i.test(value) || /javascript\s*:/i.test(value)) throw new Error('使用帮助内容包含危险脚本');
-    sanitized['miniapp_help.content_html'] = value;
+    sanitized['miniapp_help.content_html'] = sanitizeHelpHtml(value);
   }
 
   return sanitized;
@@ -516,7 +632,45 @@ function validateMiniappVisualAssetSettings(body: Record<string, any>): Record<s
 
 router.get('/settings/groups', adminAuthMiddleware, async (_req: Request, res: Response) => {
   try {
-    const rows = await query<any>("SELECT config_group, COUNT(*) as total, SUM(is_secret) as secrets FROM system_configs WHERE config_group != 'payment' AND config_key != 'storage.type' GROUP BY config_group ORDER BY config_group");
+    const visibleSettingKeys = [
+      'site.name',
+      'site.api_domain',
+      'site.timezone',
+      'site.lang',
+      'site.allow_register',
+      'site.admin_title',
+      'content.filter_enabled',
+      'content.sensitive_words',
+      'membership.enabled',
+      'membership.show_entry',
+      'inspiration.member_gate_enabled',
+      'template.member_gate_enabled',
+      'template.user_share_enabled',
+      'template.user_public_enabled',
+      'template.require_manual_review',
+      'template.require_content_check',
+      'ai.prompt_optimize.enabled',
+      'ai.prompt_optimize.model_id',
+      'ai.prompt_optimize.points_cost',
+      'ai.script_generate.enabled',
+      'ai.script_generate.model_id',
+      'ai.script_generate.points_cost',
+      'ai.prompt_generate.enabled',
+      'ai.prompt_generate.model_id',
+      'ai.prompt_generate.points_cost',
+      'ai.storyboard_generate.enabled',
+      'ai.storyboard_generate.model_id',
+      'ai.storyboard_generate.points_cost',
+    ];
+    const placeholders = visibleSettingKeys.map(() => '?').join(',');
+    const rows = await query<any>(
+      `SELECT config_group, COUNT(*) as total, SUM(is_secret) as secrets
+         FROM system_configs
+        WHERE config_group IN ('general', 'ai') AND config_key IN (${placeholders})
+        GROUP BY config_group
+        ORDER BY config_group`,
+      visibleSettingKeys,
+    );
     success(res, rows.map((r: any) => ({ group: r.config_group, total: r.total, secrets: r.secrets })));
   } catch { error(res, ErrorCodes.SERVER_ERROR, '获取分组失败'); }
 });
@@ -629,12 +783,12 @@ router.get('/settings/status', adminAuthMiddleware, async (_req: Request, res: R
       groups: groups.map((g: any) => ({ group: g.config_group, count: g.cnt })),
       wechatConfigured: !!wechatRow, paymentConfigured: !!paymentRow, storageConfigured: !!storageRow,
     });
-  } catch { error(res, ErrorCodes.SERVER_ERROR, 'Failed to get settings status'); }
+  } catch { error(res, ErrorCodes.SERVER_ERROR, '获取配置状态失败'); }
 });
 router.get('/settings/:group', adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
     if (req.params.group === 'payment') {
-      error(res, ErrorCodes.NOT_FOUND, 'payment.* settings have been removed', 404);
+      error(res, ErrorCodes.NOT_FOUND, 'payment.* 配置已移除，请改用 wechat_pay.*', 404);
       return;
     }
     const rows = await query<any>("SELECT config_key, config_value, value_type, is_secret, masked_value, description, sort_order FROM system_configs WHERE config_group = ? AND config_key != 'storage.type' ORDER BY sort_order", [req.params.group]);
@@ -643,13 +797,36 @@ router.get('/settings/:group', adminAuthMiddleware, async (req: Request, res: Re
 });
 
 function rejectRemovedConfigKeys(group: string, values: Record<string, string>): void {
-  if (group === 'payment') throw new Error('payment.* settings have been removed; use wechat_pay.*');
+  if (group === 'payment') throw new Error('payment.* 配置已移除，请改用 wechat_pay.*');
   for (const key of Object.keys(values || {})) {
     if (key.startsWith('payment.') || key === 'storage.type') {
-      throw new Error(`${key} has been removed`);
+      throw new Error(`${key} 配置已移除`);
     }
   }
 }
+
+const COPYABLE_SECRET_CONFIG_KEYS = new Set(['wechat.app_secret']);
+
+router.post('/settings/secrets/copy', adminAuthMiddleware, async (req: Request, res: Response) => {
+  try {
+    if (req.user!.role !== 'super_admin') { error(res, ErrorCodes.FORBIDDEN, '仅超级管理员可复制安全配置', 403); return; }
+    const key = String(req.body?.key || '').trim();
+    if (!COPYABLE_SECRET_CONFIG_KEYS.has(key)) {
+      error(res, ErrorCodes.PARAM_ERROR, '不支持复制该配置项');
+      return;
+    }
+    const value = await SettingsService.getString(key, '');
+    if (!value) {
+      error(res, ErrorCodes.NOT_FOUND, '配置项未设置', 404);
+      return;
+    }
+    await query(
+      'INSERT INTO admin_operation_logs (admin_user_id, action, target_type, target_id, detail, created_at) VALUES (?, ?, ?, ?, ?, NOW(3))',
+      [req.user!.userId, 'settings.copy_secret', 'system_config', key, JSON.stringify({ key })],
+    ).catch(() => undefined);
+    success(res, { value });
+  } catch { error(res, ErrorCodes.SERVER_ERROR, '复制安全配置失败'); }
+});
 
 router.post('/settings/:group', adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
@@ -669,7 +846,7 @@ router.post('/settings/:group', adminAuthMiddleware, async (req: Request, res: R
 });
 
 router.post('/settings/:group/secure', adminAuthMiddleware, async (req: Request, res: Response) => {
-    if (req.user!.role !== 'super_admin') { error(res, ErrorCodes.FORBIDDEN, 'Super admin only', 403); return; }
+    if (req.user!.role !== 'super_admin') { error(res, ErrorCodes.FORBIDDEN, '仅超级管理员可保存安全配置', 403); return; }
   try {
     const { SettingsService } = require('../services/settings.service');
     rejectRemovedConfigKeys(req.params.group, req.body as Record<string, string>);

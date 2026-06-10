@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Table, Tag } from 'antd';
 import api from '../services/api';
+import { EllipsisText, TimeText } from '../utils/tableCells';
 
 export default function AuditLog() {
   const [data, setData] = useState<any[]>([]);
@@ -22,18 +23,18 @@ export default function AuditLog() {
   const columns = [
     { title: '管理员', dataIndex: 'admin_name', width: 100 },
     { title: '分组', dataIndex: 'config_group', width: 80 },
-    { title: '配置项', dataIndex: 'config_key', width: 180 },
+    { title: '配置项', dataIndex: 'config_key', width: 220, render: (v: string) => <EllipsisText value={v} maxWidth={198} code /> },
     { title: '操作', dataIndex: 'action', width: 60, render: (v: string) => <Tag>{actionLabels[v] || v}</Tag> },
-    { title: '旧值', dataIndex: 'old_value_masked', width: 140, ellipsis: true },
-    { title: '新值', dataIndex: 'new_value_masked', width: 140, ellipsis: true },
+    { title: '旧值', dataIndex: 'old_value_masked', width: 220, ellipsis: true, render: (v: string) => <EllipsisText value={v} maxWidth={198} /> },
+    { title: '新值', dataIndex: 'new_value_masked', width: 220, ellipsis: true, render: (v: string) => <EllipsisText value={v} maxWidth={198} /> },
     { title: 'IP', dataIndex: 'ip_address', width: 120 },
-    { title: '时间', dataIndex: 'created_at', width: 170 },
+    { title: '时间', dataIndex: 'created_at', width: 170, render: (v: string) => <TimeText value={v} /> },
   ];
 
   return (
     <div>
       <h2>操作日志</h2>
-      <Table rowKey="id" columns={columns} dataSource={data} loading={loading} pagination={pagination} onChange={(p: any) => fetch(p.current)} size="middle" />
+      <Table rowKey="id" columns={columns} dataSource={data} loading={loading} pagination={pagination} tableLayout="fixed" scroll={{ x: 1260 }} onChange={(p: any) => fetch(p.current)} size="middle" />
     </div>
   );
 }

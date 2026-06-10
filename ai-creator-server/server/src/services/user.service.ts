@@ -12,6 +12,16 @@ const defaultPreferences = {
   imagePlatformWatermarkOffConfirmed: false,
 };
 
+const DISPLAY_ID_MOD = 100000000;
+const DISPLAY_ID_MULTIPLIER = 73856093;
+const DISPLAY_ID_OFFSET = 19349663;
+
+function formatUserDisplayId(userId: number): string {
+  const id = Math.max(0, Math.trunc(Number(userId) || 0));
+  const mixed = (id * DISPLAY_ID_MULTIPLIER + DISPLAY_ID_OFFSET) % DISPLAY_ID_MOD;
+  return String(mixed).padStart(8, '0');
+}
+
 function parsePreferences(value: any) {
   if (!value) return { ...defaultPreferences };
   if (typeof value === 'object') return { ...defaultPreferences, ...value };
@@ -21,6 +31,13 @@ function parsePreferences(value: any) {
   } catch {
     return { ...defaultPreferences };
   }
+}
+
+async function getRegisterBonusPoints() {
+  const raw = await SettingsService.getString('points.new_user_bonus_points', '50');
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isFinite(value) || value < 0) return 50;
+  return Math.min(value, 1000000);
 }
 
 export async function findOrCreateUserByOpenid(openid: string, unionid?: string) {
@@ -50,7 +67,7 @@ export async function findOrCreateUserByOpenid(openid: string, unionid?: string)
         [JSON.stringify(defaultPreferences), userId],
       );
 
-      const registerBonus = 50;
+      const registerBonus = await getRegisterBonusPoints();
       await conn.execute(
         `INSERT INTO point_accounts (user_id, balance, total_earned, total_spent, total_refunded, frozen_balance, version, created_at, updated_at)
          VALUES (?, ?, ?, 0, 0, 0, 1, NOW(3), NOW(3))`,
@@ -99,6 +116,7 @@ export async function findOrCreateUserByOpenid(openid: string, unionid?: string)
     return {
       user: {
         id: user.id,
+        displayId: formatUserDisplayId(user.id),
         nickname: user.nickname,
         avatarUrl: user.avatar_url,
         accountType: user.account_type,
@@ -122,10 +140,82 @@ export async function findOrCreateUserByOpenid(openid: string, unionid?: string)
     };
   } catch (error) {
     await conn.rollback();
+    if (isDuplicateOpenidError(error)) {
+      return loginExistingUserByOpenid(openid, unionid);
+    }
     throw error;
   } finally {
     conn.release();
   }
+}
+
+async function loginExistingUserByOpenid(openid: string, unionid?: string) {
+  const user = await queryOne<any>(
+    'SELECT * FROM users WHERE openid = ? AND deleted_at IS NULL',
+    [openid],
+  );
+  if (!user) throw new Error('用户注册冲突，请重试');
+  await query('UPDATE users SET last_login_at = NOW(3), updated_at = NOW(3) WHERE id = ?', [user.id]);
+  if (unionid && !user.unionid) {
+    await query('UPDATE users SET unionid = ? WHERE id = ? AND (unionid IS NULL OR unionid = \'\')', [unionid, user.id]);
+  }
+  await ensureUserInviteCodeTxWithNewConnection(user.id);
+
+  const [points] = await query<any>(
+    'SELECT balance, total_earned, total_spent, frozen_balance FROM point_accounts WHERE user_id = ?',
+    [user.id],
+  );
+
+  const [profile] = await query<any>(
+    'SELECT invite_code, invited_by_user_id, preferences FROM user_profiles WHERE user_id = ?',
+    [user.id],
+  );
+
+  return {
+    user: {
+      id: user.id,
+      displayId: formatUserDisplayId(user.id),
+      nickname: user.nickname,
+      avatarUrl: user.avatar_url,
+      accountType: user.account_type,
+      status: user.status,
+      isNewUser: false,
+      inviteCode: profile?.invite_code || '',
+      invitedByUserId: profile?.invited_by_user_id || null,
+      preferences: parsePreferences(profile?.preferences),
+      createdAt: user.created_at,
+    },
+    points: points ? {
+      balance: points.balance,
+      totalEarned: points.total_earned,
+      totalSpent: points.total_spent,
+      frozenBalance: points.frozen_balance,
+    } : { balance: 0, totalEarned: 0, totalSpent: 0, frozenBalance: 0 },
+    membership: {
+      level: 'free',
+      expireAt: null,
+    },
+  };
+}
+
+async function ensureUserInviteCodeTxWithNewConnection(userId: number): Promise<void> {
+  const conn = await getConnection();
+  try {
+    await conn.beginTransaction();
+    await ensureUserInviteCodeTx(conn, userId);
+    await conn.commit();
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
+function isDuplicateOpenidError(error: any): boolean {
+  if (error?.code !== 'ER_DUP_ENTRY' && error?.errno !== 1062) return false;
+  const message = String(error?.message || '');
+  return message.includes('uk_openid') || message.includes('openid');
 }
 
 export async function getUserById(userId: number) {
@@ -152,6 +242,7 @@ export async function getUserById(userId: number) {
 
   return {
     id: user.id,
+    displayId: formatUserDisplayId(user.id),
     nickname: user.nickname,
     avatarUrl: user.avatar_url,
     phone: user.phone ? user.phone.replace(/(\d{3})\d{4}(\d{4})/, '$1****$2') : null,
@@ -196,6 +287,25 @@ export async function updateUserProfile(userId: number, data: { nickname?: strin
     );
   }
 
+  return getUserById(userId);
+}
+
+export async function updateUserPhone(userId: number, phone: string) {
+  const normalized = String(phone || '').replace(/\D/g, '');
+  if (!/^1\d{10}$/.test(normalized)) {
+    throw Object.assign(new Error('手机号格式不正确'), { code: 4000 });
+  }
+  try {
+    await query(
+      'UPDATE users SET phone = ?, updated_at = NOW(3) WHERE id = ? AND deleted_at IS NULL',
+      [normalized, userId],
+    );
+  } catch (err: any) {
+    if (err?.code === 'ER_DUP_ENTRY') {
+      throw Object.assign(new Error('该手机号已绑定其他账号'), { code: 4000 });
+    }
+    throw err;
+  }
   return getUserById(userId);
 }
 
@@ -256,8 +366,11 @@ export async function getUserFullData(userId: number) {
   return {
     user: {
       id: user.id,
+      displayId: formatUserDisplayId(user.id),
       nickname: user.nickname || '',
       avatarUrl: user.avatar_url || '',
+      phone: user.phone ? user.phone.replace(/(\d{3})\d{4}(\d{4})/, '$1****$2') : null,
+      phoneBound: !!user.phone,
       openidBound: !!user.openid,
       preferences: parsePreferences(profile?.preferences),
     },
@@ -294,6 +407,8 @@ export async function getUserFullData(userId: number) {
       totalCreations: Number(taskCounts?.total_creations || assets?.total_creations || 0),
       imageCount: Number(taskCounts?.image_count || 0),
       videoCount: Number(taskCounts?.video_count || 0),
+      totalFavorites: Number(assets?.total_favorites || 0),
+      couponsCount: Number(assets?.coupons_count || 0),
     },
     invite: {
       inviteCode: profile?.invite_code || '',

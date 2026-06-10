@@ -92,7 +92,13 @@
         <view v-else class="empty-list">暂无积分流水</view>
       </view>
 
-      <view class="no-more">{{ loading ? '加载中...' : (hasMore ? '上拉加载更多' : '没有更多了') }}</view>
+      <view class="no-more">
+        <view v-if="loading" class="no-more-loading">
+          <text class="no-more-spinner"></text>
+          <text>加载中...</text>
+        </view>
+        <text v-else>{{ hasMore ? '上拉加载更多' : '没有更多了' }}</text>
+      </view>
     </view>
 
     <view v-if="filterVisible" class="filter-mask" @tap="closeFilter">
@@ -859,6 +865,29 @@ function formatDateKey(date: Date) {
   font-weight: 800;
   line-height: 54rpx;
   text-align: center;
+}
+
+.no-more-loading {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10rpx;
+}
+
+.no-more-spinner {
+  width: 24rpx;
+  height: 24rpx;
+  box-sizing: border-box;
+  border: 4rpx solid rgba(122, 92, 255, 0.18);
+  border-top-color: #7a5cff;
+  border-radius: 50%;
+  animation: no-more-spin 0.82s linear infinite;
+}
+
+@keyframes no-more-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .filter-mask {

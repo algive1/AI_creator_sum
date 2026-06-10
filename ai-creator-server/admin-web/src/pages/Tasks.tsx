@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Button, Descriptions, Drawer, Image, Select, Space, Table, Tabs, Tag, Timeline, Typography } from 'antd';
 import api from '../services/api';
+import { EllipsisText, TimeText } from '../utils/tableCells';
 
 const STATUS_COLORS: Record<string, string> = {
   pending: 'default',
@@ -46,16 +47,16 @@ export default function Tasks() {
   useEffect(() => { fetch(); }, [fetch]);
 
   const columns = [
-    { title: '任务号', dataIndex: 'taskNo', width: 190 },
-    { title: '用户', dataIndex: 'userNickname', width: 120 },
+    { title: '任务号', dataIndex: 'taskNo', width: 190, render: (v: string) => <EllipsisText value={v} maxWidth={168} code /> },
+    { title: '用户', dataIndex: 'userNickname', width: 120, render: (v: string) => <EllipsisText value={v} maxWidth={98} /> },
     { title: '类型', dataIndex: 'taskType', width: 90, render: (v: string) => ({ image: '生图', video: '生视频', manga: '漫剧', storyboard: '故事板' }[v] || v) },
-    { title: '标题', dataIndex: 'title' },
+    { title: '标题', dataIndex: 'title', width: 260, render: (v: string) => <EllipsisText value={v} maxWidth={238} /> },
     { title: '档位', dataIndex: 'tierName', width: 120, render: (v: string) => v || '-' },
-    { title: '真实模型', dataIndex: 'modelName', width: 140, render: (v: string) => v || '-' },
+    { title: '真实模型', dataIndex: 'modelName', width: 160, render: (v: string) => <EllipsisText value={v} maxWidth={138} /> },
     { title: '积分', dataIndex: 'pointsCost', width: 80 },
     { title: '状态', dataIndex: 'status', width: 100, render: (v: string) => <Tag color={STATUS_COLORS[v]}>{STATUS_LABELS[v] || v}</Tag> },
     { title: '进度', dataIndex: 'progress', width: 80, render: (v: number) => `${v || 0}%` },
-    { title: '创建时间', dataIndex: 'createdAt', width: 180 },
+    { title: '创建时间', dataIndex: 'createdAt', width: 180, render: (v: string) => <TimeText value={v} /> },
     { title: '操作', width: 90, render: (_: any, row: any) => <Button size="small" onClick={() => openDetail(row.taskId)}>详情</Button> },
   ];
 
@@ -76,7 +77,7 @@ export default function Tasks() {
           { value: 'cancelled', label: '已取消' },
         ]} />
       </Space>
-      <Table rowKey="taskId" columns={columns} dataSource={data} loading={loading} pagination={pagination} onChange={(p: any) => fetch(p.current)} />
+      <Table rowKey="taskId" columns={columns} dataSource={data} loading={loading} pagination={pagination} tableLayout="fixed" scroll={{ x: 1500 }} onChange={(p: any) => fetch(p.current)} />
       <TaskDetailDrawer open={detailOpen} detail={detail} onClose={() => setDetailOpen(false)} />
     </div>
   );
@@ -183,12 +184,14 @@ function TaskDetailDrawer({ open, detail, onClose }: { open: boolean; detail: an
                   dataSource={callLogs}
                   columns={[
                     { title: '类型', dataIndex: 'call_type', width: 90 },
-                    { title: '模型', dataIndex: 'model_name' },
-                    { title: '供应商', dataIndex: 'provider_name' },
+                    { title: '模型', dataIndex: 'model_name', width: 180, render: (v: string) => <EllipsisText value={v} maxWidth={158} /> },
+                    { title: '供应商', dataIndex: 'provider_name', width: 140, render: (v: string) => <EllipsisText value={v} maxWidth={118} /> },
                     { title: '结果', dataIndex: 'is_success', width: 80, render: (v: number) => v ? <Tag color="green">成功</Tag> : <Tag color="red">失败</Tag> },
                     { title: '耗时', dataIndex: 'latency_ms', width: 90, render: (v: number) => `${v || 0}ms` },
-                    { title: '错误摘要', dataIndex: 'error_message', render: (v: string) => v || '-' },
+                    { title: '错误摘要', dataIndex: 'error_message', width: 260, render: (v: string) => <EllipsisText value={v} maxWidth={238} /> },
                   ]}
+                  tableLayout="fixed"
+                  scroll={{ x: 900 }}
                 />
               ),
             },
@@ -206,9 +209,11 @@ function TaskDetailDrawer({ open, detail, onClose }: { open: boolean; detail: an
                     { title: '金额', dataIndex: 'amount', width: 90 },
                     { title: '余额变化', width: 160, render: (_: any, row: any) => `${row.balance_before} -> ${row.balance_after}` },
                     { title: '冻结变化', width: 160, render: (_: any, row: any) => `${row.frozen_before} -> ${row.frozen_after}` },
-                    { title: '说明', dataIndex: 'title' },
-                    { title: '时间', dataIndex: 'created_at', width: 180 },
+                    { title: '说明', dataIndex: 'title', width: 260, render: (v: string) => <EllipsisText value={v} maxWidth={238} /> },
+                    { title: '时间', dataIndex: 'created_at', width: 180, render: (v: string) => <TimeText value={v} /> },
                   ]}
+                  tableLayout="fixed"
+                  scroll={{ x: 920 }}
                 />
               ),
             },

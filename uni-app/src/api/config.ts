@@ -1,11 +1,11 @@
 import { get, post } from './request';
 
 export function getPublicApp<T = Record<string, unknown>>() {
-  return get<T>('/public/app', undefined, { silent: true });
+  return get<T>('/public/app', undefined, { silent: true, cacheTtl: 60_000 });
 }
 
 export function getAppHome<T = Record<string, unknown>>() {
-  return get<T>('/app/home', undefined, { silent: true });
+  return get<T>('/app/home', undefined, { silent: true, cacheTtl: 30_000 });
 }
 
 export function getLegalDocuments<T = Record<string, unknown>>() {
@@ -16,16 +16,12 @@ export function acceptLegalDocuments(documents: Array<{ docType: string; version
   return post('/legal/accept', { documents, scene });
 }
 
-export function acceptLegalDocument(docType: string, version: string, scene = 'profile_agreement') {
-  return acceptLegalDocuments([{ docType, version }], scene);
-}
-
-export function getRequiredLegalStatus<T = Record<string, unknown>>() {
-  return get<T>('/legal/required-status');
-}
-
 export function getAnnouncements<T = Record<string, unknown>>(params?: Record<string, unknown>) {
   return get<T>('/announcements', params);
+}
+
+export function getAnnouncementDetail<T = Record<string, unknown>>(id: number) {
+  return get<T>(`/announcements/${id}`);
 }
 
 export function markAnnouncementRead(id: number) {

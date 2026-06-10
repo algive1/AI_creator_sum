@@ -5,6 +5,7 @@ import { getUserMembership } from './membership.service';
 import { decryptApiKey } from './openai-adapter.service';
 import { getModelCapabilitySet, hasAnyCapability } from './model-capability.service';
 import { resolveSystemPromptByFeature } from './system-prompt.service';
+import { ErrorCodes } from '../types';
 
 export type TextFeatureKey = 'prompt_optimize' | 'script_generate' | 'prompt_generate' | 'storyboard_generate';
 
@@ -126,9 +127,13 @@ export async function optimizePrompt(input: PromptOptimizeInput): Promise<Prompt
   const originalPrompt = String(input.prompt || '').trim();
   if (!originalPrompt) throw featureError('提示词不能为空。');
 
-  const { config, model } = await resolveTextFeatureModel('prompt_optimize');
   const membership = await getUserMembership(input.userId);
   const isMember = membership.membershipLevel !== 'free' && !membership.isExpired;
+  const memberOnly = await SettingsService.getBoolean('membership.prompt_optimize_member_only', false);
+  if (memberOnly && !isMember) {
+    throw Object.assign(new Error('智能优化为会员专属功能，请开通会员后使用。'), { code: ErrorCodes.MEMBERSHIP_REQUIRED });
+  }
+  const { config, model } = await resolveTextFeatureModel('prompt_optimize');
   const shouldCharge = !isMember && config.pointsCost > 0;
   const refId = createRefId('PROMPT_OPT');
   let charged = false;

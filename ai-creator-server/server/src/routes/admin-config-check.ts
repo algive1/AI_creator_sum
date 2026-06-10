@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import axios from 'axios';
+import rateLimit from 'express-rate-limit';
 import { adminAuthMiddleware } from '../middleware/auth';
 import { query, queryOne } from '../utils/db';
 import { success, error } from '../utils/response';
@@ -30,10 +31,29 @@ interface CheckItem {
 
 const router = Router();
 const expectedPayCallbackPath = '/api/v1/payments/wechat/notify';
+const aiModelTestLimiter = rateLimit({
+  windowMs: 60_000,
+  max: positiveInt(process.env.ADMIN_AI_TEST_RATE_LIMIT_PER_MINUTE, 3),
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => String(req.user!.userId),
+  message: { code: 429, message: '后台真实 AI 测试过于频繁，请稍后重试', data: null },
+});
 
 function boolValue(value: string, fallback = false): boolean {
   if (!value) return fallback;
   return ['1', 'true', 'yes', 'on'].includes(value.toLowerCase());
+}
+
+function positiveInt(value: any, fallback: number): number {
+  const parsed = parseInt(String(value || ''), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function requireAiTestConfirmation(req: Request, res: Response): boolean {
+  if (req.body?.confirmRealCost === true || req.body?.confirm_real_cost === true) return true;
+  error(res, ErrorCodes.PARAM_ERROR, '真实 AI 测试会调用供应商接口并可能消耗额度，请确认后再执行。');
+  return false;
 }
 
 function normalizeHttpsOrigin(value: string): string {
@@ -102,8 +122,8 @@ async function saveTestState(params: {
         JSON.stringify(params.errors || []),
       ],
     );
-  } catch {
-    // The check endpoints should still be useful before the new migration is applied.
+  } catch (err: any) {
+    console.error('[admin-config-check] Failed to save test state:', err?.message || err);
   }
 }
 
@@ -271,6 +291,9 @@ async function checkStorage(): Promise<CheckItem> {
   const providerValue = await getSystemSetting('storage.provider');
   if (!providerValue) missing.push('storage.provider');
   if (provider === 'local') {
+    if (String(process.env.NODE_ENV || '').toLowerCase() === 'production') {
+      errors.push('生产环境不能使用 local 存储保存 AI 生成结果；请切换 COS/OSS/七牛/又拍云/移动云 EOS，并配置公网 HTTPS CDN 域名。');
+    }
     if (!localBaseUrl) {
       missing.push('storage.local.base_url');
     } else if (String(process.env.NODE_ENV || '').toLowerCase() === 'production' && !/^https:\/\//i.test(localBaseUrl)) {
@@ -352,24 +375,22 @@ async function checkAiModels(): Promise<CheckItem> {
 }
 
 async function checkBusinessRules(): Promise<CheckItem> {
-  const [pointTasks, plans, priceRules] = await Promise.all([
+  const [pointTasks, plans] = await Promise.all([
     queryOne<any>("SELECT COUNT(*) AS cnt FROM point_tasks WHERE status = 'active'"),
     queryOne<any>("SELECT COUNT(*) AS cnt FROM member_plans WHERE status = 'active'"),
-    queryOne<any>('SELECT COUNT(*) AS cnt FROM ai_model_price_rules'),
   ]);
   const missing: string[] = [];
   if (Number(pointTasks?.cnt || 0) === 0) missing.push('point_tasks.active');
   if (Number(plans?.cnt || 0) === 0) missing.push('member_plans.active');
-  if (Number(priceRules?.cnt || 0) === 0) missing.push('ai_model_price_rules');
   return {
     key: 'business-rules',
     name: '积分 / 会员 / 订单基础配置',
     status: statusFrom(missing, [], [], await getTestState('business-rules')),
-    summary: '检查积分任务、会员套餐和模型价格规则是否具备上线基础。',
+    summary: '检查积分任务和会员套餐是否具备上线基础。模型售价由功能页档位配置决定。',
     missingFields: missing,
     warnings: [],
     errors: [],
-    nextSteps: ['配置积分任务。', '配置会员套餐。', '确认模型积分售价。', '确认支付成功后的到账规则。'],
+    nextSteps: ['配置积分任务。', '配置会员套餐。', '在功能页配置中确认档位积分售价。', '确认支付成功后的到账规则。'],
     guide: '这部分决定用户如何获得积分、购买会员，以及任务如何扣费。',
     configurePath: '/membership',
     testable: false,
@@ -544,6 +565,7 @@ router.post('/ai-models/test-connection', adminAuthMiddleware, async (req: Reque
 });
 
 async function runAiGenerationTest(req: Request, res: Response, expectedType: 'image' | 'video') {
+  if (!requireAiTestConfirmation(req, res)) return;
   const modelId = Number(req.body?.modelId || 0);
   const model = await getModelWithProvider(modelId);
   if (!model) { error(res, ErrorCodes.NOT_FOUND, '模型不存在', 404); return; }
@@ -567,8 +589,52 @@ async function runAiGenerationTest(req: Request, res: Response, expectedType: 'i
       },
     });
     if (result.error) throw new Error(`${result.error.code}: ${result.error.message}`);
-    await saveTestState({ targetKey: `ai-model:${modelId}`, targetType: 'ai_model', status: 'passed', message: '模型真实测试已触发并返回成功。', operator: req.user?.userId });
-    success(res, { status: 'passed', resultType: result.type, providerTaskId: result.providerTaskId, urls: result.result?.urls || [], message: '模型真实测试已触发并返回成功。' });
+    // 异步任务需轮询直到完成
+    let finalUrls = result.result?.urls || [];
+    if (result.type === 'async' && result.providerTaskId) {
+      const pollInterval = 5000;
+      const maxPolls = 24; // 最多等 2 分钟
+      for (let i = 0; i < maxPolls; i++) {
+        await new Promise(r => setTimeout(r, pollInterval));
+        const queryResult = await adapter.queryTask(result.providerTaskId, {
+          baseUrl: model.api_base_url,
+          apiKey: decryptApiKey(model.api_key),
+          timeout: 30000,
+          authType: model.auth_type || 'bearer',
+        });
+        const mapping = typeof model.status_mapping === 'string' ? JSON.parse(model.status_mapping || '{}') : (model.status_mapping || {});
+        const status = adapter.mapStatus(queryResult.status, mapping);
+        if (status === 'completed') {
+          finalUrls = queryResult.result?.urls || [];
+          break;
+        }
+        if (status === 'failed') {
+          throw new Error(`异步任务失败: ${queryResult.error?.message || queryResult.status}`);
+        }
+      }
+      if (!finalUrls.length) {
+        throw new Error('异步任务超时：2 分钟内未完成');
+      }
+    }
+    // 验证结果 URL 是否可公网访问
+    const urlCheckResults: { url: string; reachable: boolean; error?: string }[] = [];
+    for (const url of finalUrls) {
+      try {
+        const headResp = await axios.head(url, { timeout: 10000, validateStatus: () => true });
+        const reachable = headResp.status >= 200 && headResp.status < 500;
+        urlCheckResults.push({ url, reachable, error: reachable ? undefined : `HTTP ${headResp.status}` });
+      } catch (headErr: any) {
+        urlCheckResults.push({ url, reachable: false, error: headErr.message || 'URL 不可达' });
+      }
+    }
+    const unreachableUrls = urlCheckResults.filter(r => !r.reachable);
+    if (unreachableUrls.length > 0) {
+      const messages = unreachableUrls.map(r => `${r.url}: ${r.error}`).join('; ');
+      throw new Error(`模型返回了结果但 URL 无法下载：${messages}。请检查供应商返回的 URL 格式或网络连通性。`);
+    }
+    const testMsg = `模型真实测试通过，${finalUrls.length} 个结果 URL 全部可达。`;
+    await saveTestState({ targetKey: `ai-model:${modelId}`, targetType: 'ai_model', status: 'passed', message: testMsg, operator: req.user?.userId });
+    success(res, { status: 'passed', resultType: result.type, providerTaskId: result.providerTaskId, urls: finalUrls, urlCheckResults, message: testMsg });
   } catch (err: any) {
     const translated = translateError(err, 'ai-model');
     await saveTestState({ targetKey: `ai-model:${modelId}`, targetType: 'ai_model', status: 'failed', message: translated.friendlyMessage, operator: req.user?.userId, errors: [translated.friendlyMessage] });
@@ -576,8 +642,8 @@ async function runAiGenerationTest(req: Request, res: Response, expectedType: 'i
   }
 }
 
-router.post('/ai-models/test-image', adminAuthMiddleware, (req, res) => runAiGenerationTest(req, res, 'image'));
-router.post('/ai-models/test-video', adminAuthMiddleware, (req, res) => runAiGenerationTest(req, res, 'video'));
+router.post('/ai-models/test-image', adminAuthMiddleware, aiModelTestLimiter, (req, res) => runAiGenerationTest(req, res, 'image'));
+router.post('/ai-models/test-video', adminAuthMiddleware, aiModelTestLimiter, (req, res) => runAiGenerationTest(req, res, 'video'));
 
 router.post('/manual-verify', adminAuthMiddleware, async (req: Request, res: Response) => {
   const targetKey = typeof req.body?.targetKey === 'string' ? req.body.targetKey : '';

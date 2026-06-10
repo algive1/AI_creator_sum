@@ -12,10 +12,6 @@ export function getMembershipMe<T = Record<string, unknown>>() {
   return get<T>('/membership/me');
 }
 
-export function getRights<T = { rights: unknown[] }>() {
-  return get<T>('/membership/rights');
-}
-
 export function getPublicMemberPlans<T = { list: unknown[] }>() {
   return get<T>('/shop/member-plans');
 }

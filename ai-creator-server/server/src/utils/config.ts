@@ -80,15 +80,15 @@ export const config = {
 
   storage: {
     provider: process.env.STORAGE_PROVIDER || 'local',
-    localUploadDir: process.env.LOCAL_UPLOAD_DIR || path.join(process.env.APP_ROOT_DIR || '/www/wwwroot/ai-creator', 'uploads'),
+    localUploadDir: process.env.LOCAL_UPLOAD_DIR || path.join(process.env.APP_ROOT_DIR || process.cwd(), 'uploads'),
     localBaseUrl: process.env.LOCAL_BASE_URL || '/static',
     uploadMaxFileSize: parseInt(process.env.UPLOAD_MAX_FILE_SIZE || '10485760', 10),
     uploadMaxVideoSize: parseInt(process.env.UPLOAD_MAX_VIDEO_SIZE || '209715200', 10),
   },
 
   release: {
-    appRootDir: process.env.APP_ROOT_DIR || '/www/wwwroot/ai-creator',
-    updatePackagesDir: process.env.UPDATE_PACKAGES_DIR || '/www/wwwroot/ai-creator/update-packages',
+    appRootDir: process.env.APP_ROOT_DIR || process.cwd(),
+    updatePackagesDir: process.env.UPDATE_PACKAGES_DIR || path.join(process.env.APP_ROOT_DIR || process.cwd(), 'update-packages'),
     pm2AppName: process.env.PM2_APP_NAME || 'ai-creator',
     healthCheckUrl: process.env.HEALTH_CHECK_URL || 'http://127.0.0.1:3000/health',
     systemCheckUrl: process.env.SYSTEM_CHECK_URL || 'http://127.0.0.1:3000/api/v1/admin/system/check',

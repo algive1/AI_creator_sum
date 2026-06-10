@@ -1,6 +1,7 @@
 <template>
   <view class="flow-page result-page">
     <view class="result-tabs">
+      <view class="result-tab-label">当前查看</view>
       <view :class="{ active: !isVideo }">图片结果</view>
       <view :class="{ active: isVideo }">视频结果</view>
     </view>
@@ -80,6 +81,7 @@
         <button class="state-secondary" @tap="viewHistory">查看记录</button>
         <button class="state-primary" @tap="refreshTask">刷新状态</button>
       </view>
+      <view v-if="waitHint" class="wait-hint">{{ waitHint }}</view>
       <view v-else class="state-action-row">
         <button class="state-secondary" @tap="viewHistory">查看记录</button>
         <button class="state-primary" @tap="regenerate">重新生成</button>
@@ -151,7 +153,7 @@
       <button @tap="showToast('编辑功能将返回创作页')">编辑</button>
       <button @tap="downloadCurrentOutput">下载</button>
       <button @tap="regenerate">再次生成</button>
-      <button @tap="shareCurrentOutput">分享</button>
+      <button v-if="userTemplateShareEnabled" @tap="shareCurrentOutput">分享</button>
     </view>
 
     <view class="bottom-actions">
@@ -168,18 +170,24 @@
         <button class="primary-btn" @tap="regenerate">重新生成</button>
       </view>
     </view>
+    <AppDialogHost />
   </view>
 </template>
 
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { onLoad, onUnload } from '@dcloudio/uni-app';
+import AppDialogHost from '@/components/common/AppDialogHost.vue';
 import { useTaskStore } from '@/stores/task';
+import { useConfigStore } from '@/stores/config';
+import { useUserStore } from '@/stores/user';
+import { taskPoller } from '@/utils/task-poller';
 import { PAGE_ROUTES } from '@/utils/constants';
 import { isTaskCompleted, isTaskEnded, taskOutputList, taskPromptOf, taskStatusViewOf, taskThumbnailOf, taskTitleOf, taskTypeOf } from '@/utils/task-display';
 import { confirmCompliance } from '@/api/config';
 import { downloadFile } from '@/api/upload';
 import { shareTemplate } from '@/api/template';
+import { showHdSaveDialog } from '@/utils/app-dialog';
 
 interface OutputItem {
   id?: string | number;
@@ -199,16 +207,22 @@ interface InputAssetItem {
 }
 
 const taskStore = useTaskStore();
+const configStore = useConfigStore();
+const userStore = useUserStore();
 const task = ref<Record<string, unknown>>({});
 const resultMeta = ref<Record<string, unknown>>({});
 const routeType = ref('image');
 const selectedOutput = ref(0);
 const outputs = ref<OutputItem[]>([]);
-const timer = ref<ReturnType<typeof setInterval> | null>(null);
+const pollCount = ref(0);
+const pollStartTime = ref(0);
+let pollTaskId = 0;
 const isVideo = computed(() => taskTypeOf(task.value || { type: routeType.value }) === 'video');
 const thumbnail = computed(() => taskThumbnailOf(task.value));
 const statusView = computed(() => taskStatusViewOf(task.value));
 const showCompletedResult = computed(() => isTaskCompleted(task.value));
+const userTemplateShareEnabled = computed(() => configStore.publicConfig?.['template.user_share_enabled'] !== false);
+const membershipEnabled = computed(() => configStore.publicConfig?.membershipEnabled !== false);
 const generationMode = computed(() => generationModeOf(task.value, resultMeta.value, isVideo.value));
 const progressLabel = computed(() => {
   if (statusView.value.kind === 'queued') return '排队进度';
@@ -237,6 +251,16 @@ const statePreviewDesc = computed(() => {
   if (statusView.value.kind === 'cancelled') return '你可以修改描述后重新生成，或返回记录页。';
   if (statusView.value.kind === 'failed') return task.value.errorMessage || task.value.failReason || '换个描述再试一次，通常能解决模型繁忙或参数不匹配的问题。';
   return '暂无可展示的生成结果。';
+});
+const waitSeconds = computed(() => pollStartTime.value ? Math.floor((Date.now() - pollStartTime.value) / 1000) : 0);
+const waitHint = computed(() => {
+  if (!statusView.value.active) return '';
+  const sec = waitSeconds.value;
+  if (isVideo.value && sec > 180) return '视频生成通常需要2-5分钟，可先去记录页查看，任务会在后台继续。';
+  if (isVideo.value && sec > 90) return '视频生成中，请耐心等待…也可先去记录页。';
+  if (!isVideo.value && sec > 120) return '生成时间较长，可先去记录页查看，任务在后台继续处理。';
+  if (!isVideo.value && sec > 60) return '正在努力生成中，请稍候…';
+  return '';
 });
 const isFirstLastFrame = computed(() => ['first_last_frame', 'first_last_frame_video'].includes(String(task.value.subType || resultMeta.value.subType || ''))
   || ['首尾帧', '收尾帧视频'].includes(String(task.value.videoMode || resultMeta.value.videoMode || resultMeta.value.videoModeLabel || '')));
@@ -268,10 +292,13 @@ const storyboard = [
 ];
 
 onLoad((query) => {
+  configStore.hydrate();
+  configStore.loadPublicConfig().catch(() => undefined);
+  userStore.hydrate().catch(() => undefined);
   const id = String(query?.id || '');
   routeType.value = String(query?.type || 'image');
   resultMeta.value = readResultMeta(id);
-  task.value = { id, type: routeType.value, status: 'queued', progress: 3, ...resultMeta.value };
+  task.value = { id, type: routeType.value, status: 'queued', progress: 3, createdAt: new Date().toISOString(), ...resultMeta.value };
   buildOutputs();
   if (id) {
     refreshTask();
@@ -302,14 +329,16 @@ function selectOutput(index: number) {
 function startPolling() {
   stopPolling();
   if (!task.value.id || isTaskEnded(task.value)) return;
-  timer.value = setInterval(() => {
-    refreshTask();
-  }, 3000);
+  pollCount.value = 0;
+  pollStartTime.value = Date.now();
+  pollTaskId = Number(task.value.id || 0);
+  taskPoller.add(pollTaskId, handlePolledTask);
+  taskPoller.pollNow().catch(() => undefined);
 }
 
 function stopPolling() {
-  if (timer.value) clearInterval(timer.value);
-  timer.value = null;
+  if (pollTaskId) taskPoller.removeListener(pollTaskId, handlePolledTask);
+  pollTaskId = 0;
 }
 
 function refreshTask() {
@@ -322,6 +351,13 @@ function refreshTask() {
   }).catch(() => {
     outputs.value = [];
   });
+}
+
+function handlePolledTask(res: Record<string, unknown>) {
+  pollCount.value++;
+  task.value = { ...resultMeta.value, ...res };
+  buildOutputs();
+  if (isTaskEnded(task.value)) stopPolling();
 }
 
 function copyPrompt() {
@@ -355,17 +391,32 @@ async function downloadCurrentOutput() {
     showToast('暂无可下载内容');
     return;
   }
-  await confirmCompliance({ scene: 'export_save', confirmationText: '我确认', taskId: task.value.id });
-  const tempFilePath = await downloadFile(url, { loading: '下载中' });
-  if (isVideo.value) {
-    await saveVideo(tempFilePath);
-  } else {
-    await saveImage(tempFilePath);
+  if (!isVideo.value && membershipEnabled.value && !userStore.isMember) {
+    const choice = await showHdSaveDialog({ isMember: false });
+    if (choice !== 'secondary') return;
   }
-  showToast('已保存');
+  let stage: 'confirm' | 'download' | 'album' = 'confirm';
+  try {
+    await confirmCompliance({ scene: 'export_save', confirmationText: '我确认', taskId: task.value.id });
+    stage = 'download';
+    const tempFilePath = await downloadFile(url, { loading: '下载中' });
+    stage = 'album';
+    if (isVideo.value) {
+      await saveVideo(tempFilePath);
+    } else {
+      await saveImage(tempFilePath);
+    }
+    showToast('已保存');
+  } catch (error) {
+    if (stage === 'album') showToast(albumSaveErrorText(error));
+  }
 }
 
 async function shareCurrentOutput() {
+  if (!userTemplateShareEnabled.value) {
+    showToast('模板分享功能已关闭');
+    return;
+  }
   const output = currentOutput.value;
   const rawOutputId = Number(output.id || 0);
   const outputId = Number.isFinite(rawOutputId) && rawOutputId > 0 ? rawOutputId : undefined;
@@ -396,6 +447,17 @@ function saveVideo(filePath: string) {
   return new Promise<void>((resolve, reject) => {
     uni.saveVideoToPhotosAlbum({ filePath, success: () => resolve(), fail: reject });
   });
+}
+
+function albumSaveErrorText(error: unknown) {
+  const message = String((error as { errMsg?: string; message?: string })?.errMsg || (error as { message?: string })?.message || '');
+  if (/auth|authorize|scope\.writePhotosAlbum|permission|deny|denied/i.test(message)) {
+    return '保存失败，请在设置中允许相册权限';
+  }
+  if (/file|path|not found|no such|invalid/i.test(message)) {
+    return '保存失败，下载文件无效，请重新生成后再试';
+  }
+  return '保存失败，请稍后重试';
 }
 
 function readResultMeta(id: string) {
@@ -725,7 +787,20 @@ function normalizeInputAssets(value: unknown): InputAssetItem[] {
   box-shadow: 0 14rpx 28rpx rgba(122, 92, 255, 0.18);
 }
 
+.wait-hint {
+  margin-top: 20rpx;
+  padding: 18rpx 26rpx;
+  border-radius: 14rpx;
+  background: rgba(245, 158, 11, 0.08);
+  border: 1rpx solid rgba(245, 158, 11, 0.18);
+  color: #b45309;
+  font-size: 24rpx;
+  font-weight: 800;
+  text-align: center;
+}
+
 .result-tabs {
+  position: relative;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   margin-bottom: 24rpx;
@@ -734,6 +809,20 @@ function normalizeInputAssets(value: unknown): InputAssetItem[] {
   border-radius: 36rpx;
   background: #ffffff;
   box-shadow: 0 16rpx 42rpx rgba(28, 43, 82, 0.08);
+}
+
+.result-tab-label {
+  position: absolute;
+  top: -28rpx;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 4rpx 18rpx;
+  border-radius: 14rpx;
+  background: rgba(122, 92, 255, 0.12);
+  color: #6d4cff;
+  font-size: 20rpx;
+  font-weight: 800;
+  white-space: nowrap;
 }
 
 .result-tabs view {

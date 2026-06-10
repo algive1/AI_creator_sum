@@ -114,7 +114,7 @@ async function main() {
   const imageTask = await taskService.createImageTask({
     userId,
     subType: 'text2img',
-    prompt: '生成一张320×100像素的电商横幅',
+    prompt: '生成一张16:9横版电商海报',
     ratio: '9:16',
     tierKey: 'image_standard',
   });
@@ -126,16 +126,15 @@ async function main() {
 
   const imageInput = await db.queryOne<any>('SELECT params FROM ai_task_inputs WHERE task_id = ?', [imageTask.taskId]);
   const imageParams = parseJson(imageInput?.params);
-  await assertEqual('image size width', imageParams.sizePlan?.targetWidth, 320);
-  await assertEqual('image size height', imageParams.sizePlan?.targetHeight, 100);
+  await assertEqual('image size ratio', imageParams.sizePlan?.targetRatio, '16:9');
   await assertEqual('image size conflict', imageParams.sizePlan?.conflict, true);
 
   let account = await db.queryOne<any>('SELECT balance, frozen_balance FROM point_accounts WHERE user_id = ?', [userId]);
   await assertEqual('balance after image freeze', account?.balance, 100 - imageTier.points_cost);
   await assertEqual('frozen after image freeze', account?.frozen_balance, imageTier.points_cost);
 
-  await taskService.taskTestHooks.refundPointsForCheck(imageTask.taskId, imageTask.pointsCost);
-  await taskService.taskTestHooks.refundPointsForCheck(imageTask.taskId, imageTask.pointsCost);
+  await taskService.finalizeTaskFailure(imageTask.taskId, imageTask.pointsCost, 'check refund');
+  await taskService.finalizeTaskFailure(imageTask.taskId, imageTask.pointsCost, 'check refund');
   account = await db.queryOne<any>('SELECT balance, frozen_balance, total_refunded FROM point_accounts WHERE user_id = ?', [userId]);
   await assertEqual('balance after idempotent refund', account?.balance, 100);
   await assertEqual('frozen after idempotent refund', account?.frozen_balance, 0);
@@ -144,12 +143,12 @@ async function main() {
   const settleTask = await taskService.createImageTask({
     userId,
     subType: 'text2img',
-    prompt: '生成一张320×100像素的电商横幅',
+    prompt: '生成一张16:9横版电商海报',
     ratio: '9:16',
     tierKey: 'image_standard',
   });
-  await taskService.taskTestHooks.settlePointsForCheck(settleTask.taskId, settleTask.pointsCost);
-  await taskService.taskTestHooks.settlePointsForCheck(settleTask.taskId, settleTask.pointsCost);
+  await taskService.finalizeTaskSuccess({ taskId: settleTask.taskId, pointsCost: settleTask.pointsCost, actualModelId: imageModelId, costSnapshot: { check: true } });
+  await taskService.finalizeTaskSuccess({ taskId: settleTask.taskId, pointsCost: settleTask.pointsCost, actualModelId: imageModelId, costSnapshot: { check: true } });
   account = await db.queryOne<any>('SELECT balance, frozen_balance, total_spent FROM point_accounts WHERE user_id = ?', [userId]);
   await assertEqual('balance after idempotent settle', account?.balance, 100 - imageTier.points_cost);
   await assertEqual('frozen after idempotent settle', account?.frozen_balance, 0);

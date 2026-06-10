@@ -1,9 +1,14 @@
+import type { PoolConnection } from 'mysql2/promise';
+import { v4 as uuidv4 } from 'uuid';
 import { getConnection, query, queryOne } from '../utils/db';
 import { SettingsService } from './settings.service';
 import { applyPointChangeTx, lockPointAccountTx } from './points.service';
 
 const DEFAULT_NORMAL_REWARDS = [10, 15, 20, 25, 30, 50, 80];
 const DEFAULT_SUPER_REWARDS = [20, 30, 40, 50, 60, 80, 100];
+const SUPER_CHECKIN_AD_SCENE = 'signin_super';
+const SUPER_CHECKIN_AD_SESSION_EXPIRE_MINUTES = 30;
+const MIN_SUPER_CHECKIN_AD_WATCH_MS = 15_000;
 
 export interface CheckinConfig {
   enabled: boolean;
@@ -44,6 +49,8 @@ export interface CheckinStatus {
   super: CheckinModeStatus & {
     adRequired: boolean;
     adCompletedToday: boolean;
+    adUnitId: string;
+    minWatchSeconds: number;
   };
   makeup: {
     enabled: boolean;
@@ -77,6 +84,7 @@ export interface NormalCheckinResult {
 export interface SuperCheckinResult extends NormalCheckinResult {
   adRequired: boolean;
   adCompletedToday: boolean;
+  adSessionId?: string;
 }
 
 export interface MakeupCheckinResult extends NormalCheckinResult {
@@ -84,22 +92,43 @@ export interface MakeupCheckinResult extends NormalCheckinResult {
   costPoints: number;
 }
 
+export interface SuperCheckinAdSessionResult {
+  sessionId: string;
+  adUnitId: string;
+  expiresAt: string | null;
+  minWatchSeconds: number;
+}
+
 function parseInteger(value: string, fallback: number): number {
   const parsed = Number.parseInt(String(value || '').trim(), 10);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function normalizeRewardItem(item: any): number | null {
+  const value = item && typeof item === 'object'
+    ? item.points ?? item.reward ?? item.value ?? item.amount
+    : item;
+  const parsed = Number.parseInt(String(value ?? '').trim(), 10);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.max(0, parsed);
+}
+
+function normalizeRewards(value: any, fallback: number[]): number[] {
+  const source = Array.isArray(value) ? value : [];
+  const rewards = source
+    .map(normalizeRewardItem)
+    .filter((item): item is number => item !== null);
+  return rewards.length > 0 ? rewards : fallback;
+}
+
 function parseRewardsJson(value: string, fallback: number[]): number[] {
-  if (!value || !String(value).trim()) return fallback;
+  const text = String(value || '').trim();
+  if (!text) return fallback;
   try {
-    const parsed = JSON.parse(value);
-    if (!Array.isArray(parsed)) return fallback;
-    const numbers = parsed
-      .map((item) => Math.max(0, Number.parseInt(String(item || '').trim(), 10) || 0))
-      .filter((item) => Number.isFinite(item));
-    return numbers.length > 0 ? numbers : fallback;
+    return normalizeRewards(JSON.parse(text), fallback);
   } catch {
-    return fallback;
+    if (!text.includes(',')) return fallback;
+    return normalizeRewards(text.split(','), fallback);
   }
 }
 
@@ -168,6 +197,11 @@ async function getDateInfo() {
   };
 }
 
+async function getRewardedVideoAdUnitId(): Promise<string> {
+  const adUnitId = await SettingsService.getString('ad.reward.ad_unit_id', '');
+  return adUnitId.trim();
+}
+
 export async function getCheckinConfig(): Promise<CheckinConfig> {
   const [enabled, normalEnabled, superEnabled, superRequiresAd, rewardsJson, superRewardsJson, allowMakeup, makeupCostPoints] = await Promise.all([
     SettingsService.getBoolean('signin.enabled', false),
@@ -177,7 +211,7 @@ export async function getCheckinConfig(): Promise<CheckinConfig> {
     SettingsService.getString('signin.rewards_json', JSON.stringify(DEFAULT_NORMAL_REWARDS)),
     SettingsService.getString('signin.super_rewards_json', JSON.stringify(DEFAULT_SUPER_REWARDS)),
     SettingsService.getBoolean('signin.allow_makeup', false),
-    SettingsService.getString('signin.makeup_cost_points', '0'),
+    SettingsService.getString('signin.makeup_cost_points', '10'),
   ]);
 
   return {
@@ -232,7 +266,10 @@ async function getSuperStatus(userId: number, config: CheckinConfig, dateInfo: A
       WHERE user_id = ? AND signin_date = ? AND super_signed_at IS NOT NULL`,
     [userId, dateInfo.yesterday],
   );
-  const adCompletedToday = await hasAdCompletedToday(userId);
+  const [adCompletedToday, adUnitId] = await Promise.all([
+    hasSuperCheckinAdCompletedToday(userId),
+    getRewardedVideoAdUnitId(),
+  ]);
   const signedToday = !!todayRow?.super_signed_at;
   const streak = signedToday ? Number(todayRow?.super_streak_day || 0) : yesterdayRow ? Number(yesterdayRow.super_streak_day || 0) : 0;
   const lastSignedAt = signedToday ? todayRow.super_signed_at : yesterdayRow?.super_signed_at || null;
@@ -247,6 +284,8 @@ async function getSuperStatus(userId: number, config: CheckinConfig, dateInfo: A
     }),
     adRequired: config.superRequiresAd,
     adCompletedToday,
+    adUnitId,
+    minWatchSeconds: Math.ceil(MIN_SUPER_CHECKIN_AD_WATCH_MS / 1000),
   };
 }
 
@@ -299,10 +338,10 @@ async function getCheckinHistory(userId: number) {
   }));
 }
 
-async function hasAdCompletedToday(userId: number): Promise<boolean> {
+async function hasSuperCheckinAdCompletedToday(userId: number): Promise<boolean> {
   const row = await queryOne<any>(
-    "SELECT COUNT(*) AS cnt FROM ad_reward_logs WHERE user_id = ? AND ad_date = CURDATE() AND reward_status = 'claimed'",
-    [userId],
+    "SELECT COUNT(*) AS cnt FROM ad_reward_logs WHERE user_id = ? AND ad_date = CURDATE() AND ad_scene = ? AND reward_status = 'claimed'",
+    [userId, SUPER_CHECKIN_AD_SCENE],
   );
   return Number(row?.cnt || 0) > 0;
 }
@@ -316,12 +355,16 @@ async function hasYesterdayNormalSign(userId: number, dateInfo: Awaited<ReturnTy
   return !!row;
 }
 
-async function hasTodayNormalSign(connDateUserId: number, dateInfo: Awaited<ReturnType<typeof getDateInfo>>): Promise<boolean> {
-  const row = await queryOne<any>(
-    `SELECT id FROM signin_records
-      WHERE user_id = ? AND signin_date = ? AND normal_signed_at IS NOT NULL`,
-    [connDateUserId, dateInfo.today],
-  );
+async function hasTodayNormalSign(userId: number, dateInfo: Awaited<ReturnType<typeof getDateInfo>>, conn?: PoolConnection): Promise<boolean> {
+  const row = conn
+    ? (await conn.execute(
+        `SELECT id FROM signin_records WHERE user_id = ? AND signin_date = ? AND normal_signed_at IS NOT NULL`,
+        [userId, dateInfo.today],
+      ) as any)[0]?.[0]
+    : await queryOne<any>(
+        `SELECT id FROM signin_records WHERE user_id = ? AND signin_date = ? AND normal_signed_at IS NOT NULL`,
+        [userId, dateInfo.today],
+      );
   return !!row;
 }
 
@@ -458,7 +501,7 @@ export async function claimNormalCheckin(userId: number): Promise<NormalCheckinR
     await conn.beginTransaction();
 
     const account = await lockPointAccountTx(conn, userId);
-    const todaySigned = await hasTodayNormalSign(userId, dateInfo);
+    const todaySigned = await hasTodayNormalSign(userId, dateInfo, conn);
     if (todaySigned) {
       await conn.rollback();
       throw Object.assign(new Error('今日已签到'), { code: 1001 });
@@ -498,33 +541,105 @@ export async function claimNormalCheckin(userId: number): Promise<NormalCheckinR
   }
 }
 
-async function validateSuperAdRequirement(conn: any, userId: number, adSessionId?: string) {
-  if (adSessionId && adSessionId.trim()) {
-    const [rows] = await conn.execute(
-      `SELECT id, reward_status, created_at, expires_at
-         FROM ad_reward_logs
-        WHERE user_id = ? AND session_id = ? FOR UPDATE`,
-      [userId, adSessionId.trim()],
-    ) as any;
-    if (!rows || rows.length === 0) {
-      throw Object.assign(new Error('广告会话无效'), { code: 1001 });
-    }
-    const session = rows[0];
-    if (session.reward_status !== 'claimed') {
-      throw Object.assign(new Error('请先完成广告观看'), { code: 1001 });
-    }
-    const expiresAt = session.expires_at ? new Date(session.expires_at).getTime() : new Date(session.created_at).getTime() + 30 * 60 * 1000;
-    if (Date.now() > expiresAt) {
-      throw Object.assign(new Error('广告会话已过期'), { code: 1001 });
-    }
-    return true;
+export async function createSuperCheckinAdSession(userId: number): Promise<SuperCheckinAdSessionResult> {
+  const config = await getCheckinConfig();
+  if (!config.enabled || !config.superEnabled) {
+    throw Object.assign(new Error('超级签到未开启'), { code: 1001 });
+  }
+  if (!config.superRequiresAd) {
+    throw Object.assign(new Error('超级签到当前不需要广告'), { code: 1001 });
   }
 
-  const row = await conn.execute(
-    "SELECT COUNT(*) AS cnt FROM ad_reward_logs WHERE user_id = ? AND ad_date = CURDATE() AND reward_status = 'claimed'",
-    [userId],
+  const adUnitId = await getRewardedVideoAdUnitId();
+  if (!adUnitId) {
+    throw Object.assign(new Error('请先在后台配置微信激励视频广告位'), { code: 1001 });
+  }
+
+  const dateInfo = await getDateInfo();
+  const conn = await getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const [todayRows] = await conn.execute(
+      `SELECT id, super_signed_at FROM signin_records WHERE user_id = ? AND signin_date = ? FOR UPDATE`,
+      [userId, dateInfo.today],
+    ) as any;
+    const today = todayRows?.[0];
+    if (today?.super_signed_at) {
+      throw Object.assign(new Error('今日超级签到已完成'), { code: 1001 });
+    }
+
+    const [watchRows] = await conn.execute(
+      "SELECT COUNT(*) AS cnt FROM ad_reward_logs WHERE user_id = ? AND ad_date = CURDATE() AND ad_scene = ? FOR UPDATE",
+      [userId, SUPER_CHECKIN_AD_SCENE],
+    ) as any;
+    const watchOrder = Number(watchRows?.[0]?.cnt || 0) + 1;
+    const sessionId = `signin_super_${Date.now()}_${uuidv4().replace(/-/g, '').slice(0, 12)}`;
+
+    await conn.execute(
+      `INSERT INTO ad_reward_logs
+       (user_id, ad_date, session_id, ad_scene, watch_order, reward_status, reward_points, expires_at, created_at)
+       VALUES (?, CURDATE(), ?, ?, ?, 'pending', 0, DATE_ADD(NOW(3), INTERVAL ${SUPER_CHECKIN_AD_SESSION_EXPIRE_MINUTES} MINUTE), NOW(3))`,
+      [userId, sessionId, SUPER_CHECKIN_AD_SCENE, watchOrder],
+    );
+    const [expiresAtRows] = await conn.execute(
+      'SELECT expires_at FROM ad_reward_logs WHERE session_id = ? AND user_id = ? AND ad_scene = ? LIMIT 1',
+      [sessionId, userId, SUPER_CHECKIN_AD_SCENE],
+    ) as any;
+    const expiresAt = expiresAtRows?.[0]?.expires_at || null;
+    await conn.commit();
+
+    return {
+      sessionId,
+      adUnitId,
+      expiresAt,
+      minWatchSeconds: Math.ceil(MIN_SUPER_CHECKIN_AD_WATCH_MS / 1000),
+    };
+  } catch (error) {
+    await conn.rollback();
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
+async function validateSuperAdRequirement(conn: any, userId: number, adSessionId?: string): Promise<number> {
+  const sessionId = String(adSessionId || '').trim();
+  if (!sessionId) {
+    throw Object.assign(new Error('请先完成超级签到广告观看'), { code: 1001 });
+  }
+
+  const [rows] = await conn.execute(
+    `SELECT id, reward_status, created_at, expires_at
+       FROM ad_reward_logs
+      WHERE user_id = ? AND session_id = ? AND ad_scene = ? FOR UPDATE`,
+    [userId, sessionId, SUPER_CHECKIN_AD_SCENE],
   ) as any;
-  return Number(row[0]?.[0]?.cnt || 0) > 0;
+  if (!rows || rows.length === 0) {
+    throw Object.assign(new Error('超级签到广告会话无效'), { code: 1001 });
+  }
+
+  const session = rows[0];
+  if (session.reward_status !== 'pending') {
+    throw Object.assign(new Error('超级签到广告会话已失效'), { code: 1001 });
+  }
+
+  const expiresAt = session.expires_at
+    ? new Date(session.expires_at).getTime()
+    : new Date(session.created_at).getTime() + SUPER_CHECKIN_AD_SESSION_EXPIRE_MINUTES * 60 * 1000;
+  if (expiresAt > 0 && Date.now() > expiresAt) {
+    throw Object.assign(new Error('超级签到广告会话已过期'), { code: 1001 });
+  }
+
+  const createdAt = new Date(session.created_at).getTime();
+  if (Date.now() - createdAt < MIN_SUPER_CHECKIN_AD_WATCH_MS) {
+    throw Object.assign(
+      new Error(`广告观看时间不足，请至少观看 ${Math.ceil(MIN_SUPER_CHECKIN_AD_WATCH_MS / 1000)} 秒后再领取`),
+      { code: 1001 },
+    );
+  }
+
+  return Number(session.id);
 }
 
 export async function claimSuperCheckin(userId: number, adSessionId?: string): Promise<SuperCheckinResult> {
@@ -545,15 +660,10 @@ export async function claimSuperCheckin(userId: number, adSessionId?: string): P
     ) as any;
     const today = todayRow[0]?.[0];
     if (today?.super_signed_at) {
-      await conn.rollback();
       throw Object.assign(new Error('今日超级签到已完成'), { code: 1001 });
     }
 
-    const adSatisfied = config.superRequiresAd ? await validateSuperAdRequirement(conn, userId, adSessionId) : true;
-    if (!adSatisfied) {
-      await conn.rollback();
-      throw Object.assign(new Error('请先完成广告观看'), { code: 1001 });
-    }
+    const superAdLogId = config.superRequiresAd ? await validateSuperAdRequirement(conn, userId, adSessionId) : null;
 
     const streakBefore = await getYesterdaySuperStreak(userId, dateInfo);
     const streak = Math.max(1, streakBefore + 1);
@@ -570,6 +680,12 @@ export async function claimSuperCheckin(userId: number, adSessionId?: string): P
     });
 
     await upsertSuperCheckin(conn, userId, dateInfo, streak, reward);
+    if (superAdLogId) {
+      await conn.execute(
+        "UPDATE ad_reward_logs SET reward_status = 'claimed', reward_points = 0, claimed_at = NOW(3) WHERE id = ?",
+        [superAdLogId],
+      );
+    }
     await conn.commit();
 
     return {
@@ -581,7 +697,8 @@ export async function claimSuperCheckin(userId: number, adSessionId?: string): P
       currentDay: Math.min(streak, config.superRewards.length || 1),
       days: buildDayItems(config.superRewards, streak, true),
       adRequired: config.superRequiresAd,
-      adCompletedToday: !!adSatisfied,
+      adCompletedToday: !config.superRequiresAd || !!superAdLogId,
+      adSessionId: adSessionId?.trim(),
     };
   } catch (error) {
     await conn.rollback();
@@ -608,7 +725,7 @@ export async function claimMakeupCheckin(userId: number, targetDate?: string): P
     await conn.beginTransaction();
 
     const account = await lockPointAccountTx(conn, userId);
-    const todaySigned = await hasTodayNormalSign(userId, dateInfo);
+    const todaySigned = await hasTodayNormalSign(userId, dateInfo, conn);
     if (todaySigned) {
       await conn.rollback();
       throw Object.assign(new Error('今日已签到，无法补签'), { code: 1001 });

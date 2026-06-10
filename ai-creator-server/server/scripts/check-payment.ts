@@ -16,6 +16,8 @@ const EXPECTED_NOTIFY_PATH = '/api/v1/payments/wechat/notify';
 const serverRoot = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(serverRoot, '..');
 const results: CheckItem[] = [];
+const strictRealCollection = process.argv.includes('--strict-real-collection')
+  || ['1', 'true', 'yes', 'on'].includes(String(process.env.CHECK_PAYMENT_STRICT || process.env.REQUIRE_WECHAT_PAY_READY || '').trim().toLowerCase());
 
 function add(status: Status, name: string, message: string): void {
   results.push({ status, name, message });
@@ -207,6 +209,15 @@ async function checkDatabaseShape(): Promise<boolean> {
     }
   }
 
+  if (await tableExists('point_accounts')) {
+    const columns = await getColumns('point_accounts');
+    for (const column of ['total_refunded']) {
+      const exists = columns.has(column);
+      add(exists ? 'PASS' : 'FAIL', `point_accounts.${column}`, exists ? 'exists' : 'missing');
+      if (!exists) ok = false;
+    }
+  }
+
   return ok;
 }
 
@@ -238,6 +249,13 @@ function checkGrantAndRegrant(): boolean {
     add('PASS', 'grant_status enum', 'only pending/granted/failed detected');
   }
 
+  if (/cfg\.verifySignature[\s\S]{0,300}verifyNotifySignature/.test(service)) {
+    add('PASS', 'wechat_pay.verify_signature', 'notify signature switch is respected');
+  } else {
+    add('FAIL', 'wechat_pay.verify_signature', 'notify handler must respect wechat_pay.verify_signature');
+    ok = false;
+  }
+
   return ok;
 }
 
@@ -260,7 +278,13 @@ async function main(): Promise<void> {
     console.log('Conclusion: payment mainline is not ready');
     process.exitCode = 1;
   } else if (!configReady || warned > 0) {
-    console.log('Conclusion: API integration is possible, real collection is not recommended yet');
+    const conclusion = 'API integration is possible, real collection is not recommended yet';
+    if (strictRealCollection) {
+      console.log(`Conclusion: ${conclusion}; strict real-collection mode failed`);
+      process.exitCode = 1;
+    } else {
+      console.log(`Conclusion: ${conclusion}`);
+    }
   } else {
     console.log('Conclusion: payment API integration and real collection config are ready');
   }

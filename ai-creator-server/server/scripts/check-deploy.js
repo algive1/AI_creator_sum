@@ -7,6 +7,10 @@ const {
   evaluateInstallStatus,
   isStrongProductionSecret,
 } = require('../dist/services/install-readiness.service.js');
+const {
+  readRuntimeReleaseVersion,
+  runtimeVersionCandidates,
+} = require('../dist/utils/runtime-version.js');
 
 const results = [];
 const serverRoot = path.resolve(__dirname, '..');
@@ -17,6 +21,7 @@ const serverNodeModules = path.join(serverRoot, 'node_modules');
 const adminWebNodeModules = path.join(repoRoot, 'admin-web', 'node_modules');
 const serverDist = path.join(serverRoot, 'dist');
 const adminWebDist = path.join(repoRoot, 'admin-web', 'dist');
+const envFile = path.join(serverRoot, '.env');
 
 function addCheck(name, status, message, details) {
   results.push({ name, status, message, details });
@@ -43,6 +48,81 @@ function ensureWritableDir(dir) {
   const probe = path.join(dir, `.check-deploy-${process.pid}-${Date.now()}.tmp`);
   fs.writeFileSync(probe, 'ok');
   fs.unlinkSync(probe);
+}
+
+function parseEnvFile(filePath) {
+  if (!fs.existsSync(filePath)) return {};
+  const result = {};
+  for (const line of fs.readFileSync(filePath, 'utf8').split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const index = trimmed.indexOf('=');
+    if (index <= 0) continue;
+    const key = trimmed.slice(0, index).trim();
+    let value = trimmed.slice(index + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    result[key] = value;
+  }
+  return result;
+}
+
+function isWeakDbPassword(value) {
+  const password = String(value || '').trim();
+  if (password.length < 16) return true;
+  if (/^(.)\1+$/.test(password)) return true;
+  if (/password|passwd|admin|root|test|123456|qwerty|asdf|abc/i.test(password)) return true;
+  const classes = [
+    /[a-z]/.test(password),
+    /[A-Z]/.test(password),
+    /\d/.test(password),
+    /[^A-Za-z0-9]/.test(password),
+  ].filter(Boolean).length;
+  return classes < 3;
+}
+
+function checkEnvFileSecurity() {
+  const production = isProduction();
+  const backupFiles = fs.existsSync(serverRoot)
+    ? fs.readdirSync(serverRoot).filter(name => /^\.env\.(backup|bak|old|prod|production)\b/i.test(name) && name !== '.env.production.example')
+    : [];
+  if (backupFiles.length > 0) {
+    addCheck('.env backup files', production ? 'fail' : 'warning', 'plaintext .env backup files must not remain in the deploy directory', {
+      files: backupFiles,
+    });
+  } else {
+    addCheck('.env backup files', 'ok', 'no plaintext .env backup files found');
+  }
+
+  if (!fs.existsSync(envFile)) {
+    addCheck('.env file', production ? 'fail' : 'warning', 'server/.env is missing');
+    return;
+  }
+
+  const envValues = parseEnvFile(envFile);
+  const dbPassword = envValues.DB_PASSWORD || process.env.DB_PASSWORD || '';
+  addCheck(
+    'DB_PASSWORD strength',
+    isWeakDbPassword(dbPassword) ? (production ? 'fail' : 'warning') : 'ok',
+    isWeakDbPassword(dbPassword) ? 'DB_PASSWORD should be at least 16 chars and include mixed character classes' : 'DB_PASSWORD passes basic strength checks',
+    { length: dbPassword.length },
+  );
+
+  try {
+    const mode = fs.statSync(envFile).mode & 0o777;
+    const secureMode = (mode & 0o077) === 0;
+    addCheck(
+      '.env permissions',
+      secureMode ? 'ok' : production ? 'fail' : 'warning',
+      secureMode ? 'server/.env is not readable by group/others' : 'server/.env should be chmod 600 on Linux',
+      { mode: `0${mode.toString(8)}` },
+    );
+  } catch (err) {
+    addCheck('.env permissions', production ? 'fail' : 'warning', 'failed to inspect server/.env permissions', {
+      error: err && err.message ? err.message : String(err),
+    });
+  }
 }
 
 function collectDirs(root, depth = 0, maxDepth = 2, output = []) {
@@ -134,6 +214,43 @@ function checkBuildOutputs() {
   const adminIndex = path.join(adminWebDist, 'index.html');
   addCheck('server build output', fs.existsSync(serverIndex) ? 'ok' : 'fail', fs.existsSync(serverIndex) ? 'server/dist/index.js exists' : 'server/dist/index.js is missing');
   addCheck('admin-web build output', fs.existsSync(adminIndex) ? 'ok' : 'fail', fs.existsSync(adminIndex) ? 'admin-web/dist/index.html exists' : 'admin-web/dist/index.html is missing');
+}
+
+function readJsonVersion(filePath) {
+  const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  return parsed && typeof parsed.version === 'string' ? parsed.version.trim() : '';
+}
+
+function checkRuntimeReleaseVersionSource() {
+  const releaseJson = path.join(repoRoot, 'release.json');
+  if (!fs.existsSync(releaseJson)) {
+    addCheck('runtime release version source', 'warning', 'release.json is absent; skipped runtime version source check');
+    return;
+  }
+
+  const expectedVersion = readJsonVersion(releaseJson);
+  const candidates = runtimeVersionCandidates(serverDist, serverRoot).map(item => path.resolve(item));
+  const expectedReleaseJson = path.resolve(releaseJson);
+  const forbiddenParentReleaseJson = path.resolve(repoRoot, '..', 'release.json');
+  const actualVersion = readRuntimeReleaseVersion(serverDist, serverRoot);
+  const firstCandidateOk = candidates[0] === expectedReleaseJson;
+  const skipsParentReleaseJson = !candidates.includes(forbiddenParentReleaseJson);
+  const versionOk = actualVersion === expectedVersion;
+
+  addCheck(
+    'runtime release version source',
+    firstCandidateOk && skipsParentReleaseJson && versionOk ? 'ok' : 'fail',
+    firstCandidateOk && skipsParentReleaseJson && versionOk
+      ? `/health will report release.json version ${actualVersion}`
+      : '/health runtime version source does not match current release.json',
+    {
+      expectedReleaseJson,
+      firstCandidate: candidates[0],
+      forbiddenParentReleaseJson,
+      actualVersion,
+      expectedVersion,
+    },
+  );
 }
 
 function checkRequiredFiles() {
@@ -259,8 +376,10 @@ async function main() {
   await checkPlatform();
   checkRequiredFiles();
   await checkEnvironment();
+  checkEnvFileSecurity();
   await checkNodeModules();
   checkBuildOutputs();
+  checkRuntimeReleaseVersionSource();
   await checkInstallState();
   checkWritablePaths();
 

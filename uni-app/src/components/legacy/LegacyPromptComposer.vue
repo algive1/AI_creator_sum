@@ -23,9 +23,10 @@
           <view class="prompt-quick-action" @tap="$emit('selectAll')">全选</view>
           <view class="prompt-quick-action danger" @tap="$emit('clear')">清空</view>
         </view>
-        <view class="prompt-inline-action" @tap="$emit('smartFill')">
+        <view v-if="showSmartFill" class="prompt-inline-action" @tap="$emit('smartFill')">
           <text class="prompt-inline-count">{{ modelValue.length }}/{{ maxLength }}</text><text>丨{{ smartLabel }}</text>
         </view>
+        <view v-else class="prompt-inline-count">{{ modelValue.length }}/{{ maxLength }}</view>
       </view>
     </view>
   </view>
@@ -39,12 +40,14 @@ withDefaults(defineProps<{
   maxLength?: number;
   expanded?: boolean;
   smartLabel?: string;
+  showSmartFill?: boolean;
 }>(), {
   title: '主提示词',
   placeholder: '写点什么... 输入完成1秒后自动保存，最多2000字',
   maxLength: 2000,
   expanded: false,
-  smartLabel: 'AI智能补全'
+  smartLabel: 'AI智能补全',
+  showSmartFill: true
 });
 
 const emit = defineEmits<{

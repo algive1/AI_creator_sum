@@ -390,7 +390,7 @@ function StepEnvironment({ onNext }: { onNext: () => void }) {
           showIcon
           className="install-alert"
           message="当前部署包缺少构建产物"
-          description="默认安装要求 release 包已经包含 admin-web/dist 和 server/dist。可以换用 release 构建包，或在高级操作里重新构建。"
+          description="当前 release 包是源码包，不包含 admin-web/dist 和 server/dist。首次安装需先在服务器执行高级操作构建；后续在线更新会自动构建。"
         />
       )}
 
@@ -557,6 +557,8 @@ function StepExecute({
   const stateSteps = useMemo(() => stepsFromInstallState(status?.installState), [status?.installState]);
   const displaySteps = task?.steps || (status?.installState ? stateSteps : undefined);
   const displayProgressTask = task || (displaySteps ? { steps: displaySteps } as InstallTask : null);
+  const serviceStartError = task?.status === 'partial_success' || partial || repairNeedsPm2;
+  const taskFailed = task?.status === 'failed';
 
   const payload = useMemo(() => ({
     db: draft.db,
@@ -654,13 +656,24 @@ function StepExecute({
       <div className="task-box">
         <Progress
           percent={percent(displayProgressTask)}
-          status={task?.status === 'failed' ? 'exception' : task?.status === 'success' ? 'success' : partial ? 'exception' : task ? 'active' : 'normal'}
+          status={taskFailed ? 'exception' : task?.status === 'success' ? 'success' : serviceStartError ? 'exception' : task ? 'active' : 'normal'}
         />
         {displaySteps ? <StepList steps={displaySteps} /> : <Alert type="info" showIcon message="点击开始后，后端会自动写入 .env、初始化数据库、创建管理员、写入安装锁并处理 PM2。" />}
-        {task?.error && <Alert type="error" showIcon message="安装失败" description={task.error} />}
+        {task?.error && (
+          <Alert
+            className="install-alert"
+            type={serviceStartError ? 'warning' : 'error'}
+            showIcon
+            message={serviceStartError ? '基础安装已完成，服务启动失败' : '安装失败'}
+            description={task.error}
+          />
+        )}
         {!task?.error && status?.installState?.lastError && (
           <Alert className="install-alert" type="error" showIcon message="上次失败摘要" description={status.installState.lastError.message} />
         )}
+        {serviceStartError && !task?.error && status?.service?.error ? (
+          <Alert className="install-alert" type="warning" showIcon message="服务健康检查未通过" description={status.service.error} />
+        ) : null}
         {status?.installState?.warnings?.length ? (
           <Alert className="install-alert" type="warning" showIcon message="权限处理提示" description={status.installState.warnings.slice(-3).join('\n')} />
         ) : null}

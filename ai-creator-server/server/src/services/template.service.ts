@@ -72,6 +72,7 @@ export function normalizeTemplateTargetFeatureKey(value: any): string {
   const text = String(value || '').trim();
   if (text === 'image_create') return 'text_to_image';
   if (text === 'video_create') return 'text_to_video';
+  if (text === 'image_editing') return 'image_edit';
   return text;
 }
 

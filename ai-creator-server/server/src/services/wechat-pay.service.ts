@@ -104,14 +104,14 @@ export function buildAuthorizationHeader(params: {
     '',
   ].join('\n');
   const signature = signWithPrivateKey(params.privateKey, message);
-  const authorization = [
-    'WECHATPAY2-SHA256-RSA2048',
+  const authorizationParams = [
     `mchid="${params.mchId}"`,
     `nonce_str="${nonceStr}"`,
+    `signature="${signature}"`,
     `timestamp="${timestamp}"`,
     `serial_no="${params.merchantSerialNo}"`,
-    `signature="${signature}"`,
-  ].join(' ');
+  ].join(',');
+  const authorization = `WECHATPAY2-SHA256-RSA2048 ${authorizationParams}`;
   return { authorization, timestamp, nonceStr };
 }
 

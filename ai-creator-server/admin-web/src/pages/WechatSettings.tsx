@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Button, Card, Collapse, Form, Image, Input, Modal, Select, Space, Switch, Typography, Upload, message } from 'antd';
-import { CustomerServiceOutlined, MinusCircleOutlined, PayCircleOutlined, PictureOutlined, PlusOutlined, QuestionCircleOutlined, UploadOutlined, WechatOutlined } from '@ant-design/icons';
+import { CopyOutlined, CustomerServiceOutlined, MinusCircleOutlined, PayCircleOutlined, PictureOutlined, PlusOutlined, QuestionCircleOutlined, UploadOutlined, WechatOutlined } from '@ant-design/icons';
 import { useLocation } from 'react-router-dom';
 import api from '../services/api';
+import { sanitizeHelpHtml } from '../utils/htmlSanitizer';
 
 const { Text } = Typography;
 
@@ -63,6 +64,21 @@ function secretText(rows: ConfigRow[], key: string) {
   return row?.maskedValue || '未配置';
 }
 
+const copyTextToClipboard = async (value: string) => {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand('copy');
+  document.body.removeChild(textarea);
+};
+
 export default function WechatSettings() {
   const location = useLocation();
   const page = useMemo(() => {
@@ -77,6 +93,7 @@ export default function WechatSettings() {
   const [configs, setConfigs] = useState<Record<string, ConfigRow[]>>({});
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [copyingAppSecret, setCopyingAppSecret] = useState(false);
   const [uploadingAsset, setUploadingAsset] = useState<Record<string, boolean>>({});
 
   // tabBar
@@ -204,19 +221,40 @@ export default function WechatSettings() {
     return api.post('/settings/' + group + '/secure', filtered);
   };
 
+  const copyWechatAppSecret = async () => {
+    if (copyingAppSecret) return;
+    setCopyingAppSecret(true);
+    try {
+      const res: any = await api.post('/settings/secrets/copy', { key: 'wechat.app_secret' });
+      const value = String(res.data?.value || '');
+      if (!value) {
+        message.warning('AppSecret 未配置');
+        return;
+      }
+      await copyTextToClipboard(value);
+      message.success('AppSecret 已复制');
+    } catch (e: any) {
+      message.error(e?.response?.data?.message || '复制 AppSecret 失败');
+    } finally {
+      setCopyingAppSecret(false);
+    }
+  };
+
   const saveMiniapp = async () => {
     const values = await form.validateFields(['loginEnabled', 'appId', 'appSecret', 'apiDomain', 'fileDomain']);
     setSaving(true);
     try {
-      await postNormal('wechat', {
-        'wechat.login_enabled': String(!!values.loginEnabled),
-        'wechat.app_id': values.appId || '',
-      });
-      await postSecret('wechat', { 'wechat.app_secret': values.appSecret || '' });
-      await postNormal('general', { 'site.api_domain': values.apiDomain || '' });
-      await postNormal('storage', { 'storage.file_domain': values.fileDomain || '' });
+      await Promise.all([
+        postNormal('wechat', {
+          'wechat.login_enabled': String(!!values.loginEnabled),
+          'wechat.app_id': values.appId || '',
+        }),
+        postSecret('wechat', { 'wechat.app_secret': values.appSecret || '' }),
+        postNormal('general', { 'site.api_domain': values.apiDomain || '' }),
+        postNormal('storage', { 'storage.file_domain': values.fileDomain || '' }),
+      ]);
       message.success('微信小程序配置已保存');
-      fetchConfigs();
+      void fetchConfigs();
     } finally {
       setSaving(false);
     }
@@ -230,19 +268,21 @@ export default function WechatSettings() {
     }
     setSaving(true);
     try {
-      await postNormal('wechat_pay', {
-        'wechat_pay.enabled': String(!!values.payEnabled),
-        'wechat_pay.appid': values.payAppId || '',
-        'wechat_pay.mchid': values.mchId || '',
-        'wechat_pay.merchant_serial_no': values.merchantSerialNo || '',
-        'wechat_pay.notify_url': values.notifyUrl || '',
-      });
-      await postSecret('wechat_pay', {
-        'wechat_pay.api_v3_key': values.apiV3Key || '',
-        'wechat_pay.private_key': values.privateKey || '',
-      });
+      await Promise.all([
+        postNormal('wechat_pay', {
+          'wechat_pay.enabled': String(!!values.payEnabled),
+          'wechat_pay.appid': values.payAppId || '',
+          'wechat_pay.mchid': values.mchId || '',
+          'wechat_pay.merchant_serial_no': values.merchantSerialNo || '',
+          'wechat_pay.notify_url': values.notifyUrl || '',
+        }),
+        postSecret('wechat_pay', {
+          'wechat_pay.api_v3_key': values.apiV3Key || '',
+          'wechat_pay.private_key': values.privateKey || '',
+        }),
+      ]);
       message.success('微信支付配置已保存');
-      fetchConfigs();
+      void fetchConfigs();
     } finally {
       setSaving(false);
     }
@@ -342,7 +382,24 @@ export default function WechatSettings() {
         <Form.Item name="appId" label="AppID" extra="微信公众平台 -> 开发管理 -> 开发设置中获取。" rules={[{ required: true, message: '请输入小程序 AppID' }]}>
           <Input placeholder="wx..." />
         </Form.Item>
-        <Form.Item name="appSecret" label="AppSecret" extra={`当前状态：${secretText(configs.wechat || [], 'wechat.app_secret')}。留空不会修改原密钥。`}>
+        <Form.Item
+          name="appSecret"
+          label="AppSecret"
+          extra={
+            <Space wrap>
+              <Text type="secondary">当前状态：{secretText(configs.wechat || [], 'wechat.app_secret')}。留空不会修改原密钥。</Text>
+              <Button
+                size="small"
+                icon={<CopyOutlined />}
+                loading={copyingAppSecret}
+                disabled={secretText(configs.wechat || [], 'wechat.app_secret') === '未配置'}
+                onClick={copyWechatAppSecret}
+              >
+                复制
+              </Button>
+            </Space>
+          }
+        >
           <Input.Password placeholder="需要更换时再填写" />
         </Form.Item>
         <Form.Item name="apiDomain" label="后端 API 域名" extra="用于微信 request / uploadFile 合法域名，建议填写 https:// 开头的公网域名。">
@@ -436,6 +493,7 @@ export default function WechatSettings() {
   );
 
   const helpContent = Form.useWatch('helpContentHtml', form) || '';
+  const sanitizedHelpContent = useMemo(() => sanitizeHelpHtml(String(helpContent)), [helpContent]);
   const help = (
     <Card loading={loading} title={<Space><QuestionCircleOutlined />使用帮助</Space>}>
       <Alert
@@ -460,7 +518,7 @@ export default function WechatSettings() {
         </Form.Item>
         <Card size="small" title="预览" style={{ marginBottom: 16 }}>
           {helpContent
-            ? <div style={{ color: '#1f2937', lineHeight: 1.8 }} dangerouslySetInnerHTML={{ __html: String(helpContent) }} />
+            ? <div style={{ color: '#1f2937', lineHeight: 1.8 }} dangerouslySetInnerHTML={{ __html: sanitizedHelpContent }} />
             : <Text type="secondary">暂无内容</Text>}
         </Card>
         <Button type="primary" loading={saving} onClick={saveHelp}>保存使用帮助配置</Button>

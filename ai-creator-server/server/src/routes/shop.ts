@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { success, error } from '../utils/response';
 import { ErrorCodes } from '../types';
 import { listPointPackages, listMemberPlans } from '../services/payment-order.service';
+import { SettingsService } from '../services/settings.service';
 
 const router = Router();
 
@@ -16,6 +17,11 @@ router.get('/point-packages', async (_req: Request, res: Response) => {
 
 router.get('/member-plans', async (_req: Request, res: Response) => {
   try {
+    const enabled = await SettingsService.getBoolean('membership.enabled', true);
+    if (!enabled) {
+      error(res, ErrorCodes.FORBIDDEN, '会员功能已关闭，暂不提供会员套餐');
+      return;
+    }
     const list = await listMemberPlans();
     success(res, { list });
   } catch (err: any) {

@@ -152,10 +152,6 @@ export function taskThumbnailOf(task: TaskLike) {
   return String(task.thumbnail || task.coverUrl || output.thumbnail || output.image || output.url || '');
 }
 
-export function taskOutputUrl(output: TaskLike) {
-  return String(output.url || output.image || output.video || output.thumbnail || '');
-}
-
 export function taskCreatedAtOf(task: TaskLike) {
   return String(task.createdAt || task.created_at || '');
 }

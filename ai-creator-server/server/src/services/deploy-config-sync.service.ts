@@ -17,6 +17,12 @@ export interface DeploymentConfigSyncResult {
 
 const DEPLOYMENT_CONFIG_MAPPINGS: EnvConfigMapping[] = [
   {
+    configKey: 'storage.local.upload_dir',
+    envKeys: ['LOCAL_UPLOAD_DIR'],
+    group: 'storage',
+    valueType: 'string',
+  },
+  {
     configKey: 'storage.local.base_url',
     envKeys: ['LOCAL_BASE_URL'],
     group: 'storage',
@@ -28,24 +34,29 @@ function isPlaceholder(value: string): boolean {
   return /please_replace|your[-_]|example\.com/i.test(value);
 }
 
-function usableLocalBaseUrl(value: string | undefined): value is string {
+function usableConfigValue(configKey: string, value: string | undefined): value is string {
   const text = String(value || '').trim().replace(/\/+$/, '');
   if (!text || isPlaceholder(text)) return false;
-  return /^https:\/\//i.test(text);
+  if (configKey === 'storage.local.base_url') return text === '/static' || /^https:\/\//i.test(text);
+  if (configKey === 'storage.local.upload_dir') return text.startsWith('/') || /^[A-Za-z]:[\\/]/.test(text) || /^\\\\/.test(text);
+  return true;
 }
 
-function firstEnvValue(keys: string[]): { key: string; value: string } | null {
+function firstEnvValue(configKey: string, keys: string[]): { key: string; value: string } | null {
   for (const key of keys) {
     const value = process.env[key];
-    if (usableLocalBaseUrl(value)) {
+    if (usableConfigValue(configKey, value)) {
       return { key, value: String(value).trim().replace(/\/+$/, '') };
     }
   }
   return null;
 }
 
-function shouldUpdateCurrentValue(value: string): boolean {
+function shouldUpdateCurrentValue(configKey: string, value: string): boolean {
   const current = value.trim().replace(/\/+$/, '');
+  if (configKey === 'storage.local.upload_dir') {
+    return !current || current === '/www/wwwroot/ai-creator/uploads' || isPlaceholder(current);
+  }
   return !current || current === '/static' || isPlaceholder(current);
 }
 
@@ -53,7 +64,7 @@ export async function syncDeploymentConfigsFromEnv(executor: Executor): Promise<
   const results: DeploymentConfigSyncResult[] = [];
 
   for (const mapping of DEPLOYMENT_CONFIG_MAPPINGS) {
-    const env = firstEnvValue(mapping.envKeys);
+    const env = firstEnvValue(mapping.configKey, mapping.envKeys);
     if (!env) continue;
 
     const [rows] = await executor.execute(
@@ -65,7 +76,7 @@ export async function syncDeploymentConfigsFromEnv(executor: Executor): Promise<
     ) as unknown as [Array<RowDataPacket & { config_value: string }>, unknown];
 
     const currentValue = String(rows[0]?.config_value || '');
-    if (currentValue.trim().replace(/\/+$/, '') === env.value || !shouldUpdateCurrentValue(currentValue)) {
+    if (currentValue.trim().replace(/\/+$/, '') === env.value || !shouldUpdateCurrentValue(mapping.configKey, currentValue)) {
       results.push({ configKey: mapping.configKey, envKey: env.key, updated: false });
       continue;
     }

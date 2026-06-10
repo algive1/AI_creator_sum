@@ -32,8 +32,9 @@ const requiredColumns: Record<string, string[]> = {
     'video_duration', 'video_ratio', 'processing_lock_until', 'failed_at', 'canceled_at',
   ],
   files: ['metadata_sanitized', 'ai_implicit_label_kept', 'platform_watermark_removed'],
+  point_accounts: ['total_refunded'],
   signin_records: ['normal_signed_at', 'super_signed_at', 'super_streak_day', 'super_reward_points', 'normal_is_makeup'],
-  ad_reward_logs: ['expires_at', 'claimed_at'],
+  ad_reward_logs: ['ad_scene', 'expires_at', 'claimed_at'],
   templates: [
     'title', 'template_type', 'target_feature', 'source', 'prompt', 'params_json', 'ratio', 'style',
     'tags_json', 'is_enabled', 'visibility', 'status', 'review_status', 'usage_count', 'favorite_count',
@@ -103,6 +104,7 @@ async function main() {
     if (!memberRightIndexRows.length) throw new Error('member_plan_rights 缺少索引: uk_plan_right');
 
     const requiredIndexes: Array<[string, string]> = [
+      ['ad_reward_logs', 'idx_ad_reward_scene_user_date'],
       ['member_plan_rights', 'idx_icon_file'],
       ['member_benefit_icons', 'uk_icon_key'],
       ['member_benefit_icons', 'idx_status_sort'],

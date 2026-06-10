@@ -1,6 +1,6 @@
 <template>
   <view class="page profile-page">
-    <AppTopbar class="app-nav-root" title="我的" back />
+    <AppTopbar class="app-nav-root" title="我的" back transparent />
 
     <view class="page-content">
       <view v-if="!loggedIn" class="login-card">
@@ -17,95 +17,88 @@
         <button class="login-action" @tap="startLoginOnly">立即登录</button>
       </view>
 
-      <view v-else class="profile-member-card">
-        <view class="profile-card-top">
-          <image class="user-avatar" :src="defaultAvatar" mode="aspectFit" />
+      <view v-else>
+        <view class="profile-hero-head">
+          <view class="hero-avatar-wrap">
+            <image class="hero-avatar" :src="defaultAvatar" mode="aspectFit" />
+          </view>
           <view class="profile-user">
             <view class="name-line">
-              <text class="user-name">创作者账户</text>
+              <text class="user-name">{{ displayName }}</text>
+              <text v-if="membershipEnabled" class="vip-badge">{{ memberPackageBadge }}</text>
+              <text v-if="membershipEnabled" class="role-badge">{{ profileRoleBadge }}</text>
             </view>
-            <view class="user-id-row">
+            <view class="user-id-row hero-id-row">
               <text>ID：{{ userId }}</text>
               <button class="copy-id" @tap="copyUserId">复制</button>
             </view>
-            <view class="member-pill" :class="memberView.theme" @tap="openMemberInfo">
+            <view class="user-slogan">创意无限，灵感无限</view>
+          </view>
+          <view class="profile-side">
+            <view class="profile-icons">
+              <view class="top-icon" :class="{ unread: hasUnreadAnnouncements }" @tap="openAnnouncements">
+                <image class="top-icon-svg" src="/static/icons/icon_message.svg" mode="aspectFit" />
+              </view>
+              <view class="top-icon" @tap="openMenu('agreement')">
+                <image class="top-icon-svg" src="/static/icons/menu_agreement.svg" mode="aspectFit" />
+              </view>
+            </view>
+            <view v-if="membershipEnabled" class="member-pill hero-member-pill" :class="memberView.theme" @tap="openMemberInfo">
               <image :src="memberView.icon" mode="aspectFit" />
               <text>{{ memberView.badgeText }}</text>
-              <image class="pill-arrow" src="/static/icons/menu_arrow.svg" mode="aspectFit" />
             </view>
           </view>
-          <view class="profile-card-actions">
-            <view class="top-icon" :class="{ unread: hasUnreadAnnouncements }" @tap="openAnnouncements">
-              <image class="top-icon-svg" src="/static/icons/icon_message.svg" mode="aspectFit" />
-            </view>
-            <image class="member-crown-icon" :src="memberView.icon" mode="aspectFit" />
-          </view>
         </view>
-        <view class="member-valid-card" :class="{ inactive: !hasActiveMembership }">
-          <view>
-            <view class="valid-label">{{ hasActiveMembership ? '会员有效期' : '会员套餐' }}</view>
-            <view class="valid-date">{{ hasActiveMembership ? memberView.expireText : '解锁全部特权' }}</view>
-            <view v-if="hasActiveMembership" class="valid-start">开通时间：{{ memberView.startedText || '-' }}</view>
-            <view v-else class="valid-start">高清生成、极速通道、专属模型</view>
-          </view>
-          <view v-if="hasActiveMembership && memberView.remainingText" class="days-pill">{{ memberView.remainingText }}</view>
-          <button class="renew-btn" @tap="openMemberStatusAction">{{ hasActiveMembership ? '会员详情' : '立即开通' }}</button>
-        </view>
-      </view>
 
-      <view class="membership-offer-card" :class="{ active: hasActiveMembership }" @tap="openMemberOffer">
-        <image v-if="profileMemberOfferBannerSource" class="membership-offer-image" :src="profileMemberOfferBannerSource" mode="aspectFill" @error="onProfileMemberOfferBannerError" />
-        <view class="membership-crown-wrap">
-          <image class="membership-crown" :src="memberPackageIcon" mode="aspectFit" />
-          <view class="membership-pro-badge">{{ memberPackageBadge }}</view>
-        </view>
-        <view class="membership-offer-copy">
-          <view class="membership-title-line">
-            <view class="membership-offer-title">{{ memberPackageTitle }}</view>
-            <view class="membership-offer-tag">{{ memberPackageTag }}</view>
-          </view>
-          <view class="membership-offer-sub">{{ memberPackageSub }}</view>
-        </view>
-        <view class="membership-status-panel">
-          <view class="membership-status-label">{{ memberPackageStatusLabel }}</view>
-          <view class="membership-status-value">
-            <text class="status-number">{{ memberPackageMetric }}</text>
-            <text v-if="memberPackageMetricUnit" class="status-unit">{{ memberPackageMetricUnit }}</text>
-          </view>
-          <view class="membership-status-date">{{ memberPackageStatusSub }}</view>
-          <button class="membership-offer-action" @tap.stop="openMemberOffer">
-            <text>{{ memberPackageAction }}</text>
-          </button>
-        </view>
-        <view class="membership-benefit-row">
-          <view v-for="item in membershipOfferBenefits" :key="item.label" class="membership-benefit">
-            <view class="membership-benefit-icon">
-              <image v-if="item.icon" :src="item.icon" mode="aspectFit" />
-              <text v-else>{{ item.text }}</text>
+        <view v-if="membershipEnabled" class="member-banner" :class="{ inactive: !hasActiveMembership }" @tap="openMemberOffer">
+          <image v-if="profileMemberOfferBannerSource" class="member-banner-image" :src="profileMemberOfferBannerSource" mode="aspectFill" @error="onProfileMemberOfferBannerError" />
+          <view class="member-banner-copy">
+            <view class="member-title">{{ memberPackageTitle }}</view>
+            <view class="member-date">{{ memberPackageSub }}</view>
+            <view class="member-tags">
+              <text>{{ memberPackageStatusLabel }}</text>
+              <text>{{ memberPackageStatusSub }}</text>
             </view>
+          </view>
+          <view class="gift-crown">
+            <view class="crown">
+              <view class="crown-point one"></view>
+              <view class="crown-point two"></view>
+              <view class="crown-point three"></view>
+            </view>
+            <view class="gift-box"></view>
+          </view>
+        </view>
+
+        <view class="stats-card">
+          <view v-for="item in profileStats" :key="item.label" class="stat-item">
+            <view class="stat-value">{{ item.value }}</view>
+            <view class="stat-label">{{ item.label }}</view>
           </view>
         </view>
       </view>
 
-      <view class="section-row">
-        <view class="section-title-soft">我的工作台</view>
+      <view class="section-row creation-section-row">
+        <view class="section-title-soft">我的创作台</view>
+        <button class="section-link creation-all-link" @tap="openAllCreations">
+          <text>全部</text>
+          <image src="/static/icons/menu_arrow.svg" mode="aspectFit" />
+        </button>
       </view>
       <view class="creation-panel">
         <view class="creation-grid">
           <view
-            v-for="item in profileCreationActions"
+            v-for="item in visibleCreationActions"
             :key="item.id"
             class="creation-entry"
+            :class="`creation-entry-${item.id}`"
             @tap="openCreation(item.id)"
           >
             <view class="creation-entry-icon">
+              <view class="creation-icon-glow"></view>
               <image class="creation-entry-svg" :src="creationIconOf(item.id)" mode="aspectFit" />
             </view>
-            <view class="creation-copy">
-              <view class="creation-title">{{ item.title }}</view>
-              <view class="creation-sub">{{ item.sub }}</view>
-            </view>
-            <view class="creation-arrow"></view>
+            <view class="creation-title">{{ creationTitleOf(item) }}</view>
           </view>
         </view>
       </view>
@@ -178,7 +171,20 @@
         </button>
       </view>
 
-      <button v-if="loggedIn" class="logout" @tap="logout">退出登录</button>
+      <view v-if="loggedIn" class="phone-card">
+        <view class="phone-copy">
+          <view class="phone-title">手机验证</view>
+          <view class="phone-sub">{{ phoneBound ? phoneText : '绑定后可用于账号安全校验' }}</view>
+        </view>
+        <button
+          class="phone-bind-btn"
+          open-type="getPhoneNumber"
+          :loading="phoneBinding"
+          @getphonenumber="handleGetPhoneNumber"
+        >
+          {{ phoneBound ? '更新手机号' : '绑定手机号' }}
+        </button>
+      </view>
     </view>
     <view v-if="showLoginDialog" class="auth-mask" @tap="closeLoginDialog">
       <view class="auth-dialog" @tap.stop>
@@ -217,17 +223,29 @@ const loggedIn = computed(() => auth.isLoggedIn);
 const customerService = computed(() => config.customerService);
 const defaultAvatar = '/static/visuals/avatar/default_avatar_3d.png';
 const memberView = computed(() => getMemberView(userStore.membership));
-const rawUserId = computed(() => userStore.user?.id || auth.user?.id || '');
-const userId = computed(() => String(rawUserId.value || 'AI-000001'));
+const membershipEnabled = computed(() => config.publicConfig?.membershipEnabled !== false);
+const storyboardGenerateEnabled = computed(() => config.features.storyboardGenerate !== false);
+const rawUserId = computed(() => userStore.user?.displayId || auth.user?.displayId || userStore.user?.id || auth.user?.id || '');
+const userId = computed(() => formatUserDisplayId(rawUserId.value));
+const displayName = computed(() => String(userStore.user?.nickname || auth.user?.nickname || '创意小助手'));
+const visibleCreationActions = computed(() => profileCreationActions.filter((item) => item.id !== 'manga' || storyboardGenerateEnabled.value));
 const visibleMenuItems = computed(() => profileMenuItems.filter((item) => item.id !== 'service' || customerService.value.showInProfile !== false));
-const memberPackageIcon = '/static/visuals/member/member_crown_3d.png';
-const membershipOfferBenefits = [
-  { label: '高清生成', icon: '/static/icons/benefit_hd_quality.svg', text: '' },
-  { label: '极速通道', icon: '/static/icons/benefit_priority.svg', text: '' },
-  { label: '专属模型', icon: '/static/icons/benefit_materials.svg', text: '' },
-  { label: '更多', icon: '', text: '···' },
-];
-const hasActiveMembership = computed(() => loggedIn.value && memberView.value.isMember);
+const hasActiveMembership = computed(() => membershipEnabled.value && loggedIn.value && memberView.value.isMember);
+const profileRoleBadge = computed(() => {
+  if (!hasActiveMembership.value) return '专业版';
+  if (memberView.value.kind === 'standard') return '标准版';
+  return '专业版';
+});
+const profileAssets = computed(() => {
+  const value = userStore.profile?.assets;
+  return value && typeof value === 'object' ? value as Record<string, unknown> : {};
+});
+const profileStats = computed(() => [
+  { label: '积分', value: formatStatNumber(userStore.pointBalance) },
+  { label: '创作次数', value: formatStatNumber(readNumeric(profileAssets.value, ['totalCreations', 'total_creations'], taskStore.list.length)) },
+  { label: '收藏', value: formatStatNumber(readNumeric(profileAssets.value, ['totalFavorites', 'total_favorites'], 0)) },
+  { label: '优惠券', value: formatStatNumber(readNumeric(profileAssets.value, ['couponsCount', 'coupons_count'], 0)) },
+]);
 const memberRemainingDays = computed(() => {
   if (!hasActiveMembership.value) return -1;
   const membership = userStore.membership || {};
@@ -270,6 +288,8 @@ const memberPackageStatusSub = computed(() => {
   return memberView.value.expireText && memberView.value.expireText !== '未设置' ? `${memberView.value.expireText} 到期` : '有效期未设置';
 });
 const memberPackageAction = computed(() => hasActiveMembership.value ? '查看套餐' : '立即开通');
+const phoneBound = computed(() => Boolean(userStore.user?.phoneBound || userStore.user?.phone));
+const phoneText = computed(() => String(userStore.user?.phone || '已绑定手机号'));
 const profileMemberOfferBannerFailed = ref(false);
 const visualAssets = computed(() => {
   const value = config.publicConfig?.visualAssets;
@@ -282,6 +302,7 @@ const profileMemberOfferBannerSource = computed(() => {
 const hasUnreadAnnouncements = ref(false);
 const showLoginDialog = ref(false);
 const loginLoading = ref(false);
+const phoneBinding = ref(false);
 const pendingAction = ref<(() => void) | null>(null);
 const pendingServiceContact = ref(false);
 const creationIcons: Record<string, string> = {
@@ -298,6 +319,7 @@ const menuIcons: Record<string, string> = {
 };
 
 onShow(() => {
+  config.hydrate();
   config.loadPublicConfig().catch(() => undefined);
   if (auth.isLoggedIn) {
     userStore.loadFullProfile().catch(() => undefined);
@@ -326,6 +348,10 @@ function openCreationAfterLogin(id: string) {
     return;
   }
   if (id === 'manga') {
+    if (!storyboardGenerateEnabled.value) {
+      uni.showToast({ title: 'AI漫剧功能已关闭', icon: 'none' });
+      return;
+    }
     uni.reLaunch({ url: PAGE_ROUTES.comic });
     return;
   }
@@ -334,6 +360,16 @@ function openCreationAfterLogin(id: string) {
     return;
   }
   showSoon();
+}
+
+function openAllCreations() {
+  uni.reLaunch({ url: PAGE_ROUTES.history });
+}
+
+function creationTitleOf(item: { id: string; title: string }) {
+  if (item.id === 'video') return 'AI生视频';
+  if (item.id === 'pointsDetail') return '积分明细';
+  return item.title;
 }
 
 function openMenu(id: string) {
@@ -375,14 +411,40 @@ function openQuickTask(id: string) {
 }
 
 function openAnnouncements() { uni.navigateTo({ url: PAGE_ROUTES.announcements }); }
-function openMemberInfo() { requireLogin(() => uni.navigateTo({ url: PAGE_ROUTES.memberInfo })); }
-function openMemberOffer() { uni.navigateTo({ url: PAGE_ROUTES.member }); }
-function openMemberStatusAction() { requireLogin(() => uni.navigateTo({ url: hasActiveMembership.value ? PAGE_ROUTES.memberInfo : PAGE_ROUTES.member })); }
+function ensureMembershipEnabled() {
+  if (membershipEnabled.value) return true;
+  uni.showToast({ title: '会员功能已关闭', icon: 'none' });
+  return false;
+}
+function openMemberInfo() {
+  if (!ensureMembershipEnabled()) return;
+  requireLogin(() => uni.navigateTo({ url: PAGE_ROUTES.memberInfo }));
+}
+function openMemberOffer() {
+  if (!ensureMembershipEnabled()) return;
+  uni.navigateTo({ url: PAGE_ROUTES.member });
+}
+function openMemberStatusAction() {
+  if (!ensureMembershipEnabled()) return;
+  requireLogin(() => uni.navigateTo({ url: hasActiveMembership.value ? PAGE_ROUTES.memberInfo : PAGE_ROUTES.member }));
+}
 function onProfileMemberOfferBannerError() { profileMemberOfferBannerFailed.value = true; }
 function startLoginOnly() { requireLogin(() => undefined); }
 function creationIconOf(id: string) { return creationIcons[id] || creationIcons.pointsDetail; }
 function menuIconOf(id: string) { return menuIcons[id] || menuIcons.tasks; }
 function showSoon() { uni.showToast({ title: '功能即将开放', icon: 'none' }); }
+function readNumeric(source: Record<string, unknown>, keys: string[], fallback: number) {
+  for (const key of keys) {
+    const value = Number(source[key]);
+    if (Number.isFinite(value)) return value;
+  }
+  return fallback;
+}
+function formatStatNumber(value: unknown) {
+  const number = Math.max(0, Math.floor(Number(value) || 0));
+  if (number >= 10000) return `${(number / 10000).toFixed(number >= 100000 ? 0 : 1)}万`;
+  return String(number);
+}
 function loadUnreadAnnouncements() {
   getAnnouncements<{ list?: Array<Record<string, unknown>> }>({ page: 1, pageSize: 50 })
     .then((res) => {
@@ -391,13 +453,6 @@ function loadUnreadAnnouncements() {
     })
     .catch(() => { hasUnreadAnnouncements.value = false; });
 }
-function logout() {
-  auth.logout();
-  userStore.clear();
-  hasUnreadAnnouncements.value = false;
-  uni.showToast({ title: '已退出登录', icon: 'none' });
-}
-
 function requireLogin(action: () => void) {
   if (loggedIn.value) {
     action();
@@ -422,8 +477,8 @@ async function confirmWechatLogin() {
     await userStore.loadFullProfile();
     showLoginDialog.value = false;
     continuePendingAction();
-  } catch {
-    uni.showToast({ title: '微信登录失败，请稍后重试', icon: 'none' });
+  } catch (error) {
+    uni.showToast({ title: loginErrorText(error), icon: 'none' });
   } finally {
     loginLoading.value = false;
   }
@@ -442,6 +497,43 @@ function continuePendingAction() {
 
 function copyUserId() {
   uni.setClipboardData({ data: userId.value });
+}
+
+function formatUserDisplayId(value: unknown) {
+  const text = String(value || '').trim();
+  if (!text) return '00000001';
+  if (/^\d{8}$/.test(text)) return text;
+  if (/^\d+$/.test(text)) {
+    const id = Number.parseInt(text, 10);
+    if (Number.isFinite(id)) {
+      const mixed = (id * 73856093 + 19349663) % 100000000;
+      return String(mixed).padStart(8, '0');
+    }
+  }
+  return text;
+}
+
+async function handleGetPhoneNumber(event: any) {
+  if (phoneBinding.value) return;
+  const code = String(event?.detail?.code || '').trim();
+  if (!code) {
+    uni.showToast({ title: '未获得手机号授权', icon: 'none' });
+    return;
+  }
+  phoneBinding.value = true;
+  try {
+    await userStore.bindPhoneByCode(code);
+    uni.showToast({ title: '手机号已绑定', icon: 'none' });
+  } catch (error) {
+    uni.showToast({ title: loginErrorText(error) || '绑定手机号失败', icon: 'none' });
+  } finally {
+    phoneBinding.value = false;
+  }
+}
+
+function loginErrorText(error: unknown) {
+  const message = error instanceof Error ? error.message.trim() : '';
+  return message ? message.slice(0, 60) : '微信登录失败，请稍后重试';
 }
 </script>
 
@@ -499,12 +591,12 @@ function copyUserId() {
   position: relative;
   overflow: hidden;
   display: grid;
-  grid-template-columns: 148rpx minmax(0, 1fr) 132rpx;
+  grid-template-columns: 142rpx minmax(0, 1fr) 120rpx;
   align-items: center;
-  gap: 16rpx;
-  min-height: 214rpx;
+  gap: 18rpx;
+  min-height: 218rpx;
   margin-bottom: 22rpx;
-  padding: 28rpx 32rpx 30rpx;
+  padding: 28rpx 28rpx 30rpx;
   box-sizing: border-box;
   border: 2rpx solid rgba(255, 255, 255, 0.82);
   border-radius: 36rpx;
@@ -514,6 +606,33 @@ function copyUserId() {
     linear-gradient(135deg, rgba(255, 255, 255, 0.88), rgba(232, 240, 255, 0.72));
   box-shadow: 0 24rpx 56rpx rgba(122, 92, 255, 0.14);
   backdrop-filter: blur(18rpx);
+}
+
+.hero-avatar-wrap {
+  position: relative;
+  z-index: 1;
+  width: 142rpx;
+  height: 154rpx;
+}
+
+.hero-avatar-wrap::before {
+  position: absolute;
+  right: 8rpx;
+  bottom: 4rpx;
+  left: 8rpx;
+  height: 28rpx;
+  border-radius: 50%;
+  background: rgba(122, 92, 255, 0.18);
+  content: "";
+  filter: blur(8rpx);
+}
+
+.hero-avatar {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 142rpx;
+  height: 154rpx;
 }
 
 .profile-hero-head::before {
@@ -684,7 +803,7 @@ function copyUserId() {
   z-index: 2;
   display: flex;
   align-self: stretch;
-  align-items: center;
+  align-items: flex-end;
   justify-content: space-between;
   flex-direction: column;
   min-width: 0;
@@ -713,6 +832,12 @@ function copyUserId() {
   justify-content: flex-end;
   gap: 14rpx;
   width: 100%;
+}
+
+.hero-member-pill {
+  max-width: 118rpx;
+  margin-top: 18rpx;
+  padding-right: 10rpx;
 }
 
 .top-icon {
@@ -764,6 +889,28 @@ function copyUserId() {
   backdrop-filter: blur(18rpx);
 }
 
+.member-banner.inactive {
+  background:
+    radial-gradient(circle at 78% 46%, rgba(255, 203, 87, 0.25), transparent 26%),
+    linear-gradient(135deg, #6b58f0 0%, #7a5cff 56%, #ff7acb 100%);
+}
+
+.member-banner-image {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0.18;
+}
+
+.member-banner-copy {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  max-width: 440rpx;
+}
+
 .member-title {
   font-size: 34rpx;
   font-weight: 900;
@@ -798,6 +945,7 @@ function copyUserId() {
 
 .gift-crown {
   position: relative;
+  z-index: 1;
   width: 170rpx;
   height: 130rpx;
 }
@@ -907,18 +1055,39 @@ function copyUserId() {
   font-weight: 800;
 }
 
+.creation-section-row {
+  margin-top: 4rpx;
+  margin-bottom: 14rpx;
+}
+
+.creation-all-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6rpx;
+  height: 44rpx;
+  padding: 0 2rpx 0 16rpx;
+  color: #8b91aa;
+  font-size: 22rpx;
+  font-weight: 800;
+  line-height: 44rpx;
+}
+
+.creation-all-link image {
+  width: 20rpx;
+  height: 20rpx;
+  opacity: 0.68;
+}
+
 .creation-panel {
   position: relative;
-  overflow: hidden;
-  margin-bottom: 30rpx;
-  padding: 18rpx 14rpx 16rpx;
-  border: 1rpx solid rgba(255, 255, 255, 0.86);
-  border-radius: 30rpx;
-  background:
-    radial-gradient(circle at 18% 0%, rgba(123, 92, 255, 0.12), transparent 30%),
-    radial-gradient(circle at 88% 8%, rgba(255, 92, 184, 0.1), transparent 28%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 246, 255, 0.9));
-  box-shadow: 0 12rpx 22rpx rgba(122, 92, 255, 0.1);
+  margin-bottom: 32rpx;
+  padding: 18rpx 16rpx;
+  border: 2rpx solid rgba(122, 92, 255, 0.06);
+  border-radius: 28rpx;
+  background: rgba(248, 250, 255, 0.84);
+  box-shadow: 0 18rpx 42rpx rgba(91, 105, 160, 0.12);
+  backdrop-filter: blur(16rpx);
 }
 
 .creation-grid {
@@ -926,110 +1095,112 @@ function copyUserId() {
   z-index: 1;
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10rpx;
+  gap: 14rpx;
 }
 
 .creation-entry {
   position: relative;
-  min-height: 214rpx;
-  padding: 12rpx 8rpx 42rpx;
   overflow: hidden;
-  border: 1rpx solid rgba(207, 199, 255, 0.72);
-  border-radius: 22rpx;
-  background:
-    radial-gradient(circle at 72% 8%, rgba(255, 92, 184, 0.1), transparent 32%),
-    linear-gradient(180deg, #ffffff 0%, #fbf9ff 100%);
-  box-shadow: 0 8rpx 12rpx rgba(122, 92, 255, 0.07);
   min-width: 0;
+  min-height: 166rpx;
+  padding: 18rpx 8rpx 16rpx;
+  border: 2rpx solid rgba(122, 92, 255, 0.1);
+  border-radius: 24rpx;
+  background:
+    radial-gradient(circle at 70% 12%, rgba(255, 255, 255, 0.95), transparent 34%),
+    linear-gradient(180deg, #f9f8ff 0%, #eef4ff 100%);
   color: #1f2437;
   text-align: center;
+  box-shadow: 0 12rpx 26rpx rgba(88, 97, 142, 0.11);
   transform: translateZ(0);
-  transition: transform 180ms ease-out, border-color 180ms ease-out, background 180ms ease-out;
+  transition: transform 180ms ease-out, box-shadow 180ms ease-out, border-color 180ms ease-out;
 }
 
 .creation-entry::before {
   position: absolute;
-  top: -44rpx;
-  right: -48rpx;
-  width: 110rpx;
-  height: 110rpx;
-  border-radius: 999rpx;
-  background: rgba(123, 92, 255, 0.08);
+  top: 16rpx;
+  left: 50%;
+  width: 94rpx;
+  height: 94rpx;
+  border-radius: 30rpx;
+  background: linear-gradient(145deg, rgba(244, 239, 255, 0.78), rgba(235, 245, 255, 0.56));
+  box-shadow: 0 12rpx 24rpx rgba(118, 92, 255, 0.1);
   content: '';
+  transform: translateX(-50%);
 }
 
 .creation-entry:active {
-  border-color: rgba(123, 92, 255, 0.36);
-  background:
-    radial-gradient(circle at 72% 8%, rgba(255, 92, 184, 0.14), transparent 32%),
-    linear-gradient(180deg, #ffffff 0%, #f6f1ff 100%);
-  transform: translateY(3rpx) scale(0.986);
+  border-color: rgba(122, 92, 255, 0.18);
+  box-shadow: 0 8rpx 18rpx rgba(116, 125, 170, 0.14);
+  transform: translateY(3rpx) scale(0.98);
 }
 
 .creation-entry-icon {
   position: relative;
   z-index: 1;
-  width: 98rpx;
-  height: 98rpx;
-  margin: 0 auto 8rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 102rpx;
+  height: 102rpx;
+  margin: 0 auto 12rpx;
+}
+
+.creation-icon-glow {
+  position: absolute;
+  inset: 8rpx;
+  border-radius: 28rpx;
+  background:
+    radial-gradient(circle at 32% 22%, rgba(255, 255, 255, 0.46), transparent 28%),
+    linear-gradient(135deg, rgba(122, 92, 255, 0.16), rgba(255, 122, 203, 0.13));
 }
 
 .creation-entry-svg {
-  display: block;
-  width: 98rpx;
-  height: 98rpx;
-}
-
-.creation-copy {
   position: relative;
   z-index: 1;
-  min-width: 0;
+  display: block;
+  width: 86rpx;
+  height: 86rpx;
 }
 
 .creation-title {
+  position: relative;
+  z-index: 1;
   overflow: hidden;
   color: #1f2437;
-  font-size: 24rpx;
+  font-size: 22rpx;
   font-weight: 900;
   line-height: 1.22;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.creation-sub {
-  display: -webkit-box;
-  overflow: hidden;
-  margin-top: 6rpx;
-  color: #7d839d;
-  font-size: 18rpx;
-  font-weight: 700;
-  line-height: 1.25;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+.creation-entry-image {
+  border-color: rgba(126, 92, 255, 0.13);
+  background:
+    radial-gradient(circle at 74% 14%, rgba(255, 255, 255, 0.58), transparent 34%),
+    linear-gradient(180deg, #f3edff 0%, #f8fbff 100%);
 }
 
-.creation-arrow {
-  position: absolute;
-  right: 50%;
-  bottom: 10rpx;
-  z-index: 1;
-  width: 32rpx;
-  height: 32rpx;
-  border-radius: 999rpx;
-  background: linear-gradient(135deg, rgba(123, 92, 255, 0.18), rgba(255, 92, 184, 0.16));
-  transform: translateX(50%);
+.creation-entry-video {
+  border-color: rgba(72, 169, 255, 0.13);
+  background:
+    radial-gradient(circle at 74% 14%, rgba(255, 255, 255, 0.58), transparent 34%),
+    linear-gradient(180deg, #ecf8ff 0%, #f8fbff 100%);
 }
 
-.creation-arrow::after {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 9rpx;
-  height: 9rpx;
-  border-top: 3rpx solid #7b5cff;
-  border-right: 3rpx solid #7b5cff;
-  content: '';
-  transform: translate(-62%, -50%) rotate(45deg);
+.creation-entry-manga {
+  border-color: rgba(255, 122, 203, 0.14);
+  background:
+    radial-gradient(circle at 74% 14%, rgba(255, 255, 255, 0.58), transparent 34%),
+    linear-gradient(180deg, #fff0fa 0%, #fbf7ff 100%);
+}
+
+.creation-entry-pointsDetail {
+  border-color: rgba(255, 177, 65, 0.18);
+  background:
+    radial-gradient(circle at 74% 14%, rgba(255, 255, 255, 0.58), transparent 34%),
+    linear-gradient(180deg, #fff6df 0%, #f9fbff 100%);
 }
 
 .task-panel {
@@ -1246,14 +1417,49 @@ function copyUserId() {
   height: 28rpx;
 }
 
-.logout {
-  height: 82rpx;
+.phone-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20rpx;
+  min-height: 112rpx;
   margin-top: 26rpx;
-  border-radius: 22rpx;
-  background: rgba(232, 82, 103, 0.12);
-  color: #c43d50;
+  padding: 22rpx 24rpx;
+  border: 2rpx solid rgba(122, 92, 255, 0.12);
+  border-radius: 24rpx;
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: 0 14rpx 34rpx rgba(122, 92, 255, 0.1);
+  box-sizing: border-box;
+}
+
+.phone-copy {
+  min-width: 0;
+}
+
+.phone-title {
+  color: #252941;
   font-size: 27rpx;
   font-weight: 900;
+}
+
+.phone-sub {
+  margin-top: 8rpx;
+  color: #8b93aa;
+  font-size: 22rpx;
+  font-weight: 700;
+}
+
+.phone-bind-btn {
+  flex-shrink: 0;
+  min-width: 168rpx;
+  height: 64rpx;
+  padding: 0 22rpx;
+  border-radius: 32rpx;
+  background: linear-gradient(135deg, #6d5cff, #ff7acb);
+  color: #ffffff;
+  font-size: 24rpx;
+  font-weight: 900;
+  line-height: 64rpx;
 }
 
 .login-card {

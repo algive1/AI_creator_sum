@@ -5,7 +5,7 @@
       <view class="login-title">登录 AI创作工坊</view>
       <view class="login-desc">同步积分、会员、历史作品和生成任务</view>
       <button class="primary-btn" @tap="wechatLogin">微信一键登录</button>
-      <button class="ghost-btn dev-btn" @tap="devLoginAction">开发环境登录</button>
+      <button v-if="showDevLogin" class="ghost-btn dev-btn" @tap="devLoginAction">开发环境登录</button>
       <button class="link-btn" @tap="goAgreement">查看用户协议和隐私政策</button>
     </view>
   </view>
@@ -16,29 +16,33 @@ import { ref } from 'vue';
 import { onLoad } from '@dcloudio/uni-app';
 import { useAuthStore } from '@/stores/auth';
 import { PAGE_ROUTES } from '@/utils/constants';
+import { isDevFallbackEnabled } from '@/utils/dev-fallback';
 
 const auth = useAuthStore();
 const redirect = ref<string>(PAGE_ROUTES.home);
+const inviteCode = ref('');
+const showDevLogin = isDevFallbackEnabled;
 
 onLoad((query) => {
   redirect.value = query?.redirect ? decodeURIComponent(String(query.redirect)) : PAGE_ROUTES.home;
+  inviteCode.value = resolveInviteCode(query);
 });
 
 async function wechatLogin() {
   try {
-    await auth.loginWithWechat();
+    await auth.loginWithWechat(inviteCode.value || undefined);
     finish();
-  } catch {
-    uni.showToast({ title: '微信登录失败，可尝试开发环境登录', icon: 'none' });
+  } catch (error) {
+    uni.showToast({ title: loginErrorText(error), icon: 'none' });
   }
 }
 
 async function devLoginAction() {
   try {
-    await auth.loginWithDev();
+    await auth.loginWithDev(inviteCode.value || undefined);
     finish();
-  } catch {
-    uni.showToast({ title: '开发登录未启用，请检查后端配置', icon: 'none' });
+  } catch (error) {
+    uni.showToast({ title: loginErrorText(error, '开发登录未启用，请检查后端配置'), icon: 'none' });
   }
 }
 
@@ -48,6 +52,22 @@ function finish() {
 
 function goAgreement() {
   uni.navigateTo({ url: PAGE_ROUTES.agreement });
+}
+
+function loginErrorText(error: unknown, fallback?: string) {
+  const message = error instanceof Error ? error.message.trim() : '';
+  if (message) return message.slice(0, 60);
+  return fallback || (showDevLogin ? '微信登录失败，可尝试开发环境登录' : '微信登录失败，请稍后重试');
+}
+
+function resolveInviteCode(query?: Record<string, unknown>) {
+  const direct = String(query?.inviteCode || query?.invite_code || '').trim();
+  if (direct) return direct;
+  const scene = String(query?.scene || '').trim();
+  if (!scene) return '';
+  const decoded = decodeURIComponent(scene);
+  const matched = decoded.match(/(?:^|[?&])inviteCode=([^&]+)/i);
+  return matched ? decodeURIComponent(matched[1]) : decoded;
 }
 </script>
 

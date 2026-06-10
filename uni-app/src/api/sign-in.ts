@@ -8,8 +8,12 @@ export function normalSignIn<T = Record<string, unknown>>() {
   return post<T>('/checkin/normal', undefined, { loading: '签到中' });
 }
 
-export function superSignIn<T = Record<string, unknown>>() {
-  return post<T>('/checkin/super', undefined, { loading: '签到中' });
+export function createSuperSignInAdSession<T = Record<string, unknown>>() {
+  return post<T>('/checkin/super/session', undefined, { loading: '准备广告' });
+}
+
+export function superSignIn<T = Record<string, unknown>>(sessionId?: string) {
+  return post<T>('/checkin/super', sessionId ? { sessionId } : undefined, { loading: '签到中' });
 }
 
 export function makeupSignIn<T = Record<string, unknown>>(targetDate?: string) {

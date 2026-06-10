@@ -6,7 +6,7 @@ import { lockPointAccountTx, applyPointChangeTx } from './points.service';
 import { ErrorCodes } from '../types';
 
 const INVITE_SHARE_TITLE = '邀请你体验 AI 创作';
-const INVITE_SHARE_PATH = '/pages/index/index?inviteCode=';
+const INVITE_SHARE_PATH = '/pages/login/index?redirect=%2Fpages%2Fhome%2Findex&inviteCode=';
 const INVITE_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
 export type InviteRewardType = 'use' | 'member_purchase';

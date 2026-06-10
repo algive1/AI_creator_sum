@@ -8,6 +8,11 @@ import {
   QueryTaskConfig, QueryTaskResult, CancelTaskConfig,
   ParsedResult, CostInfo, applyStatusMapping,
 } from './adapter.interface';
+import {
+  applyGptImage2Params,
+  isGptImage2Model,
+  normalizeImageParams,
+} from './image-param-mapper';
 
 export class OpenAIAdapter implements IProviderAdapter {
   readonly providerType = 'openai';
@@ -20,17 +25,20 @@ export class OpenAIAdapter implements IProviderAdapter {
     const decryptedKey = decryptApiKey(apiKey);
     const url = baseUrl.replace(/\/$/, '') + '/images/generations';
 
-    const size = resolveOpenAISize(params.params.nativeSize, params.params.ratio);
-    const quality = params.params.quality === '超清' || params.params.quality === 'hd' ? 'hd' : 'standard';
-
-    const resp = await axios.post(url, {
+    const body: Record<string, any> = {
       model: params.upstreamCode,
       prompt: params.prompt,
       n: params.params.imageCount || 3,
-      size,
-      quality,
       response_format: 'url',
-    }, {
+    };
+    if (isGptImage2Model(params.upstreamCode)) {
+      applyGptImage2Params(body, normalizeImageParams(params.params));
+    } else {
+      body.size = resolveOpenAISize(params.params.nativeSize, params.params.ratio);
+      body.quality = params.params.quality === '超清' || params.params.quality === 'hd' ? 'hd' : 'standard';
+    }
+
+    const resp = await axios.post(url, body, {
       headers: { Authorization: 'Bearer ' + decryptedKey, 'Content-Type': 'application/json' },
       timeout,
     });

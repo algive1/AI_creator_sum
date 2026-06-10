@@ -7,8 +7,15 @@ import { ErrorCodes } from '../types';
 import { optionalUserId } from '../utils/content-helpers';
 import { hasComplianceConfirmation } from './compliance';
 import { SettingsService } from '../services/settings.service';
+import { isActiveMember } from '../services/membership.service';
+import {
+  normalizeTemplateTargetFeatureKey,
+  parseTemplateJson,
+  resolveTemplateUsageType,
+} from '../services/template.service';
 
 const router = Router();
+const TEMPLATE_SAVE_USE_MEMBER_MESSAGE = '\u8be5\u6a21\u677f\u4e3a\u4f1a\u5458\u4e13\u5c5e\uff0c\u5f00\u901a\u4f1a\u5458\u540e\u53ef\u4fdd\u5b58\u7d20\u6750\u548c\u4f7f\u7528\u6a21\u677f\u3002';
 const TEMPLATE_MEMBER_MESSAGE = '该灵感模板为会员专享，开通会员后可使用。';
 
 router.get('/categories', async (_req: Request, res: Response) => {
@@ -23,6 +30,7 @@ router.get('/categories', async (_req: Request, res: Response) => {
         categoryId: row.id,
         name: row.name,
         categoryKey: row.category_key,
+        category: row.name,
         icon: row.icon,
       })),
     });
@@ -68,10 +76,13 @@ router.get('/inspirations', async (req: Request, res: Response) => {
   try {
     const userId = await optionalUserId(req);
     const rows = await query<any>(
-      `SELECT * FROM templates
-        WHERE deleted_at IS NULL AND is_enabled = 1 AND status = 'approved' AND review_status = 'approved'
-          AND template_type = 'inspiration' AND source = 'official'
-        ORDER BY is_hot DESC, is_recommended DESC, sort_order DESC, id DESC`,
+      `SELECT t.*, c.name AS category_name, c.category_key
+         FROM templates t
+         LEFT JOIN template_categories c ON c.id = t.category_id
+        WHERE t.deleted_at IS NULL AND t.is_enabled = 1 AND t.status = 'approved' AND t.review_status = 'approved'
+          AND t.source = 'official'
+          AND (t.template_type = 'inspiration' OR JSON_EXTRACT(t.display_config, '$.inspiration') IS NOT NULL)
+        ORDER BY ${displayPositionOrderBy('inspiration')}, is_hot DESC, is_recommended DESC, sort_order DESC, id DESC`,
     );
     const list = [];
     for (const row of rows) {
@@ -136,9 +147,13 @@ router.post('/:id(\\d+)/use', authMiddleware, async (req: Request, res: Response
       error(res, ErrorCodes.NOT_FOUND, '模板不存在', 404);
       return;
     }
+    if (!isOwner && await isImageTemplateUseMemberOnly(template, userId)) {
+      error(res, ErrorCodes.MEMBERSHIP_REQUIRED, '图片模板使用为会员专属功能，请开通会员后使用。', 403);
+      return;
+    }
     const permission = await checkMembershipPermission(userId, template);
-    if (!isOwner && (permission.canView === false || !permission.canUse)) {
-      error(res, ErrorCodes.MEMBERSHIP_REQUIRED, TEMPLATE_MEMBER_MESSAGE, 403);
+    if (permission.canView === false || !permission.canUse) {
+      error(res, ErrorCodes.MEMBERSHIP_REQUIRED, permission.lockReason || TEMPLATE_MEMBER_MESSAGE, 403);
       return;
     }
     await query('UPDATE templates SET usage_count = usage_count + 1, updated_at = NOW(3) WHERE id = ?', [templateId]);
@@ -162,6 +177,7 @@ router.post('/:id(\\d+)/use', authMiddleware, async (req: Request, res: Response
       requiredMemberPlanId: permission.requiredMemberPlanId,
       memberBadgeText: permission.memberBadgeText,
       canUse: permission.canUse,
+      canSave: permission.canSave,
       lockReason: permission.lockReason,
     });
   } catch {
@@ -238,6 +254,9 @@ router.post('/share', authMiddleware, async (req: Request, res: Response) => {
     const inputRow = await queryOne<any>('SELECT prompt, params, form_data FROM ai_task_inputs WHERE task_id = ?', [taskIdNum]);
     const taskParams = parseJson(inputRow?.params, {});
     const outputUrl = outputMeta.deliveryUrl || outputFile.cdn_url || outputFile.access_url || '';
+    const coverUrl = outputType === 'image'
+      ? outputUrl
+      : (outputMeta.thumbnailUrl || outputMeta.thumbnail || output.thumbnail_key || outputUrl);
     const paramsPayload = parseBodyJson(paramsJson, taskParams);
 
     const row = {
@@ -251,7 +270,7 @@ router.post('/share', authMiddleware, async (req: Request, res: Response) => {
       outputId: Number(output.id),
       coverFileId: outputType === 'image' ? outputFile.id : null,
       previewFileId: outputFile.id,
-      coverUrl: outputType === 'image' ? outputUrl : (output.thumbnail_key || ''),
+      coverUrl,
       previewUrl: outputUrl,
       prompt: inputRow?.prompt || output.prompt_used || '',
       negativePrompt: String(negativePrompt || inputRow?.negative_prompt || '').trim(),
@@ -374,19 +393,29 @@ router.get('/my-templates', authMiddleware, async (req: Request, res: Response) 
 
 async function toPublicTemplate(row: any, userId: number) {
   const permission = await checkMembershipPermission(userId, row);
+  const imageUseMemberOnly = await isImageTemplateUseMemberOnly(row, userId);
+  const canUse = permission.canUse && !imageUseMemberOnly;
+  const canSave = permission.canSave;
+  const lockReason = imageUseMemberOnly ? '图片模板使用为会员专属功能，请开通会员后使用。' : permission.lockReason;
   const paramsJson = parseJson(row.params_json, {});
   const tagsJson = parseJson(row.tags_json, []);
+  const displayConfig = parseTemplateJson<Record<string, any> | null>(row.display_config, null);
+  const targetFeature = normalizeTemplateTargetFeatureKey(row.target_feature);
+  const usageType = resolveTemplateUsageType(row.template_type, row.usage_type, targetFeature, displayConfig);
+  const coverUrl = await normalizeTemplateMediaUrl(row.cover_url);
+  const previewUrl = await normalizeTemplateMediaUrl(row.preview_url);
   return {
     id: row.id,
     title: row.title,
     name: row.title,
     description: row.description,
     templateType: row.template_type,
-    targetFeature: row.target_feature,
-    usageType: row.usage_type || 'generate',
+    targetFeature,
+    usageType,
+    displayConfig,
     source: row.source,
-    coverUrl: row.cover_url,
-    previewUrl: row.preview_url,
+    coverUrl,
+    previewUrl,
     prompt: row.prompt,
     promptTemplate: row.prompt,
     negativePrompt: row.negative_prompt,
@@ -400,6 +429,9 @@ async function toPublicTemplate(row: any, userId: number) {
     quality: (paramsJson as any).quality || (paramsJson as any).resolution || '',
     scene: row.scene,
     categoryId: row.category_id,
+    categoryName: row.category_name || '',
+    category: row.category_name || '',
+    categoryKey: row.category_key || '',
     tagsJson,
     tags: Array.isArray(tagsJson) ? tagsJson.join(',') : '',
     isRecommended: !!row.is_recommended,
@@ -410,8 +442,9 @@ async function toPublicTemplate(row: any, userId: number) {
     requiredMemberPlanId: permission.requiredMemberPlanId,
     memberBadgeText: permission.memberBadgeText,
     canView: permission.canView,
-    canUse: permission.canUse,
-    lockReason: permission.lockReason,
+    canUse,
+    canSave,
+    lockReason,
     reviewStatus: row.review_status,
     status: row.status,
     usageCount: row.usage_count,
@@ -422,12 +455,35 @@ async function toPublicTemplate(row: any, userId: number) {
   };
 }
 
+async function normalizeTemplateMediaUrl(url: string): Promise<string> {
+  const value = String(url || '').trim();
+  if (!value || /^https?:\/\//i.test(value) || !value.startsWith('/')) return value;
+
+  const apiDomain = String(process.env.APP_PUBLIC_URL || process.env.PUBLIC_API_DOMAIN || process.env.SITE_API_DOMAIN || '').trim().replace(/\/+$/, '')
+    || String(await SettingsService.getString('site.api_domain', '')).trim().replace(/\/+$/, '');
+  if (apiDomain) return `${apiDomain}${value}`;
+
+  if (value.startsWith('/static/')) {
+    const localBaseUrl = String(process.env.LOCAL_BASE_URL || '').trim().replace(/\/+$/, '')
+      || String(await SettingsService.getString('storage.local.base_url', '')).trim().replace(/\/+$/, '');
+    try {
+      const parsed = new URL(localBaseUrl);
+      return `${parsed.origin}${value}`;
+    } catch {
+      return value;
+    }
+  }
+
+  return value;
+}
+
 async function queryTemplates(userId: number, queryParams: any) {
   const { templateType, targetFeature, source, keyword, categoryId, page, pageSize, sortBy } = queryParams;
   const pg = Math.max(parseInt(page || '1', 10), 1);
   const ps = Math.min(Math.max(parseInt(pageSize || '20', 10), 1), 100);
   const offset = (pg - 1) * ps;
   const publicUserTemplatesEnabled = await SettingsService.getBoolean('template.user_public_enabled', false);
+  const normalizedTargetFeature = targetFeature ? normalizeTemplateTargetFeatureKey(targetFeature) : '';
 
   const where: string[] = [
     't.deleted_at IS NULL',
@@ -441,9 +497,10 @@ async function queryTemplates(userId: number, queryParams: any) {
     where.push('t.template_type = ?');
     params.push(templateType);
   }
-  if (targetFeature) {
-    where.push('t.target_feature = ?');
-    params.push(targetFeature);
+  if (normalizedTargetFeature) {
+    const aliases = targetFeatureLookupValues(normalizedTargetFeature);
+    where.push(`(t.target_feature IN (${aliases.map(() => '?').join(', ')}) OR JSON_EXTRACT(t.display_config, '${displayConfigJsonPath(normalizedTargetFeature)}') IS NOT NULL)`);
+    params.push(...aliases);
   }
   if (!publicUserTemplatesEnabled) {
     where.push("t.source = 'official'");
@@ -461,11 +518,14 @@ async function queryTemplates(userId: number, queryParams: any) {
     params.push(Number(categoryId));
   }
 
-  const orderBy = sortBy === 'hot'
+  const defaultOrderBy = sortBy === 'hot'
     ? 't.usage_count DESC, t.favorite_count DESC, t.sort_order DESC'
     : sortBy === 'new'
       ? 't.created_at DESC'
       : 't.is_recommended DESC, t.is_hot DESC, t.sort_order DESC, t.id DESC';
+  const orderBy = normalizedTargetFeature && sortBy !== 'hot' && sortBy !== 'new'
+    ? `${displayPositionOrderBy(normalizedTargetFeature)}, ${defaultOrderBy}`
+    : defaultOrderBy;
 
   const rows = await query<any>(
     `SELECT t.*
@@ -492,12 +552,25 @@ async function queryTemplates(userId: number, queryParams: any) {
   };
 }
 
+async function isImageTemplateUseMemberOnly(row: any, userId: number) {
+  void isImageLikeTemplate(row);
+  void userId;
+  return false;
+}
+
+function isImageLikeTemplate(row: any) {
+  const displayConfig = parseTemplateJson<Record<string, any> | null>(row.display_config, null);
+  const targetFeature = normalizeTemplateTargetFeatureKey(row.target_feature);
+  const usageType = resolveTemplateUsageType(row.template_type, row.usage_type, targetFeature, displayConfig);
+  const signature = [row.template_type, targetFeature, usageType].map((item) => String(item || '').toLowerCase()).join('|');
+  if (signature.includes('video')) return false;
+  return row.template_type === 'image' || row.template_type === 'inspiration' || signature.includes('image') || signature.includes('img');
+}
+
 async function checkMembershipPermission(userId: number, row: any) {
   const membershipEnabled = await SettingsService.getBoolean('membership.enabled', false);
-  const inspirationGateEnabled = await SettingsService.getBoolean('inspiration.member_gate_enabled', false);
-  const templateGateEnabled = await SettingsService.getBoolean('template.member_gate_enabled', false);
-  const isInspiration = row.template_type === 'inspiration' || row.target_feature === 'inspiration';
-  const gatingEnabled = membershipEnabled && (isInspiration ? inspirationGateEnabled : templateGateEnabled);
+  const templateSaveUseMemberOnly = membershipEnabled
+    && await SettingsService.getBoolean('membership.template_save_use_member_only', false);
   const accessLevel = row.access_level || 'free';
   const visibilityScope = row.visibility_scope || 'all';
   const usageScope = row.usage_scope || 'all';
@@ -505,26 +578,45 @@ async function checkMembershipPermission(userId: number, row: any) {
   const memberBadgeText = row.member_badge_text || '';
   let canView = true;
   let canUse = true;
+  let canSave = true;
   let lockReason = '';
 
-  if (gatingEnabled && (accessLevel === 'member' || visibilityScope === 'member' || usageScope === 'member')) {
-    const membership = await queryOne<any>(
-      'SELECT level_after FROM user_memberships WHERE user_id = ? AND status = ? AND expire_at > NOW(3) ORDER BY expire_at DESC LIMIT 1',
-      [userId, 'active'],
-    );
-    const isMember = !!membership && membership.level_after !== 'free';
+  if (templateSaveUseMemberOnly) {
+    const isMember = await isActiveMember(userId);
     if (!isMember) {
-      if (visibilityScope === 'member') canView = false;
-      if (accessLevel === 'member' || usageScope === 'member') canUse = false;
-      lockReason = TEMPLATE_MEMBER_MESSAGE;
+      canUse = false;
+      canSave = false;
+      lockReason = TEMPLATE_SAVE_USE_MEMBER_MESSAGE;
     }
   }
 
-  return { accessLevel, visibilityScope, usageScope, requiredMemberPlanId, memberBadgeText, canView, canUse, lockReason };
+  return { accessLevel, visibilityScope, usageScope, requiredMemberPlanId, memberBadgeText, canView, canUse, canSave, lockReason };
 }
 
 function isApprovedPublicTemplate(row: any) {
   return row.is_enabled !== 0 && row.visibility === 'public' && row.status === 'approved' && row.review_status === 'approved' && !row.deleted_at;
+}
+
+function targetFeatureLookupValues(value: string) {
+  const normalized = normalizeTemplateTargetFeatureKey(value);
+  const values = new Set<string>([normalized]);
+  if (normalized === 'text_to_image') values.add('image_create');
+  if (normalized === 'text_to_video') values.add('video_create');
+  if (normalized === 'image_edit') values.add('image_editing');
+  return Array.from(values).filter(Boolean);
+}
+
+function displayConfigJsonPath(feature: string) {
+  const key = String(feature || '').replace(/[^a-zA-Z0-9_]/g, '');
+  return key ? `$.${key}` : '$.__invalid__';
+}
+
+function displayPositionOrderBy(feature: string) {
+  const path = displayConfigJsonPath(feature);
+  return [
+    `JSON_UNQUOTE(JSON_EXTRACT(display_config, '${path}.pinned')) = 'true' DESC`,
+    `CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(display_config, '${path}.pinOrder')), '0') AS UNSIGNED) DESC`,
+  ].join(', ');
 }
 
 function toPositiveId(value: any) {

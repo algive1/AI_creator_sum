@@ -7,7 +7,7 @@
       </view>
 
       <view v-if="isHelpMode" class="card">
-        <view class="article">{{ helpContent }}</view>
+        <rich-text class="article" :nodes="helpContent" />
       </view>
       <view v-else-if="documents.length === 0" class="card empty-card">暂无可阅读协议</view>
       <view v-for="doc in isHelpMode ? [] : documents" :key="`${doc.docType}-${doc.version}`" class="card">
@@ -15,7 +15,7 @@
           <view class="section-title">{{ doc.title }}</view>
           <view class="doc-version">v{{ doc.version }}</view>
         </view>
-        <view class="article">{{ doc.content }}</view>
+        <rich-text class="article" :nodes="doc.content" />
       </view>
 
       <button v-if="!isHelpMode" class="primary-btn" :disabled="documents.length === 0" @tap="accept">我已阅读并同意</button>

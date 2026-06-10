@@ -139,7 +139,7 @@ router.post('/system/update-packages/precheck', adminAuthMiddleware, async (req:
 
 router.post('/system/update-packages/install', adminAuthMiddleware, async (req: Request, res: Response) => {
   if (req.user?.role !== 'super_admin') {
-    error(res, ErrorCodes.FORBIDDEN, 'Super admin only', 403);
+    error(res, ErrorCodes.FORBIDDEN, '仅超级管理员可执行系统更新', 403);
     return;
   }
 

@@ -1,6 +1,6 @@
 <template>
   <view class="screen inspiration-page">
-    <AppTopbar class="app-nav-root" title="发现灵感">
+    <AppTopbar class="app-nav-root" title="发现灵感" transparent>
       <template #left>
         <view class="nav-left-space"></view>
       </template>
@@ -25,17 +25,52 @@
       <image v-if="inspirationBannerSource" class="inspiration-hero-image" :src="inspirationBannerSource" mode="aspectFill" @error="onBannerError" />
     </view>
 
+    <view class="inspiration-search" @tap="openCategoryPanel">
+      <text class="inspiration-search-icon"></text>
+      <input
+        v-model="searchKeyword"
+        class="inspiration-search-input"
+        placeholder="搜索灵感模板"
+        placeholder-class="inspiration-search-placeholder"
+        confirm-type="search"
+        @focus="openCategoryPanel"
+      />
+      <button v-if="searchKeyword" class="inspiration-search-clear" hover-class="none" @tap.stop="clearSearch">×</button>
+    </view>
+
+    <view v-if="showCategoryPanel" class="category-panel">
+      <view class="category-panel-head">
+        <view>
+          <view class="category-panel-title">灵感模板分类</view>
+          <view class="category-panel-subtitle">{{ categoryOptions.length - 1 }} 个分类</view>
+        </view>
+        <button class="category-panel-close" hover-class="none" @tap="showCategoryPanel = false">收起</button>
+      </view>
+      <view class="category-grid">
+        <button
+          v-for="item in categoryOptions"
+          :key="item.key"
+          class="category-chip"
+          hover-class="none"
+          :class="{ active: activeTab === item.name }"
+          @tap="selectCategory(item.name)"
+        >
+          {{ item.name }}
+        </button>
+      </view>
+    </view>
+
     <view class="category-shell">
       <scroll-view scroll-x class="create-tabs">
         <view class="create-tab-row">
           <view
-            v-for="item in tabs"
-            :key="item"
+            v-for="item in categoryOptions"
+            :key="item.key"
             class="create-tab"
-            :class="{ active: activeTab === item }"
-            @tap="activeTab = item"
+            :class="{ active: activeTab === item.name }"
+            @tap="selectCategory(item.name)"
           >
-            {{ item }}
+            {{ item.name }}
           </view>
         </view>
       </scroll-view>
@@ -154,6 +189,7 @@
       @close="previewTemplate = null"
       @use="usePreviewTemplate"
     />
+    <AppDialogHost />
     <AppTabBar class="app-nav-root" />
   </view>
 </template>
@@ -163,11 +199,14 @@ import { computed, ref } from 'vue';
 import { onShow } from '@dcloudio/uni-app';
 import AppTabBar from '@/components/common/AppTabBar.vue';
 import AppTopbar from '@/components/common/AppTopbar.vue';
+import AppDialogHost from '@/components/common/AppDialogHost.vue';
 import TemplatePreviewSheet from '@/components/business/TemplatePreviewSheet.vue';
-import { getInspirations } from '@/api/template';
+import { getInspirations, getTemplateCategories, useTemplate as useContentTemplate } from '@/api/template';
 import { useConfigStore } from '@/stores/config';
 import { PAGE_ROUTES } from '@/utils/constants';
 import { isDevFallbackEnabled, warnDevFallback } from '@/utils/dev-fallback';
+import { normalizeBackendMediaUrl } from '@/utils/media-url';
+import { showMemberRequiredDialog } from '@/utils/app-dialog';
 import type { CreativeTemplate } from '@/utils/mock';
 
 interface WorkItem {
@@ -183,12 +222,29 @@ interface WorkItem {
   theme: string;
   avatar?: string;
   cover?: string;
+  mediaUrl?: string;
   prompt?: string;
   createdAt?: string;
   sourceIndex?: number;
+  canUse?: boolean;
+  canSave?: boolean;
+  lockReason?: string;
 }
 
-const tabs = ['推荐', 'AI绘画', 'AI视频', 'AI漫剧', '摄影', '壁纸'];
+interface TemplateCategory {
+  id?: number | string;
+  key: string;
+  name: string;
+}
+
+const fallbackCategories: TemplateCategory[] = [
+  { key: 'recommend', name: '推荐' },
+  { key: 'ai_image', name: 'AI绘画' },
+  { key: 'ai_video', name: 'AI视频' },
+  { key: 'ai_comic', name: 'AI漫剧' },
+  { key: 'photo', name: '摄影' },
+  { key: 'wallpaper', name: '壁纸' }
+];
 const fallbackWorks: WorkItem[] = [
   { id: 'work_cloud_video', title: '云端之上 · 梦幻城堡', author: '星辰大海', likes: '1.2w', category: 'AI视频', tag: '视频', kind: 'video', size: 'short', theme: 'sky' },
   { id: 'work_comic_girl', title: '治愈系少女日常', author: '糯米团子', likes: '8563', category: 'AI漫剧', tag: '漫画', kind: 'image', size: 'short', theme: 'flower' },
@@ -205,7 +261,10 @@ const mediaFilter = ref<'all' | 'image' | 'video'>('all');
 const sortMode = ref<'default' | 'hot' | 'new'>('default');
 const tagFilter = ref('全部');
 const showFilterPanel = ref(false);
+const showCategoryPanel = ref(false);
+const searchKeyword = ref('');
 const works = ref<WorkItem[]>([]);
+const categories = ref<TemplateCategory[]>(fallbackCategories);
 const previewTemplate = ref<CreativeTemplate | null>(null);
 const configStore = useConfigStore();
 const bannerFailed = ref(false);
@@ -227,6 +286,7 @@ const inspirationBannerSource = computed(() => {
   const url = String(visualAssets.value.inspirationBannerUrl || '').trim();
   return url && !bannerFailed.value ? url : '';
 });
+const categoryOptions = computed(() => categories.value.length ? categories.value : fallbackCategories);
 const tagFilters = computed(() => ['全部', ...topFilterTags(works.value)]);
 const activeFilterCount = computed(() => [
   mediaFilter.value !== 'all',
@@ -234,10 +294,12 @@ const activeFilterCount = computed(() => [
   tagFilter.value !== '全部'
 ].filter(Boolean).length);
 const filteredWorks = computed(() => {
+  const keyword = searchKeyword.value.trim().toLowerCase();
   const list = works.value.filter((item) => {
     if (!tabMatches(item, activeTab.value)) return false;
     if (mediaFilter.value !== 'all' && item.kind !== mediaFilter.value) return false;
     if (tagFilter.value !== '全部' && !workTagsOf(item).includes(tagFilter.value)) return false;
+    if (keyword && !searchMatches(item, keyword)) return false;
     return true;
   });
   return sortWorks(list, sortMode.value);
@@ -248,8 +310,28 @@ const rightWorks = computed(() => filteredWorks.value.filter((_, index) => index
 onShow(() => {
   configStore.hydrate();
   configStore.loadPublicConfig().catch(() => undefined);
+  loadCategories();
   loadWorks();
 });
+
+async function loadCategories() {
+  try {
+    const res = await getTemplateCategories<{ list?: Record<string, unknown>[] }>();
+    const list = Array.isArray(res.list) ? res.list : [];
+    const next = [
+      { key: 'recommend', name: '推荐' },
+      ...list.map(categoryToOption).filter((item) => item.name && item.name !== '推荐')
+    ];
+    categories.value = dedupeCategories(next);
+    ensureSelectedCategoryExists();
+  } catch {
+    if (isDevFallbackEnabled) {
+      warnDevFallback('inspiration-categories', 'GET /templates/categories failed');
+    }
+    categories.value = fallbackCategories;
+    ensureSelectedCategoryExists();
+  }
+}
 
 async function loadWorks() {
   try {
@@ -285,11 +367,39 @@ function showHot() {
   resetFilter();
 }
 
+function openCategoryPanel() {
+  showCategoryPanel.value = true;
+}
+
+function selectCategory(name: string) {
+  activeTab.value = name;
+  showCategoryPanel.value = false;
+}
+
+function clearSearch() {
+  searchKeyword.value = '';
+}
+
 function openWork(work: WorkItem) {
   previewTemplate.value = workToTemplate(work);
 }
 
-function usePreviewTemplate(template: CreativeTemplate) {
+async function usePreviewTemplate(template: CreativeTemplate) {
+  if (template.canUse === false) {
+    showMemberRequiredDialog({
+      title: '开通会员使用模板',
+      message: template.lockReason || '该模板需开通会员后使用。'
+    });
+    return;
+  }
+  const backendTemplateId = template.mediaType === 'image' ? numericTemplateId(template.id) : 0;
+  if (backendTemplateId) {
+    try {
+      await useContentTemplate(backendTemplateId);
+    } catch {
+      return;
+    }
+  }
   previewTemplate.value = null;
   if (template.mediaType === 'video') {
     uni.navigateTo({ url: `${PAGE_ROUTES.aiVideo}?prompt=${encodeURIComponent(template.prompt)}` });
@@ -309,9 +419,13 @@ function workToTemplate(work: WorkItem): CreativeTemplate {
       : `${work.title}，画面主体清晰，商业质感，高级构图，适合${work.category}投放。`),
     mediaType: work.kind,
     coverUrl: work.cover || fallbackCover(work),
+    mediaUrl: work.mediaUrl || '',
     mode: work.kind === 'video' ? 'text2video' : 'text2img',
     category: work.category,
-    duration: work.kind === 'video' ? '10s' : undefined
+    duration: work.kind === 'video' ? '10s' : undefined,
+    canUse: work.canUse !== false,
+    canSave: work.canSave !== false && work.canUse !== false,
+    lockReason: work.lockReason || ''
   };
 }
 
@@ -335,11 +449,37 @@ function inspirationToWork(item: Record<string, unknown>, index: number): WorkIt
     size: 'short',
     theme: ['sky', 'flower', 'pink', 'neon', 'sakura', 'photo'][index % 6],
     avatar: String(item.avatarUrl || item.avatar_url || item.authorAvatar || item.author_avatar || ''),
-    cover: String(item.coverUrl || item.cover_url || item.thumbnail || ''),
+    cover: normalizeBackendMediaUrl(item.coverUrl || item.cover_url || item.thumbnail),
+    mediaUrl: normalizeBackendMediaUrl(item.previewUrl || item.preview_url || item.mediaUrl || item.media_url),
     prompt: String(item.prompt || item.description || item.title || ''),
     createdAt: String(item.createdAt || item.created_at || item.updatedAt || item.updated_at || ''),
-    sourceIndex: index
+    sourceIndex: index,
+    canUse: item.canUse !== false,
+    canSave: item.canSave !== false && item.canUse !== false,
+    lockReason: String(item.lockReason || '')
   };
+}
+
+function categoryToOption(item: Record<string, unknown>): TemplateCategory {
+  const id = item.categoryId || item.id;
+  const name = String(item.name || item.categoryName || item.category || '').trim();
+  const key = String(item.categoryKey || item.category_key || id || name).trim();
+  return { id: id as number | string | undefined, key: key || name, name };
+}
+
+function dedupeCategories(list: TemplateCategory[]) {
+  const seen = new Set<string>();
+  return list.filter((item) => {
+    const key = item.name || item.key;
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function numericTemplateId(value: unknown) {
+  const id = Number(value);
+  return Number.isInteger(id) && id > 0 ? id : 0;
 }
 
 function formatCount(value: number) {
@@ -390,6 +530,7 @@ function resetFilter() {
   mediaFilter.value = 'all';
   sortMode.value = 'default';
   tagFilter.value = '全部';
+  searchKeyword.value = '';
 }
 
 function onBannerError() {
@@ -441,6 +582,17 @@ function tabMatches(item: WorkItem, tab: string): boolean {
   if (tab === '壁纸') return /壁纸|锁屏|桌面/i.test(text);
   if (tab === 'AI绘画') return item.kind === 'image' && !tabMatches(item, 'AI漫剧') && !tabMatches(item, '摄影') && !tabMatches(item, '壁纸');
   return item.category === tab;
+}
+
+function searchMatches(item: WorkItem, keyword: string) {
+  return [
+    item.title,
+    item.author,
+    item.category,
+    item.tag,
+    ...(item.tags || []),
+    item.prompt || ''
+  ].join(' ').toLowerCase().includes(keyword);
 }
 
 function templateTagsOf(item: Record<string, unknown>) {
@@ -497,6 +649,12 @@ function topFilterTags(list: WorkItem[]) {
 function ensureSelectedTagExists() {
   if (tagFilter.value !== '全部' && !tagFilters.value.includes(tagFilter.value)) {
     tagFilter.value = '全部';
+  }
+}
+
+function ensureSelectedCategoryExists() {
+  if (!categoryOptions.value.some((item) => item.name === activeTab.value)) {
+    activeTab.value = '推荐';
   }
 }
 </script>
@@ -1260,6 +1418,160 @@ function ensureSelectedTagExists() {
 .hero-spark.one { top: 12rpx; right: 8rpx; }
 .hero-spark.two { top: 84rpx; left: 0; background: #ffffff; }
 .hero-spark.three { right: 6rpx; bottom: 84rpx; background: #ff9e3d; }
+
+.inspiration-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 78rpx;
+  margin: 0 0 18rpx;
+  padding: 0 78rpx 0 74rpx;
+  box-sizing: border-box;
+  border: 1rpx solid rgba(123, 92, 255, 0.14);
+  border-radius: 24rpx;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 12rpx 26rpx rgba(122, 92, 255, 0.1);
+}
+
+.inspiration-search-icon {
+  position: absolute;
+  top: 24rpx;
+  left: 28rpx;
+  width: 22rpx;
+  height: 22rpx;
+  border: 4rpx solid #7b5cff;
+  border-radius: 50%;
+}
+
+.inspiration-search-icon::after {
+  position: absolute;
+  right: -12rpx;
+  bottom: -9rpx;
+  width: 16rpx;
+  height: 4rpx;
+  border-radius: 2rpx;
+  background: #7b5cff;
+  content: "";
+  transform: rotate(45deg);
+}
+
+.inspiration-search-input {
+  width: 100%;
+  height: 78rpx;
+  color: #172033;
+  font-size: 26rpx;
+  font-weight: 800;
+  line-height: 78rpx;
+}
+
+.inspiration-search-placeholder {
+  color: #8b8fa3;
+  font-weight: 800;
+}
+
+.inspiration-search-clear {
+  position: absolute;
+  top: 13rpx;
+  right: 16rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 52rpx;
+  height: 52rpx;
+  margin: 0;
+  padding: 0;
+  border-radius: 26rpx;
+  background: #eef1fb;
+  color: #64748b;
+  font-size: 34rpx;
+  font-weight: 700;
+  line-height: 48rpx;
+}
+
+.category-panel {
+  width: 100%;
+  margin: -2rpx 0 18rpx;
+  padding: 24rpx;
+  box-sizing: border-box;
+  border: 1rpx solid rgba(123, 92, 255, 0.12);
+  border-radius: 22rpx;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 14rpx 32rpx rgba(122, 92, 255, 0.12);
+}
+
+.category-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20rpx;
+  margin-bottom: 18rpx;
+}
+
+.category-panel-title {
+  color: #172033;
+  font-size: 29rpx;
+  font-weight: 900;
+  line-height: 1.2;
+}
+
+.category-panel-subtitle {
+  margin-top: 6rpx;
+  color: #8b8fa3;
+  font-size: 22rpx;
+  font-weight: 800;
+}
+
+.category-panel-close {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 86rpx;
+  height: 48rpx;
+  margin: 0;
+  padding: 0 18rpx;
+  box-sizing: border-box;
+  border: 1rpx solid rgba(123, 92, 255, 0.18);
+  border-radius: 24rpx;
+  background: #f3f5fb;
+  color: #64748b;
+  font-size: 22rpx;
+  font-weight: 900;
+  line-height: 48rpx;
+}
+
+.category-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14rpx;
+  max-height: 214rpx;
+  overflow: hidden;
+}
+
+.category-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
+  height: 58rpx;
+  margin: 0;
+  padding: 0 22rpx;
+  box-sizing: border-box;
+  border: 1rpx solid #dce8f6;
+  border-radius: 29rpx;
+  background: #f8fbff;
+  color: #64748b;
+  font-size: 24rpx;
+  font-weight: 900;
+  line-height: 58rpx;
+}
+
+.category-chip.active {
+  border-color: rgba(123, 92, 255, 0.34);
+  background: linear-gradient(135deg, #7b5cff, #a76bff);
+  color: #ffffff;
+  box-shadow: 0 10rpx 20rpx rgba(123, 92, 255, 0.18);
+}
 
 .category-shell {
   display: flex;

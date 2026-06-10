@@ -114,8 +114,12 @@ function goBack() {
 }
 
 .topbar-shell--transparent .topbar {
-  background: linear-gradient(180deg, rgba(12, 10, 28, 0.42), rgba(12, 10, 28, 0));
+  background: linear-gradient(180deg, rgba(248, 246, 255, 0.94), rgba(248, 246, 255, 0.58) 66%, rgba(248, 246, 255, 0));
   backdrop-filter: none;
+}
+
+.topbar-shell--transparent.topbar-shell--dark .topbar {
+  background: linear-gradient(180deg, rgba(24, 17, 68, 0.46), rgba(24, 17, 68, 0.18) 68%, rgba(24, 17, 68, 0));
 }
 
 .topbar-row {

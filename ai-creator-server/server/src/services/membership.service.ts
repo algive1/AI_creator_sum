@@ -1,4 +1,6 @@
+import type { PoolConnection } from 'mysql2/promise';
 import { queryOne, query } from '../utils/db';
+import { appCache } from '../utils/ttl-cache';
 import { normalizePublicIconUrl } from './member-benefit-icons.service';
 
 export interface MemberFeatureDiscount {
@@ -26,6 +28,19 @@ export function applyFeatureDiscount(basePointsCost: number, discountPercent: nu
   const base = Math.max(0, Math.trunc(Number(basePointsCost) || 0));
   if (base <= 0) return 0;
   return Math.max(1, Math.round(base * normalizeDiscountPercent(discountPercent) / 100));
+}
+
+export async function isActiveMember(userId: number): Promise<boolean> {
+  if (!userId) return false;
+  const membership = await queryOne<any>(
+    `SELECT level_after
+       FROM user_memberships
+      WHERE user_id = ? AND status = 'active' AND expire_at > NOW(3)
+      ORDER BY expire_at DESC
+      LIMIT 1`,
+    [userId],
+  );
+  return !!membership && membership.level_after !== 'free';
 }
 
 export async function processExpiredMemberships(): Promise<{ expired: number; downgraded: number }> {
@@ -70,9 +85,13 @@ export async function processExpiredMemberships(): Promise<{ expired: number; do
 }
 
 export async function getMembershipVersions() {
-  return query<any>(
-    'SELECT id, name, version_key, description, sort_order, status FROM member_versions WHERE status = ? ORDER BY sort_order',
-    ['active'],
+  return appCache.remember(
+    'membership:versions:active',
+    10 * 60 * 1000,
+    () => query<any>(
+      'SELECT id, name, version_key, description, sort_order, status FROM member_versions WHERE status = ? ORDER BY sort_order',
+      ['active'],
+    ),
   );
 }
 
@@ -92,13 +111,19 @@ export async function getPlanFeatureDiscounts(planId: number): Promise<MemberFea
   }));
 }
 
-export async function replacePlanFeatureDiscounts(planId: number, discounts: any[]): Promise<void> {
+export async function replacePlanFeatureDiscounts(planId: number, discounts: any[]): Promise<void>;
+export async function replacePlanFeatureDiscounts(conn: PoolConnection, planId: number, discounts: any[]): Promise<void>;
+export async function replacePlanFeatureDiscounts(connOrPlanId: PoolConnection | number, discountsOrPlanId: any[] | number, maybeDiscounts?: any[]): Promise<void> {
+  const conn: PoolConnection | null = maybeDiscounts !== undefined ? connOrPlanId as PoolConnection : null;
+  const planId: number = maybeDiscounts !== undefined ? discountsOrPlanId as number : connOrPlanId as number;
+  const discounts: any[] = (maybeDiscounts !== undefined ? maybeDiscounts : discountsOrPlanId as any[]) || [];
   const rows = Array.isArray(discounts) ? discounts : [];
-  await query('DELETE FROM member_plan_feature_discounts WHERE plan_id = ?', [planId]);
+  const exec = async (sql: string, params: any[]) => conn ? conn.execute(sql, params) : query(sql, params);
+  await exec('DELETE FROM member_plan_feature_discounts WHERE plan_id = ?', [planId]);
   for (const item of rows) {
     const featureKey = String(item.featureKey || item.feature_key || '').trim();
     if (!featureKey) continue;
-    await query(
+    await exec(
       `INSERT INTO member_plan_feature_discounts (plan_id, feature_key, discount_percent, status)
        VALUES (?, ?, ?, 'active')
        ON DUPLICATE KEY UPDATE discount_percent = VALUES(discount_percent), status = 'active', updated_at = NOW(3)`,
@@ -108,7 +133,8 @@ export async function replacePlanFeatureDiscounts(planId: number, discounts: any
 }
 
 export async function getMembershipPlans(version?: string) {
-  let sql = `SELECT p.id, p.name, p.plan_key, p.duration_type, p.duration_days, p.price, p.original_price,
+  return appCache.remember(`membership:plans:${version || 'all'}`, 10 * 60 * 1000, async () => {
+    let sql = `SELECT p.id, p.name, p.plan_key, p.duration_type, p.duration_days, p.price, p.original_price,
                     p.tag, p.highlight_features, p.sort_order,
                     v.name AS version_name, v.version_key,
                     pr.id AS point_rule_id, pr.total_points, pr.immediate_points, pr.monthly_points,
@@ -117,13 +143,14 @@ export async function getMembershipPlans(version?: string) {
                JOIN member_versions v ON v.id = p.version_id
                LEFT JOIN member_plan_point_rules pr ON pr.plan_id = p.id
               WHERE p.status = ? AND v.status = ?`;
-  const params: any[] = ['active', 'active'];
-  if (version) {
-    sql += ' AND v.version_key = ?';
-    params.push(version);
-  }
-  sql += ' ORDER BY v.sort_order, p.sort_order';
-  return query<any>(sql, params);
+    const params: any[] = ['active', 'active'];
+    if (version) {
+      sql += ' AND v.version_key = ?';
+      params.push(version);
+    }
+    sql += ' ORDER BY v.sort_order, p.sort_order';
+    return query<any>(sql, params);
+  });
 }
 
 export async function getPlanDetail(planId: number) {

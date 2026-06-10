@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { lazy, Suspense, useState } from 'react';
 import { Routes, Route, useNavigate, useLocation } from 'react-router-dom';
 import { Layout as AntLayout, Menu, Button, theme, Avatar, Dropdown } from 'antd';
 import {
@@ -8,34 +8,35 @@ import {
   CloudSyncOutlined, CheckCircleOutlined, FileProtectOutlined, ShareAltOutlined,
   WechatOutlined, ControlOutlined, CloudUploadOutlined,
 } from '@ant-design/icons';
-import Dashboard from '../pages/Dashboard';
-import Users from '../pages/Users';
-import Tasks from '../pages/Tasks';
-import Orders from '../pages/Orders';
-import Audit from '../pages/Audit';
-import Files from '../pages/Files';
-import Settings from '../pages/settings';
-import Membership from '../pages/Membership';
-import PointTasks from '../pages/PointTasks';
-import Invite from '../pages/Invite';
-import FeatureConfig from '../pages/FeatureConfig';
-import ProviderModels from '../pages/ProviderModels';
-import ModelTest from '../pages/ModelTest';
-import ModelOverview from '../pages/ModelOverview';
-import TemplateCategories from '../pages/TemplateCategories';
-import ImageTemplates from '../pages/ImageTemplates';
-import VideoTemplates from '../pages/VideoTemplates';
-import InspirationSquare from '../pages/InspirationSquare';
-import TemplateReview from '../pages/TemplateReview';
-import ContentManagement from '../pages/ContentManagement';
-import SystemUpdate from '../pages/SystemUpdate';
-import LaunchCheck from '../pages/LaunchCheck';
-import WechatSettings from '../pages/WechatSettings';
-import AuditLog from '../pages/AuditLog';
-import StorageSettings from '../pages/StorageSettings';
-import ApiReference from '../pages/ApiReference';
-import FeatureToggles from '../pages/FeatureToggles';
-import BackupManagement from '../pages/BackupManagement';
+
+const Dashboard = lazy(() => import('../pages/Dashboard'));
+const Users = lazy(() => import('../pages/Users'));
+const Tasks = lazy(() => import('../pages/Tasks'));
+const Orders = lazy(() => import('../pages/Orders'));
+const Audit = lazy(() => import('../pages/Audit'));
+const Files = lazy(() => import('../pages/Files'));
+const Settings = lazy(() => import('../pages/settings'));
+const Membership = lazy(() => import('../pages/Membership'));
+const PointTasks = lazy(() => import('../pages/PointTasks'));
+const Invite = lazy(() => import('../pages/Invite'));
+const FeatureConfig = lazy(() => import('../pages/FeatureConfig'));
+const ProviderModels = lazy(() => import('../pages/ProviderModels'));
+const ModelTest = lazy(() => import('../pages/ModelTest'));
+const ModelOverview = lazy(() => import('../pages/ModelOverview'));
+const TemplateCategories = lazy(() => import('../pages/TemplateCategories'));
+const ImageTemplates = lazy(() => import('../pages/ImageTemplates'));
+const VideoTemplates = lazy(() => import('../pages/VideoTemplates'));
+const InspirationSquare = lazy(() => import('../pages/InspirationSquare'));
+const TemplateReview = lazy(() => import('../pages/TemplateReview'));
+const ContentManagement = lazy(() => import('../pages/ContentManagement'));
+const SystemUpdate = lazy(() => import('../pages/SystemUpdate'));
+const LaunchCheck = lazy(() => import('../pages/LaunchCheck'));
+const WechatSettings = lazy(() => import('../pages/WechatSettings'));
+const AuditLog = lazy(() => import('../pages/AuditLog'));
+const StorageSettings = lazy(() => import('../pages/StorageSettings'));
+const ApiReference = lazy(() => import('../pages/ApiReference'));
+const FeatureToggles = lazy(() => import('../pages/FeatureToggles'));
+const BackupManagement = lazy(() => import('../pages/BackupManagement'));
 
 const { Header, Sider, Content } = AntLayout;
 
@@ -230,46 +231,48 @@ export default function Layout() {
           border: '1px solid rgba(255,255,255,0.5)',
           boxShadow: '0 2px 16px rgba(99,102,241,0.04)',
         }}>
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/users" element={<Users />} />
-            <Route path="/tasks" element={<Tasks />} />
-            <Route path="/orders" element={<Orders />} />
-            <Route path="/files" element={<Files />} />
-            <Route path="/audit" element={<Audit />} />
-            <Route path="/ai-models/features" element={<FeatureConfig />} />
-            <Route path="/ai-models/providers" element={<ProviderModels />} />
-            <Route path="/ai-models/test" element={<ModelTest />} />
-            <Route path="/ai-models/overview" element={<ModelOverview />} />
-            <Route path="/membership" element={<Membership />} />
-            <Route path="/point-tasks" element={<PointTasks />} />
-            <Route path="/invite" element={<Invite />} />
-            <Route path="/templates/categories" element={<TemplateCategories />} />
-            <Route path="/templates/images" element={<ImageTemplates />} />
-            <Route path="/templates/videos" element={<VideoTemplates />} />
-            <Route path="/templates/inspiration" element={<InspirationSquare />} />
-            <Route path="/templates/review" element={<TemplateReview />} />
-            <Route path="/content" element={<ContentManagement />} />
-            <Route path="/wechat/miniapp" element={<WechatSettings />} />
-            <Route path="/wechat/pay" element={<WechatSettings />} />
-            <Route path="/wechat/customer-service" element={<WechatSettings />} />
-            <Route path="/wechat/help" element={<WechatSettings />} />
-            <Route path="/wechat/visual-assets" element={<WechatSettings />} />
-            <Route path="/wechat/tabbar" element={<WechatSettings />} />
-            <Route path="/wechat/api-reference" element={<ApiReference />} />
-            <Route path="/launch-check" element={<LaunchCheck />} />
-            <Route path="/feature-toggles" element={<FeatureToggles />} />
-            <Route path="/system-update" element={<SystemUpdate />} />
-            <Route path="/backup" element={<BackupManagement />} />
-            <Route path="/settings/*" element={<Settings />} />
-            <Route path="/audit-log" element={<AuditLog />} />
-            <Route path="/storage/tencent-cos" element={<StorageSettings />} />
-            <Route path="/storage/aliyun-oss" element={<StorageSettings />} />
-            <Route path="/storage/qiniu" element={<StorageSettings />} />
-            <Route path="/storage/upyun" element={<StorageSettings />} />
-            <Route path="/storage/eos" element={<StorageSettings />} />
-            <Route path="/storage/local" element={<StorageSettings />} />
-          </Routes>
+          <Suspense fallback={<div style={{ padding: 24, color: '#6366f1' }}>页面加载中...</div>}>
+            <Routes>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/users" element={<Users />} />
+              <Route path="/tasks" element={<Tasks />} />
+              <Route path="/orders" element={<Orders />} />
+              <Route path="/files" element={<Files />} />
+              <Route path="/audit" element={<Audit />} />
+              <Route path="/ai-models/features" element={<FeatureConfig />} />
+              <Route path="/ai-models/providers" element={<ProviderModels />} />
+              <Route path="/ai-models/test" element={<ModelTest />} />
+              <Route path="/ai-models/overview" element={<ModelOverview />} />
+              <Route path="/membership" element={<Membership />} />
+              <Route path="/point-tasks" element={<PointTasks />} />
+              <Route path="/invite" element={<Invite />} />
+              <Route path="/templates/categories" element={<TemplateCategories />} />
+              <Route path="/templates/images" element={<ImageTemplates />} />
+              <Route path="/templates/videos" element={<VideoTemplates />} />
+              <Route path="/templates/inspiration" element={<InspirationSquare />} />
+              <Route path="/templates/review" element={<TemplateReview />} />
+              <Route path="/content" element={<ContentManagement />} />
+              <Route path="/wechat/miniapp" element={<WechatSettings />} />
+              <Route path="/wechat/pay" element={<WechatSettings />} />
+              <Route path="/wechat/customer-service" element={<WechatSettings />} />
+              <Route path="/wechat/help" element={<WechatSettings />} />
+              <Route path="/wechat/visual-assets" element={<WechatSettings />} />
+              <Route path="/wechat/tabbar" element={<WechatSettings />} />
+              <Route path="/wechat/api-reference" element={<ApiReference />} />
+              <Route path="/launch-check" element={<LaunchCheck />} />
+              <Route path="/feature-toggles" element={<FeatureToggles />} />
+              <Route path="/system-update" element={<SystemUpdate />} />
+              <Route path="/backup" element={<BackupManagement />} />
+              <Route path="/settings/*" element={<Settings />} />
+              <Route path="/audit-log" element={<AuditLog />} />
+              <Route path="/storage/tencent-cos" element={<StorageSettings />} />
+              <Route path="/storage/aliyun-oss" element={<StorageSettings />} />
+              <Route path="/storage/qiniu" element={<StorageSettings />} />
+              <Route path="/storage/upyun" element={<StorageSettings />} />
+              <Route path="/storage/eos" element={<StorageSettings />} />
+              <Route path="/storage/local" element={<StorageSettings />} />
+            </Routes>
+          </Suspense>
         </Content>
       </AntLayout>
     </AntLayout>

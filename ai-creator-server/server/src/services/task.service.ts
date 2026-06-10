@@ -1,7 +1,4 @@
 import fs from 'fs';
-import path from 'path';
-import axios from 'axios';
-import { pipeline } from 'stream/promises';
 import { getConnection, queryOne, query } from '../utils/db';
 import { selectTierModel, TierModelResult, RealModelInfo, TierCapabilities } from './tier-router.service';
 import { resolveImageSize, SizePlan } from './image-size-resolver.service';
@@ -10,9 +7,12 @@ import { enqueue } from './task-queue.service';
 import { AdapterRegistry } from './adapters/adapter.registry';
 import { StorageService } from './storage/storage.service';
 import { resolveTaskSystemPrompt } from './system-prompt.service';
+import { findImageSizeOption, isResolutionPreset, normalizeResolutionPreset } from './image-size-options.service';
 
 const TASK_STEPS = ['准备任务', '提交模型', '生成结果', '保存文件'];
 const MAX_PROMPT_LENGTH = 2000;
+const QUEUE_FULL_MESSAGE = '任务队列繁忙，请稍后重试';
+const RECOVERY_LOCK_MINUTES = 2;
 const ALLOWED_PARAM_KEYS = new Set([
   'ratio',
   'sizeMode',
@@ -21,6 +21,9 @@ const ALLOWED_PARAM_KEYS = new Set([
   'scene',
   'style',
   'quality',
+  'resolutionPreset',
+  'resolutionLabel',
+  'sizeKey',
   'imageType',
   'imageCount',
   'negativePrompt',
@@ -48,8 +51,11 @@ const ALLOWED_VIDEO_PARAM_KEYS = new Set([
   'customWidth',
   'customHeight',
   'duration',
+  'durationRaw',
+  'durationText',
   'durationSeconds',
   'fps',
+  'seed',
   'motionStrength',
   'cameraMove',
   'style',
@@ -63,6 +69,10 @@ const ALLOWED_VIDEO_PARAM_KEYS = new Set([
   'videoId',
   'videoUrl',
   'video_url',
+  'audioUrl',
+  'audio_url',
+  'audioFileId',
+  'audio_file_id',
   'referenceVideo',
   'referenceVideoUrl',
   'uploadKeys',
@@ -71,6 +81,7 @@ const ALLOWED_VIDEO_PARAM_KEYS = new Set([
   'audioMode',
   'preserveAudio',
   'inputAssets',
+  'referenceMode',
 ]);
 
 interface PreparedTask {
@@ -94,6 +105,8 @@ interface CreateImageTaskParams {
   customWidth?: number | null;
   customHeight?: number | null;
   postprocessMode?: string;
+  resolutionPreset?: string;
+  sizeKey?: string;
   systemPrompt?: string;
   aiOptimize?: boolean;
   formData?: any;
@@ -124,6 +137,7 @@ export async function createImageTask(input: CreateImageTaskParams) {
   if (!tierKeyOrId) throw paramError('缺少 tierKey 或 tierId');
 
   const mergedParams = filterImageParams(input.params || {});
+  normalizeImageResolutionParams(mergedParams, input);
   const isEditWatermarkRemoval = input.subType === 'edit' && String(input.editTool || '') === '去水印';
   const platformWatermarkEnabled = isEditWatermarkRemoval
     ? false
@@ -135,15 +149,31 @@ export async function createImageTask(input: CreateImageTaskParams) {
   const tierResult = await selectTierModel(featureKey, tierKeyOrId, input.userId, {
     ratio: input.ratio || mergedParams.ratio,
     quality: mergedParams.quality,
+    resolutionPreset: mergedParams.resolutionPreset,
+    sizeKey: mergedParams.sizeKey,
     style: mergedParams.style,
     imageCount: mergedParams.imageCount,
-    referenceImageCount: input.subType === 'img2img' ? countImageReferences(input.uploadKeys, input.referenceKeys) : 0,
+    referenceImageCount: input.subType === 'img2img' ? countImageReferences(input.uploadKeys, input.referenceKeys) : undefined,
     sizeMode: input.sizeMode || mergedParams.sizeMode,
     targetWidth: input.customWidth ?? mergedParams.customWidth,
     targetHeight: input.customHeight ?? mergedParams.customHeight,
     fromCustomPixels: !!(input.customWidth || mergedParams.customWidth),
     postprocessMode: input.postprocessMode || mergedParams.postprocessMode,
   });
+  const selectedSizeOption = findImageSizeOption(
+    tierResult.capabilities.sizeOptions,
+    mergedParams.sizeKey,
+    input.sizeMode === 'auto' || mergedParams.sizeMode === 'auto' ? 'auto' : input.ratio || mergedParams.ratio,
+    mergedParams.resolutionPreset,
+  );
+  if (selectedSizeOption) {
+    mergedParams.sizeKey = selectedSizeOption.key;
+    mergedParams.resolutionPreset = selectedSizeOption.resolutionPreset;
+    mergedParams.sizeOption = selectedSizeOption;
+  }
+  const imageCount = normalizeImageCount(mergedParams.imageCount, tierResult.capabilities.maxImages);
+  mergedParams.imageCount = imageCount;
+  const pricedTierResult = applyImageCountPricing(tierResult, imageCount);
 
   const sizePlan = resolveImageSize({
     prompt: input.prompt,
@@ -163,7 +193,7 @@ export async function createImageTask(input: CreateImageTaskParams) {
     throw paramError('图片编辑只能上传一张待编辑图');
   }
 
-  mergedParams.ratio = sizePlan.targetRatio;
+  mergedParams.ratio = selectedSizeOption?.ratio === 'auto' ? 'auto' : sizePlan.targetRatio;
   mergedParams.sizePlan = sizePlan;
   mergedParams.sizeWarnings = sizePlan.warnings;
   const imageReferences = await resolveImageReferenceImages(input.userId, input.subType || 'text2img', input.uploadKeys, input.referenceKeys);
@@ -185,10 +215,10 @@ export async function createImageTask(input: CreateImageTaskParams) {
     formData: input.formData || {},
     params: { ...mergedParams, referenceImages: referenceMetadata, uploadKeys: imageReferences.urls },
     editTool: input.editTool || null,
-    tierResult,
+    tierResult: pricedTierResult,
   });
 
-  enqueue(prepared.taskId, {
+  const queued = enqueue(prepared.taskId, {
     taskId: prepared.taskId,
     input: {
       ...input,
@@ -201,6 +231,10 @@ export async function createImageTask(input: CreateImageTaskParams) {
     pointsCost: prepared.pointsCost,
     taskType: 'image',
   }, processTask);
+  if (!queued) {
+    await finalizeTaskFailure(prepared.taskId, prepared.pointsCost, QUEUE_FULL_MESSAGE);
+    throw Object.assign(new Error(QUEUE_FULL_MESSAGE), { code: 429 });
+  }
 
   return {
     taskId: prepared.taskId,
@@ -215,82 +249,6 @@ export async function createImageTask(input: CreateImageTaskParams) {
     tierKey: tierResult.tierKey,
     sizePlan,
     message: 'AI 生图任务已提交',
-  };
-}
-
-async function _createVideoTaskLegacy(input: {
-  userId: number;
-  subType: string;
-  prompt: string;
-  optimizedPrompt?: string;
-  negativePrompt?: string;
-  featureKey?: string;
-  tierKey?: string;
-  tierId?: number;
-  systemPrompt?: string;
-  aiOptimize?: boolean;
-  autoScript?: boolean;
-  formData?: any;
-  params?: any;
-  uploadKeys?: any[];
-  editTool?: string;
-  audioMode?: string;
-  preserveAudio?: boolean;
-  inputAssets?: any[];
-  modelId?: number;
-}) {
-  if (input.modelId) throw paramError('前端禁止直接传真实模型 ID，请传 tierKey 或 tierId');
-  const originalPrompt = String(input.prompt || '').trim();
-  const featureKey = input.featureKey || 'video_create';
-  const tierKeyOrId = input.tierId || input.tierKey;
-  if (!tierKeyOrId) throw paramError('缺少 tierKey 或 tierId');
-
-  const params = { ...(input.params || {}) };
-  const optimizedPrompt = String(input.optimizedPrompt || '').trim();
-  if (optimizedPrompt) input.prompt = optimizedPrompt;
-  if (input.negativePrompt) params.negativePrompt = String(input.negativePrompt).trim();
-  const tierResult = await selectTierModel(featureKey, tierKeyOrId, input.userId, {
-    ratio: params.ratio,
-    duration: params.duration,
-    quality: params.resolution,
-    cameraMove: params.cameraMove,
-  });
-  const systemPrompt = await resolveTaskSystemPrompt('video', input.subType);
-
-  const prepared = await createTierTask({
-    userId: input.userId,
-    taskType: 'video',
-    subType: input.subType,
-    title: input.formData?.brand || 'AI 视频任务',
-    prompt: originalPrompt || input.prompt,
-    optimizedPrompt: optimizedPrompt || null,
-    negativePrompt: String(input.negativePrompt || '').trim() || null,
-    systemPrompt,
-    formData: input.formData || {},
-    params: { ...params, autoScript: input.autoScript },
-    editTool: null,
-    tierResult,
-  });
-
-  enqueue(prepared.taskId, {
-    taskId: prepared.taskId,
-    input: { ...input, optimizedPrompt: optimizedPrompt || null, params },
-    tierResult,
-    pointsCost: prepared.pointsCost,
-    taskType: 'video',
-  }, processTask);
-
-  return {
-    taskId: prepared.taskId,
-    taskNo: prepared.taskNo,
-    status: 'queued',
-    pointsCost: prepared.pointsCost,
-    basePointsCost: tierResult.basePointsCost,
-    memberDiscountPercent: tierResult.memberDiscountPercent,
-    memberDiscountApplied: tierResult.memberDiscountApplied,
-    pointsRemaining: prepared.pointsRemaining,
-    estimatedSeconds: 45,
-    tierKey: tierResult.tierKey,
   };
 }
 
@@ -312,10 +270,15 @@ export async function createVideoTask(input: {
   customHeight?: number | null;
   duration?: number | string;
   fps?: number;
+  seed?: number | string;
   firstFrameFileId?: number;
   lastFrameFileId?: number;
   imageId?: number;
   referenceImage?: string;
+  audioUrl?: string;
+  audio_url?: string;
+  audioFileId?: number;
+  audio_file_id?: number;
   systemPrompt?: string;
   aiOptimize?: boolean;
   autoScript?: boolean;
@@ -326,6 +289,7 @@ export async function createVideoTask(input: {
   audioMode?: string;
   preserveAudio?: boolean;
   inputAssets?: any[];
+  referenceMode?: string;
   modelId?: number;
 }) {
   if (input.modelId) throw paramError('前端禁止直接传真实模型 ID，请传 tierKey 或 tierId');
@@ -346,6 +310,7 @@ export async function createVideoTask(input: {
     customHeight: input.customHeight ?? input.params?.customHeight,
     duration: input.duration ?? input.params?.duration,
     fps: input.fps ?? input.params?.fps,
+    seed: input.seed ?? input.params?.seed,
     firstFrameFileId: input.firstFrameFileId ?? input.params?.firstFrameFileId,
     lastFrameFileId: input.lastFrameFileId ?? input.params?.lastFrameFileId,
     imageId: input.imageId ?? input.params?.imageId,
@@ -354,6 +319,10 @@ export async function createVideoTask(input: {
     videoId: input.params?.videoId,
     videoUrl: input.params?.videoUrl,
     video_url: input.params?.video_url,
+    audioUrl: input.audioUrl ?? input.params?.audioUrl,
+    audio_url: input.audio_url ?? input.params?.audio_url,
+    audioFileId: input.audioFileId ?? input.params?.audioFileId,
+    audio_file_id: input.audio_file_id ?? input.params?.audio_file_id,
     referenceVideo: input.params?.referenceVideo,
     referenceVideoUrl: input.params?.referenceVideoUrl,
     uploadKeys: input.uploadKeys ?? input.params?.uploadKeys,
@@ -363,22 +332,25 @@ export async function createVideoTask(input: {
     audioMode: input.audioMode ?? input.params?.audioMode,
     preserveAudio: input.preserveAudio ?? input.params?.preserveAudio,
     inputAssets: input.inputAssets ?? input.params?.inputAssets,
+    referenceMode: input.referenceMode ?? input.params?.referenceMode,
   });
+  const requestedRatio = String(params.ratio || '').trim();
+  const adaptiveRatio = requestedRatio.toLowerCase() === 'adaptive';
 
   // 一次调用 selectTierModel，避免两次调用之间的 TOC/TOU 窗口
   let tierResult = await selectTierModel(featureKey, tierKeyOrId, input.userId, {
     ratio: params.ratio,
     duration: params.duration,
-    quality: params.resolution,
+    quality: params.resolution || params.quality,
     cameraMove: params.cameraMove,
     audioMode: params.audioMode,
-    referenceImageCount: videoMode === 'image_to_video' ? countImageReferences(params.uploadKeys) : 0,
+    referenceImageCount: videoMode === 'image_to_video' ? countImageReferences(params.uploadKeys) : undefined,
   });
 
   const sizePlan = resolveImageSize({
     prompt: input.prompt,
     sizeMode: params.sizeMode,
-    ratio: params.ratio,
+    ratio: adaptiveRatio ? undefined : params.ratio,
     customWidth: params.customWidth,
     customHeight: params.customHeight,
     tierDefaultRatio: tierResult.capabilities.defaultRatio,
@@ -390,10 +362,11 @@ export async function createVideoTask(input: {
   // 本地验证解析后的尺寸参数
   validateResolvedImageSize(tierResult.tierName, tierResult.capabilities, sizePlan);
 
-  params.ratio = sizePlan.targetRatio;
+  params.ratio = adaptiveRatio ? 'adaptive' : sizePlan.targetRatio;
   params.sizePlan = sizePlan;
   params.sizeWarnings = sizePlan.warnings;
   params.duration = durationPlan.durationText;
+  params.durationRaw = durationPlan.durationRaw;
   params.durationSeconds = durationPlan.duration;
   params.durationSource = durationPlan.source;
   params.videoMode = videoMode;
@@ -427,13 +400,17 @@ export async function createVideoTask(input: {
     tierResult,
   });
 
-  enqueue(prepared.taskId, {
+  const queued = enqueue(prepared.taskId, {
     taskId: prepared.taskId,
     input: { ...input, subType: videoMode, optimizedPrompt: optimizedPrompt || null, params, sizePlan, uploadKeys: referenceImages.urls },
     tierResult,
     pointsCost: prepared.pointsCost,
     taskType: 'video',
   }, processTask);
+  if (!queued) {
+    await finalizeTaskFailure(prepared.taskId, prepared.pointsCost, QUEUE_FULL_MESSAGE);
+    throw Object.assign(new Error(QUEUE_FULL_MESSAGE), { code: 429 });
+  }
 
   return {
     taskId: prepared.taskId,
@@ -513,10 +490,17 @@ async function createTierTask(input: {
           tierKey: input.tierResult.tierKey,
           tierName: input.tierResult.tierName,
           featureKey: input.tierResult.featureKey,
+          unitBasePointsCost: input.tierResult.unitBasePointsCost ?? input.tierResult.basePointsCost,
+          unitPointsCost: input.tierResult.unitPointsCost ?? pointsCost,
+          imageCount: input.tierResult.imageCount || input.params?.imageCount || 1,
           basePointsCost: input.tierResult.basePointsCost,
           pointsCost,
+          totalPointsCost: pointsCost,
           memberDiscountPercent: input.tierResult.memberDiscountPercent,
           memberDiscountApplied: input.tierResult.memberDiscountApplied,
+          pricingMode: input.tierResult.pricingMode || 'fixed',
+          pricing: input.tierResult.pricingSnapshot || null,
+          resolutionPreset: input.params?.resolutionPreset || '',
         }),
       ],
     );
@@ -566,6 +550,8 @@ async function createTierTask(input: {
 
 async function processTask(data: any): Promise<void> {
   const { taskId, input, tierResult, pointsCost, taskType } = data;
+  const savedOutputs: SavedTaskOutput[] = [];
+  const taskStartedAt = Date.now();
   try {
     const claimed = await startTaskProcessing(taskId);
     if (!claimed) {
@@ -576,10 +562,8 @@ async function processTask(data: any): Promise<void> {
     if (input.sizePlan?.warnings?.length) {
       await addTaskLog(taskId, 'size_warning', input.sizePlan.warnings.join('；'));
     }
-    for (let i = 0; i < TASK_STEPS.length; i++) {
-      await query('UPDATE ai_tasks SET progress = ?, current_step = ?, updated_at = NOW(3) WHERE id = ?', [Math.min(12 + i * 25, 87), TASK_STEPS[i], taskId]);
-      await addTaskLog(taskId, 'progress_update', TASK_STEPS[i]);
-    }
+    await query('UPDATE ai_tasks SET progress = GREATEST(progress, 12), current_step = ?, updated_at = NOW(3) WHERE id = ?', [TASK_STEPS[0], taskId]);
+    await addTaskLog(taskId, 'progress_update', TASK_STEPS[0]);
 
     const submit = await submitWithFallback({
       taskId,
@@ -596,12 +580,17 @@ async function processTask(data: any): Promise<void> {
     }
 
     const urls = submit.result?.urls || [];
+    const expectedImageCount = taskType === 'image' ? normalizeImageCount(input.params?.imageCount, tierResult.capabilities.maxImages || 1) : 0;
     if (urls.length === 0) throw new Error(taskType === 'video' ? '模型未返回视频结果' : '模型未返回图片结果');
-    for (let i = 0; i < urls.length; i++) {
-      await saveTaskOutput({
+    if (expectedImageCount > 0 && urls.length < expectedImageCount) {
+      throw new Error(`模型返回图片数量不足，期望 ${expectedImageCount} 张，实际 ${urls.length} 张`);
+    }
+    const outputUrls = expectedImageCount > 0 ? urls.slice(0, expectedImageCount) : urls;
+    for (let i = 0; i < outputUrls.length; i++) {
+      const savedOutput = await saveTaskOutputWithRetry({
         taskId,
         userId: input.userId,
-        url: urls[i],
+        url: outputUrls[i],
         index: i,
         outputType: taskType === 'video' ? 'video' : 'image',
         prompt: input.prompt,
@@ -609,6 +598,7 @@ async function processTask(data: any): Promise<void> {
         sizePlan: input.sizePlan,
         metadata: { ...(submit.result?.metadata || {}), ...(submit.result?.revisedPrompt ? { revisedPrompt: submit.result.revisedPrompt } : {}) },
       });
+      savedOutputs.push(savedOutput);
     }
 
     await finalizeTaskSuccess({
@@ -617,9 +607,15 @@ async function processTask(data: any): Promise<void> {
       actualModelId: submit.model.id,
       costSnapshot: submit.cost || {},
     });
+    console.log(`[Task #${taskId}] completed, totalTime=${((Date.now() - taskStartedAt) / 1000).toFixed(1)}s, cost=${pointsCost} points`);
     await addTaskLog(taskId, 'completed', '任务已完成');
   } catch (err: any) {
     const message = (err.message || '任务执行失败').substring(0, 500);
+    if (savedOutputs.length > 0) {
+      await cleanupSavedTaskOutputs(taskId, savedOutputs).catch(cleanupErr =>
+        addTaskLog(taskId, 'output_cleanup_failed', `任务失败后清理部分输出失败：${(cleanupErr.message || cleanupErr).toString().substring(0, 400)}`).catch(() => undefined),
+      );
+    }
     try {
       await finalizeTaskFailure(taskId, pointsCost, message);
       await addTaskLog(taskId, 'points_refunded', '任务失败，积分已退回');
@@ -640,25 +636,35 @@ async function processTask(data: any): Promise<void> {
 function buildProviderParams(taskType: string, input: any, tierResult: TierModelResult) {
   if (taskType === 'video') {
     const sizePlan: SizePlan | undefined = input.sizePlan || input.params?.sizePlan;
-    const durationSeconds = input.params?.durationSeconds || normalizeDuration(input.params?.duration || '5s');
+    const durationSeconds = input.params?.durationSeconds || normalizeDuration(input.params?.duration || '5s') || 5;
+    const explicitRatio = String(input.params?.ratio || '').trim().toLowerCase() === 'adaptive'
+      ? 'adaptive'
+      : (input.params?.ratio || '');
     const params: Record<string, any> = {
       videoMode: input.params?.videoMode || input.subType || 'text_to_video',
-      ratio: sizePlan?.targetRatio || input.params?.ratio || tierResult.capabilities.defaultRatio || '9:16',
+      ratio: explicitRatio || sizePlan?.targetRatio || tierResult.capabilities.defaultRatio || '9:16',
       width: sizePlan?.targetWidth,
       height: sizePlan?.targetHeight,
       nativeSize: sizePlan?.nativeSize,
       sizePlan,
-      duration: durationSeconds,
+      duration: input.params?.durationRaw === 'auto' ? 'auto' : durationSeconds,
       durationText: input.params?.duration || `${durationSeconds}s`,
+      durationRaw: input.params?.durationRaw || input.params?.duration,
       fps: input.params?.fps,
+      seed: input.params?.seed,
       resolution: input.params?.resolution || input.params?.quality || '720p',
       cameraMove: input.params?.cameraMove || 'static',
       motionStrength: input.params?.motionStrength,
       style: input.params?.style,
       videoUrl: input.params?.videoUrl || input.params?.video_url,
       video_url: input.params?.video_url || input.params?.videoUrl,
+      audioUrl: input.params?.audioUrl || input.params?.audio_url,
+      audio_url: input.params?.audio_url || input.params?.audioUrl,
+      audioFileId: input.params?.audioFileId || input.params?.audio_file_id,
+      audio_file_id: input.params?.audio_file_id || input.params?.audioFileId,
       editTool: input.params?.editTool,
       negativePrompt: input.params?.negativePrompt,
+      referenceMode: input.params?.referenceMode,
     };
     if (input.params?.audioMode) {
       params.audioMode = input.params.audioMode;
@@ -671,9 +677,13 @@ function buildProviderParams(taskType: string, input: any, tierResult: TierModel
     return params;
   }
   const sizePlan: SizePlan | undefined = input.sizePlan;
+  const sizeOption = input.params?.sizeOption || null;
+  const resolutionPreset = input.params?.resolutionPreset;
   return {
-    ratio: sizePlan?.targetRatio || input.params?.ratio || tierResult.capabilities.defaultRatio || '1:1',
-    quality: input.params?.quality || 'standard',
+    ratio: sizeOption?.ratio || sizePlan?.targetRatio || input.params?.ratio || tierResult.capabilities.defaultRatio || '1:1',
+    resolutionPreset,
+    resolution: resolutionPreset && resolutionPreset !== 'auto' ? String(resolutionPreset).toLowerCase() : undefined,
+    quality: input.params?.quality,
     style: input.params?.style,
     negativePrompt: input.params?.negativePrompt,
     maskUrl: input.params?.maskUrl || input.params?.mask_url,
@@ -682,6 +692,8 @@ function buildProviderParams(taskType: string, input: any, tierResult: TierModel
     background_url: input.params?.background_url || input.params?.backgroundUrl,
     imageCount: Math.min(input.params?.imageCount || 1, tierResult.capabilities.maxImages || 1),
     sizePlan,
+    sizeKey: input.params?.sizeKey,
+    sizeOption,
     nativeSize: sizePlan?.nativeSize,
   };
 }
@@ -712,6 +724,7 @@ async function submitWithFallback(options: {
           prompt: options.prompt,
           images: options.images,
           params: options.params,
+          requestTemplate: model.requestTemplate,
           providerConfig: {
             baseUrl: model.providerApiBaseUrl || '',
             apiKey: model.providerApiKey || '',
@@ -734,7 +747,7 @@ async function submitWithFallback(options: {
                 intervalSeconds,
                 model.id,
                 options.params.videoMode || options.taskType,
-                options.params.duration || null,
+                options.params.durationSeconds || normalizeDuration(options.params.duration) || null,
                 options.params.ratio || null,
                 options.taskId,
               ],
@@ -742,6 +755,7 @@ async function submitWithFallback(options: {
             if (!updateResult || Number((updateResult as any).affectedRows || 0) === 0) {
               throw new Error('Task is no longer processing');
             }
+            const elapsed = Date.now() - startedAt;
             await query(
               "INSERT INTO ai_model_call_logs\n               (task_id, model_id, provider_id, user_id, call_type, attempt_number, request_body, response_body, is_success, latency_ms, created_at)\n               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, NOW(3))",
               [
@@ -753,9 +767,10 @@ async function submitWithFallback(options: {
                 attempt,
                 JSON.stringify({ ...options.params, images: options.images }),
                 JSON.stringify({ providerTaskId, status: result.status || 'submitted' }),
-                Date.now() - startedAt,
+                elapsed,
               ],
             );
+            console.log(`[Task #${options.taskId}] submitted to relay, providerTaskId=${providerTaskId}, elapsed=${elapsed}ms`);
             await addTaskLog(options.taskId, 'provider_task_submitted', 'Provider task submitted: ' + providerTaskId);
             await addTaskLog(options.taskId, options.taskType.includes('video') ? 'video_async_pending' : 'image_async_pending', 'Task moved to provider polling mode.');
             return { ...result, model, asyncPending: true };
@@ -787,7 +802,7 @@ async function submitWithFallback(options: {
 }
 
 
-export async function saveTaskOutput(input: {
+export type SaveTaskOutputInput = {
   taskId: number;
   userId: number;
   url: string;
@@ -797,7 +812,31 @@ export async function saveTaskOutput(input: {
   params: any;
   sizePlan?: SizePlan;
   metadata: any;
-}) {
+};
+
+export type SavedTaskOutput = {
+  outputId: number;
+  fileNo: string;
+  storageKey: string;
+};
+
+export async function saveTaskOutputWithRetry(input: SaveTaskOutputInput): Promise<SavedTaskOutput> {
+  const maxAttempts = Math.max(1, positiveInt(process.env.TASK_OUTPUT_TRANSFER_ATTEMPTS, 3));
+  let lastError: any = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await saveTaskOutput(input);
+    } catch (err: any) {
+      lastError = err;
+      if (attempt >= maxAttempts || !isRetryableOutputTransferError(err)) break;
+      await addTaskLog(input.taskId, 'output_transfer_retry', `输出转存失败，准备第 ${attempt + 1}/${maxAttempts} 次重试：${(err.message || '未知错误').substring(0, 300)}`);
+      await sleep(1000 * attempt);
+    }
+  }
+  throw lastError;
+}
+
+export async function saveTaskOutput(input: SaveTaskOutputInput): Promise<SavedTaskOutput> {
   let storageKey: string;
   const metadata = {
     ...(input.metadata || {}),
@@ -840,16 +879,15 @@ export async function saveTaskOutput(input: {
         outputName: `video${input.index + 1}.mp4`,
         outputIndex: input.index,
       });
-    } else if (input.url && input.url.length > 160 && /^[A-Za-z0-9+/]+={0,2}$/.test(input.url.trim())) {
+    } else if (isInlineBase64Output(input.url)) {
       // base64 data — write directly to buffer, skip HTTP download
       const buf = Buffer.from(input.url.trim(), 'base64');
-      const ext = input.outputType === 'video' ? '.mp4' : '.png';
       const transferService = require('./storage/transfer.service');
       transfer = await transferService.transferFromBuffer({
         taskId: input.taskId, userId: input.userId, buffer: buf,
         contentType: input.outputType === 'video' ? 'video/mp4' : 'image/png',
         outputType: input.outputType, outputIndex: input.index, metadata,
-        extension: ext,
+        outputName: input.outputType === 'video' ? `video${input.index + 1}` : `image${input.index + 1}`,
       });
     } else {
       const outputName = input.outputType === 'video'
@@ -871,30 +909,115 @@ export async function saveTaskOutput(input: {
     metadata.fileSize = transfer.fileSize;
     await addTaskLog(input.taskId, 'output_saved', `输出 ${input.index + 1} 已保存`);
   } catch (err: any) {
-    await addTaskLog(input.taskId, 'output_transfer_failed', '输出转存失败，已保留原始链接：' + (err.message || '未知错误'));
+    await addTaskLog(input.taskId, 'output_transfer_failed', `输出转存失败：${err.message || '未知错误'}；来源：${summarizeOutputSource(input.url)}`);
     throw err;
   }
 
-  await query(
-    `INSERT INTO ai_task_outputs
-     (task_id, output_index, output_name, title, subtitle, output_type, cos_key, ratio, style, width, height, prompt_used, metadata, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(3))`,
-    [
-      input.taskId,
-      input.index,
-      input.outputType === 'video' ? `视频${input.index + 1}` : `图片${input.index + 1}`,
-      input.outputType === 'video' ? 'AI 视频' : 'AI 图片',
-      input.outputType,
-      input.outputType,
+  try {
+    const thumbnailKey = String(
+      metadata.thumbnail_key || metadata.thumbnailKey || metadata.thumbnailUrl || metadata.thumbnail || '',
+    ).trim() || (input.outputType === 'image' ? storageKey : '');
+    const [result] = await query<any>(
+      `INSERT INTO ai_task_outputs
+       (task_id, output_index, output_name, title, subtitle, output_type, cos_key, thumbnail_key, ratio, style, width, height, prompt_used, metadata, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(3))`,
+      [
+        input.taskId,
+        input.index,
+        input.outputType === 'video' ? `视频${input.index + 1}` : `图片${input.index + 1}`,
+        input.outputType === 'video' ? 'AI 视频' : 'AI 图片',
+        input.outputType,
+        input.outputType,
+        storageKey,
+        thumbnailKey,
+        input.sizePlan?.targetRatio || input.params?.ratio || '',
+        input.params?.style || '',
+        transfer?.width || input.sizePlan?.targetWidth || 0,
+        transfer?.height || input.sizePlan?.targetHeight || 0,
+        input.prompt,
+        JSON.stringify(metadata),
+      ],
+    );
+    return {
+      outputId: Number((result as any)?.insertId || 0),
+      fileNo: String(transfer.fileNo || ''),
       storageKey,
-      input.sizePlan?.targetRatio || input.params?.ratio || '',
-      input.params?.style || '',
-      transfer?.width || input.sizePlan?.targetWidth || 0,
-      transfer?.height || input.sizePlan?.targetHeight || 0,
-      input.prompt,
-      JSON.stringify(metadata),
-    ],
-  );
+    };
+  } catch (err) {
+    await cleanupSavedTaskOutputs(input.taskId, [{
+      outputId: 0,
+      fileNo: String(transfer.fileNo || ''),
+      storageKey,
+    }]).catch(cleanupErr =>
+      addTaskLog(input.taskId, 'output_cleanup_failed', `输出入库失败后清理文件失败：${(cleanupErr.message || cleanupErr).toString().substring(0, 400)}`).catch(() => undefined),
+    );
+    throw err;
+  }
+}
+
+export async function cleanupSavedTaskOutputs(taskId: number, outputs: SavedTaskOutput[]): Promise<void> {
+  const outputIds = [...new Set(outputs.map(item => Number(item.outputId || 0)).filter(Boolean))];
+  const fileNos = [...new Set(outputs.map(item => String(item.fileNo || '').trim()).filter(Boolean))];
+  const storageKeys = [...new Set(outputs.map(item => String(item.storageKey || '').trim()).filter(Boolean))];
+
+  if (outputIds.length > 0) {
+    await query(
+      `DELETE FROM ai_task_outputs WHERE task_id = ? AND id IN (${outputIds.map(() => '?').join(',')})`,
+      [taskId, ...outputIds],
+    );
+  }
+
+  if (fileNos.length > 0) {
+    await query(
+      `UPDATE files
+          SET is_deleted = 1, deleted_at = NOW(3), updated_at = NOW(3)
+        WHERE ref_type = 'task_output'
+          AND ref_id = ?
+          AND file_no IN (${fileNos.map(() => '?').join(',')})
+          AND is_deleted = 0`,
+      [String(taskId), ...fileNos],
+    );
+  }
+
+  if (storageKeys.length > 0) {
+    const adapter = StorageService.getActiveAdapter();
+    for (const storageKey of storageKeys) {
+      const ref = await queryOne<any>(
+        'SELECT id FROM files WHERE storage_key = ? AND is_deleted = 0 LIMIT 1',
+        [storageKey],
+      );
+      if (ref) continue;
+      try {
+        await adapter.delete(storageKey);
+      } catch (err: any) {
+        await addTaskLog(taskId, 'output_object_cleanup_failed', `存储对象清理失败：${storageKey}，${(err.message || err).toString().substring(0, 300)}`).catch(() => undefined);
+      }
+    }
+  }
+
+  if (outputIds.length || fileNos.length || storageKeys.length) {
+    await addTaskLog(taskId, 'output_cleanup_done', `已清理失败任务的部分输出：${outputs.length} 个`).catch(() => undefined);
+  }
+}
+
+function isRetryableOutputTransferError(err: any): boolean {
+  const message = String(err?.message || '');
+  return !/不是有效图片|不是有效视频|base64 图片格式不正确|不是可下载 URL|图片内容为空|视频内容为空/.test(message);
+}
+
+function summarizeOutputSource(source: string): string {
+  const text = String(source || '').trim();
+  if (!text) return 'empty';
+  if (/^https?:\/\//i.test(text)) return text.slice(0, 500);
+  if (text.startsWith('data:')) return `[data-url:${text.length}]`;
+  if (isInlineBase64Output(text)) return `[base64:${text.length}]`;
+  return text.slice(0, 160);
+}
+
+function isInlineBase64Output(source: string): boolean {
+  const text = String(source || '').trim();
+  if (text.length <= 160 || text.length % 4 !== 0) return false;
+  return /^[A-Za-z0-9+/]+={0,2}$/.test(text);
 }
 
 export async function finalizeTaskSuccess(input: { taskId: number; pointsCost: number; actualModelId: number; costSnapshot: any }): Promise<void> {
@@ -957,61 +1080,67 @@ export async function finalizeTaskSuccess(input: { taskId: number; pointsCost: n
 }
 
 export async function finalizeTaskFailure(taskId: number, cost: number, reason: string): Promise<void> {
-  const conn = await getConnection();
-  try {
-    await conn.beginTransaction();
-    const [taskRows] = await conn.execute('SELECT user_id, points_refunded, status FROM ai_tasks WHERE id = ? FOR UPDATE', [taskId]) as any;
-    const task = taskRows?.[0];
-    if (!task?.user_id) { await conn.rollback(); return; }
-    if (task.status === 'failed' && task.points_refunded > 0) { await conn.rollback(); return; }
-    if (['completed', 'cancelled'].includes(task.status)) { await conn.rollback(); return; }
+  await withPointAccountRetry(`finalizeTaskFailure:${taskId}`, async () => {
+    const conn = await getConnection();
+    try {
+      await conn.beginTransaction();
+      const [taskRows] = await conn.execute('SELECT user_id, points_refunded, status FROM ai_tasks WHERE id = ? FOR UPDATE', [taskId]) as any;
+      const task = taskRows?.[0];
+      if (!task?.user_id) { await conn.rollback(); return; }
+      if (task.status === 'failed' && task.points_refunded > 0) { await conn.rollback(); return; }
+      if (['completed', 'cancelled'].includes(task.status)) { await conn.rollback(); return; }
 
-    const [accRows] = await conn.execute('SELECT balance, frozen_balance, version FROM point_accounts WHERE user_id = ? FOR UPDATE', [task.user_id]) as any;
-    const account = accRows?.[0];
-    if (!account) { await conn.rollback(); return; }
-    const frozenBefore = account.frozen_balance || 0;
-    const refundAmount = task.points_refunded > 0 ? 0 : Math.min(cost, frozenBefore);
+      const [accRows] = await conn.execute('SELECT balance, frozen_balance, version FROM point_accounts WHERE user_id = ? FOR UPDATE', [task.user_id]) as any;
+      const account = accRows?.[0];
+      if (!account) { await conn.rollback(); return; }
+      const frozenBefore = account.frozen_balance || 0;
+      const refundAmount = task.points_refunded > 0 ? 0 : Math.min(cost, frozenBefore);
 
-    await conn.execute(
-      `UPDATE point_accounts SET balance = balance + ?, frozen_balance = GREATEST(frozen_balance - ?, 0),
-       total_refunded = total_refunded + ?, version = version + 1, updated_at = NOW(3) WHERE user_id = ? AND version = ?`,
-      [refundAmount, refundAmount, refundAmount, task.user_id, account.version],
-    );
-    await conn.execute(
-      `INSERT IGNORE INTO point_logs
-       (user_id, type, amount, balance_before, balance_after, frozen_before, frozen_after, source, ref_type, ref_id, title, created_at)
-       VALUES (?, 'refund', ?, ?, ?, ?, ?, 'task_refund', 'ai_task_refund', ?, '任务失败退回积分', NOW(3))`,
-      [task.user_id, refundAmount, account.balance, account.balance + refundAmount, frozenBefore, Math.max(frozenBefore - refundAmount, 0), String(taskId)],
-    );
-    await conn.execute(
-      "UPDATE ai_tasks SET status = 'failed', fail_reason = ?, points_refunded = points_refunded + ?, provider_status = COALESCE(provider_status, 'failed'), provider_status_message = ?, next_poll_at = NULL, processing_lock_until = NULL, failed_at = NOW(3), updated_at = NOW(3) WHERE id = ?",
-      [reason.substring(0, 255), refundAmount, reason.substring(0, 1000), taskId],
-    );
-    await conn.execute('UPDATE user_assets SET points_balance = ?, updated_at = NOW(3) WHERE user_id = ?', [account.balance + refundAmount, task.user_id]);
-    await conn.execute('INSERT INTO ai_task_logs (task_id, event, message, created_at) VALUES (?, ?, ?, NOW(3))', [taskId, 'points_refunded', '任务失败，积分已退回']);
-    await conn.execute('INSERT INTO ai_task_logs (task_id, event, message, created_at) VALUES (?, ?, ?, NOW(3))', [taskId, 'failed', reason.substring(0, 500)]);
-    await conn.commit();
-  } catch (err) {
-    await conn.rollback();
-    throw err;
-  } finally {
-    conn.release();
-  }
+      const [updateResult] = await conn.execute(
+        `UPDATE point_accounts SET balance = balance + ?, frozen_balance = GREATEST(frozen_balance - ?, 0),
+         total_refunded = total_refunded + ?, version = version + 1, updated_at = NOW(3) WHERE user_id = ? AND version = ?`,
+        [refundAmount, refundAmount, refundAmount, task.user_id, account.version],
+      ) as any;
+      if (Number(updateResult?.affectedRows || 0) === 0) throw Object.assign(new Error('积分账户版本冲突'), { code: 'POINT_VERSION_CONFLICT' });
+      await conn.execute(
+        `INSERT IGNORE INTO point_logs
+         (user_id, type, amount, balance_before, balance_after, frozen_before, frozen_after, source, ref_type, ref_id, title, created_at)
+         VALUES (?, 'refund', ?, ?, ?, ?, ?, 'task_refund', 'ai_task_refund', ?, '任务失败退回积分', NOW(3))`,
+        [task.user_id, refundAmount, account.balance, account.balance + refundAmount, frozenBefore, Math.max(frozenBefore - refundAmount, 0), String(taskId)],
+      );
+      await conn.execute(
+        "UPDATE ai_tasks SET status = 'failed', fail_reason = ?, points_refunded = points_refunded + ?, provider_status = COALESCE(provider_status, 'failed'), provider_status_message = ?, next_poll_at = NULL, processing_lock_until = NULL, failed_at = NOW(3), updated_at = NOW(3) WHERE id = ?",
+        [reason.substring(0, 255), refundAmount, reason.substring(0, 1000), taskId],
+      );
+      await conn.execute('UPDATE user_assets SET points_balance = ?, updated_at = NOW(3) WHERE user_id = ?', [account.balance + refundAmount, task.user_id]);
+      await conn.execute('INSERT INTO ai_task_logs (task_id, event, message, created_at) VALUES (?, ?, ?, NOW(3))', [taskId, 'points_refunded', '任务失败，积分已退回']);
+      await conn.execute('INSERT INTO ai_task_logs (task_id, event, message, created_at) VALUES (?, ?, ?, NOW(3))', [taskId, 'failed', reason.substring(0, 500)]);
+      await conn.commit();
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+  });
 }
 
-async function finalizeTaskCancelled(taskId: number, cost: number): Promise<void> {
+type CancelTaskResult = 'cancelled' | 'processing' | 'unavailable';
+
+async function finalizeTaskCancelled(taskId: number, userId: number): Promise<CancelTaskResult> {
   const conn = await getConnection();
   try {
     await conn.beginTransaction();
-    const [taskRows] = await conn.execute('SELECT user_id, points_refunded, status FROM ai_tasks WHERE id = ? FOR UPDATE', [taskId]) as any;
+    const [taskRows] = await conn.execute('SELECT user_id, points_cost, points_refunded, status FROM ai_tasks WHERE id = ? AND user_id = ? FOR UPDATE', [taskId, userId]) as any;
     const task = taskRows?.[0];
+    if (!task?.user_id || ['completed', 'failed', 'cancelled'].includes(task.status)) { await conn.rollback(); return 'unavailable'; }
     // 已在处理中的任务不允许取消（AI 提供商已接受请求，平台需承担成本）
-    if (!task?.user_id || ['completed', 'failed', 'cancelled', 'processing'].includes(task.status)) { await conn.rollback(); return; }
+    if (task.status === 'processing') { await conn.rollback(); return 'processing'; }
     const [accRows] = await conn.execute('SELECT balance, frozen_balance, version FROM point_accounts WHERE user_id = ? FOR UPDATE', [task.user_id]) as any;
     const account = accRows?.[0];
-    if (!account) { await conn.rollback(); return; }
+    if (!account) { await conn.rollback(); return 'unavailable'; }
     const frozenBefore = account.frozen_balance || 0;
-    const refundAmount = task.points_refunded > 0 ? 0 : Math.min(cost, frozenBefore);
+    const refundAmount = task.points_refunded > 0 ? 0 : Math.min(task.points_cost || 0, frozenBefore);
     await conn.execute(
       `UPDATE point_accounts SET balance = balance + ?, frozen_balance = GREATEST(frozen_balance - ?, 0),
        total_refunded = total_refunded + ?, version = version + 1, updated_at = NOW(3) WHERE user_id = ? AND version = ?`,
@@ -1027,6 +1156,7 @@ async function finalizeTaskCancelled(taskId: number, cost: number): Promise<void
     await conn.execute('UPDATE user_assets SET points_balance = ?, updated_at = NOW(3) WHERE user_id = ?', [account.balance + refundAmount, task.user_id]);
     await conn.execute('INSERT INTO ai_task_logs (task_id, event, message, created_at) VALUES (?, ?, ?, NOW(3))', [taskId, 'cancelled', '任务已取消']);
     await conn.commit();
+    return 'cancelled';
   } catch (err) {
     await conn.rollback();
     throw err;
@@ -1037,7 +1167,7 @@ async function finalizeTaskCancelled(taskId: number, cost: number): Promise<void
 
 export async function recoverStaleAiTasks(): Promise<{ recovered: number; failed: number }> {
   const queuedMinutes = positiveInt(process.env.TASK_QUEUE_STALE_QUEUED_MINUTES, 30);
-  const processingMinutes = positiveInt(process.env.TASK_QUEUE_STALE_PROCESSING_MINUTES, 60);
+  const processingMinutes = positiveInt(process.env.TASK_QUEUE_STALE_PROCESSING_MINUTES, 30);
   const maxBatch = positiveInt(process.env.TASK_QUEUE_STALE_MAX_BATCH, 100);
 
   const queuedTasks = await query<any>(
@@ -1070,17 +1200,23 @@ export async function recoverStaleAiTasks(): Promise<{ recovered: number; failed
     }
 
     try {
+      const claimed = await claimQueuedTaskForRecovery(task.id);
+      if (!claimed) {
+        await addTaskLog(task.id, 'queue_recovery_skip', 'Task was claimed by another worker.').catch(() => undefined);
+        continue;
+      }
       const payload = await buildRecoveredTaskPayload(task.id);
-      const updated = await markTaskQueued(task.id);
-      if (!updated) {
-        throw new Error('Task was not claimable for queue recovery');
+      const queued = enqueue(task.id, payload, processTask);
+      if (!queued) {
+        await releaseRecoveryLock(task.id);
+        await addTaskLog(task.id, 'queue_recovery_queue_full', QUEUE_FULL_MESSAGE).catch(() => undefined);
+        continue;
       }
       await addTaskLog(task.id, 'task_recovered', 'Queued task restored after restart.');
-      enqueue(task.id, payload, processTask);
       recovered++;
     } catch (err: any) {
+      await releaseRecoveryLock(task.id).catch(() => undefined);
       await addTaskLog(task.id, 'queue_recovery_failed', (err.message || 'Queue recovery failed').substring(0, 500)).catch(() => undefined);
-      await failTask(task, (err.message || 'Queue recovery failed').substring(0, 1000));
     }
   }
 
@@ -1096,7 +1232,7 @@ export async function recoverStaleAiTasks(): Promise<{ recovered: number; failed
 
     if (task.task_type === 'video') {
       if (ageMinutes <= processingMinutes) {
-        await addTaskLog(task.id, 'video_processing_wait', 'Video task is waiting for a provider task id.').catch(() => undefined);
+        await addTaskLog(task.id, 'video_processing_active_skip', 'Video task may still be running in another worker.').catch(() => undefined);
         continue;
       }
       await failTask(task, 'Video task was left processing without provider task id after restart');
@@ -1104,7 +1240,11 @@ export async function recoverStaleAiTasks(): Promise<{ recovered: number; failed
     }
 
     if (task.task_type === 'image') {
-      await addTaskLog(task.id, 'image_processing_recovered', 'Image processing task cannot be resumed after restart.').catch(() => undefined);
+      if (ageMinutes <= processingMinutes) {
+        await addTaskLog(task.id, 'image_processing_active_skip', 'Image task may still be running in another worker.').catch(() => undefined);
+        continue;
+      }
+      await addTaskLog(task.id, 'image_processing_stale_failed', 'Image processing task cannot be resumed after restart.').catch(() => undefined);
       await failTask(task, 'Image task cannot be resumed after restart');
       continue;
     }
@@ -1163,7 +1303,8 @@ async function buildRecoveredTaskPayload(taskId: number): Promise<any> {
     throw new Error('Recovered image task requires unsupported postprocess mode');
   }
 
-  const recoveredParams: Record<string, any> = { ...inputParams, ratio: sizePlan.targetRatio, sizePlan, sizeWarnings: [...(inputParams.sizeWarnings || []), ...(sizePlan.warnings || [])] };
+  const recoveredRatio = String(inputParams.ratio || '').trim().toLowerCase() === 'adaptive' ? 'adaptive' : sizePlan.targetRatio;
+  const recoveredParams: Record<string, any> = { ...inputParams, ratio: recoveredRatio, sizePlan, sizeWarnings: [...(inputParams.sizeWarnings || []), ...(sizePlan.warnings || [])] };
   let uploadKeys = normalizeUploadKeys(recoveredParams.uploadKeys);
 
   if (task.task_type === 'video') {
@@ -1171,6 +1312,7 @@ async function buildRecoveredTaskPayload(taskId: number): Promise<any> {
     const durationPlan = resolveVideoDuration(recoveredParams.duration || recoveredParams.durationSeconds, tierResult.capabilities);
     recoveredParams.videoMode = videoMode;
     recoveredParams.duration = durationPlan.durationText;
+    recoveredParams.durationRaw = durationPlan.durationRaw;
     recoveredParams.durationSeconds = durationPlan.duration;
     recoveredParams.durationSource = durationPlan.source;
     const referenceImages = await resolveVideoReferenceImages(task.user_id, videoMode, recoveredParams);
@@ -1205,15 +1347,32 @@ async function buildRecoveredTaskPayload(taskId: number): Promise<any> {
   };
 }
 
-async function markTaskQueued(taskId: number) {
-  const [result] = await query<any>("UPDATE ai_tasks SET status = 'queued', queued_at = COALESCE(queued_at, NOW(3)), updated_at = NOW(3) WHERE id = ? AND status IN ('pending', 'queued')", [taskId]);
+async function claimQueuedTaskForRecovery(taskId: number): Promise<boolean> {
+  const [result] = await query<any>(
+    `UPDATE ai_tasks
+        SET status = 'queued',
+            queued_at = COALESCE(queued_at, NOW(3)),
+            processing_lock_until = DATE_ADD(NOW(3), INTERVAL ${RECOVERY_LOCK_MINUTES} MINUTE),
+            updated_at = NOW(3)
+      WHERE id = ?
+        AND status IN ('pending', 'queued')
+        AND (processing_lock_until IS NULL OR processing_lock_until < NOW(3))`,
+    [taskId],
+  );
   if (!result || Number((result as any).affectedRows || 0) === 0) return false;
   await addTaskLog(taskId, 'queued', 'Task queued.');
   return true;
 }
 
+async function releaseRecoveryLock(taskId: number): Promise<void> {
+  await query(
+    "UPDATE ai_tasks SET processing_lock_until = NULL, updated_at = NOW(3) WHERE id = ? AND status IN ('pending', 'queued')",
+    [taskId],
+  );
+}
+
 async function startTaskProcessing(taskId: number): Promise<boolean> {
-  const [result] = await query<any>("UPDATE ai_tasks SET status = 'processing', started_at = NOW(3), updated_at = NOW(3) WHERE id = ? AND status = 'queued'", [taskId]);
+  const [result] = await query<any>("UPDATE ai_tasks SET status = 'processing', started_at = NOW(3), processing_lock_until = NULL, updated_at = NOW(3) WHERE id = ? AND status = 'queued'", [taskId]);
   if (!result || Number((result as any).affectedRows || 0) === 0) return false;
   await addTaskLog(taskId, 'processing_start', 'Task processing started.');
   return true;
@@ -1221,7 +1380,8 @@ async function startTaskProcessing(taskId: number): Promise<boolean> {
 
 
 export async function addTaskLog(taskId: number, event: string, message: string) {
-  await query('INSERT INTO ai_task_logs (task_id, event, message, created_at) VALUES (?, ?, ?, NOW(3))', [taskId, event, message]);
+  const safeMessage = String(message ?? '').slice(0, 500);
+  await query('INSERT INTO ai_task_logs (task_id, event, message, created_at) VALUES (?, ?, ?, NOW(3))', [taskId, event, safeMessage]);
 }
 
 async function transferOutput(input: {
@@ -1244,82 +1404,26 @@ async function transferVideoOutputStream(input: {
   outputName: string;
   outputIndex: number;
 }): Promise<any> {
-  const appRoot = path.resolve(process.env.APP_ROOT_DIR || '/www/wwwroot/ai-creator');
-  const tmpRoot = process.env.VIDEO_TASK_TMP_DIR
-    ? path.resolve(process.env.VIDEO_TASK_TMP_DIR)
-    : path.join(appRoot, 'shared', 'tmp', 'video-transfer');
-  await fs.promises.mkdir(tmpRoot, { recursive: true });
-  const tmpPath = path.join(tmpRoot, `video_${input.taskId}_${Date.now()}.mp4`);
-  const maxBytes = positiveInt(process.env.VIDEO_TASK_MAX_FILE_MB, 200) * 1024 * 1024;
-  const downloadTimeout = positiveInt(process.env.VIDEO_TASK_DOWNLOAD_TIMEOUT_SECONDS, 120) * 1000;
-  const uploadTimeout = positiveInt(process.env.VIDEO_TASK_UPLOAD_TIMEOUT_SECONDS, 180) * 1000;
-  try {
-    const response = await axios.get(input.sourceUrl, { responseType: 'stream', timeout: downloadTimeout });
-    const declaredLength = Number(response.headers['content-length'] || 0);
-    if (declaredLength > maxBytes) {
-      throw new Error(`视频文件超过大小限制 ${Math.floor(maxBytes / 1024 / 1024)} MB`);
-    }
-    let downloaded = 0;
-    response.data.on('data', (chunk: Buffer) => {
-      downloaded += chunk.length;
-      if (downloaded > maxBytes) {
-        response.data.destroy(new Error(`视频文件超过大小限制 ${Math.floor(maxBytes / 1024 / 1024)} MB`));
-      }
-    });
-    await addTaskLog(input.taskId, 'video_download_start', '开始下载视频结果');
-    await pipeline(response.data, fs.createWriteStream(tmpPath));
+  return transferOutput({ ...input, outputType: 'video' });
+}
 
-    const adapter = StorageService.getActiveAdapter();
-    const stat = fs.statSync(tmpPath);
-    const contentType = String(response.headers['content-type'] || 'video/mp4').split(';')[0] || 'video/mp4';
-    const extension = videoExtensionFromContentType(contentType);
-    const storageKey = StorageService.genStorageKey('ai_video', ensureNamedExtension(input.outputName, extension));
-    await addTaskLog(input.taskId, 'video_upload_start', '开始上传视频结果');
-    const result = await withTimeout(
-      adapter.uploadLarge(storageKey, fs.createReadStream(tmpPath), contentType, stat.size),
-      uploadTimeout,
-      '视频上传超时',
-    );
-    const fileNo = StorageService.genFileNo();
-
-    await query(
-      `INSERT INTO files
-       (file_no, user_id, provider, storage_key, original_name, mime_type, file_size, width, height, duration, md5_hash, etag, access_url, cdn_url, file_category, visibility, ref_type, ref_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, '', ?, ?, ?, 'ai_video', 'private', 'task_output', ?, NOW(3))`,
-      [
-        fileNo,
-        input.userId,
-        adapter.provider,
-        storageKey,
-        input.outputName,
-        contentType,
-        stat.size,
-        result.etag || '',
-        result.url,
-        result.cdnUrl,
-        String(input.taskId),
-      ],
-    );
-
-    return {
-      fileNo,
-      storageKey,
-      cdnUrl: result.cdnUrl,
-      width: 0,
-      height: 0,
-      fileSize: stat.size,
-      mimeType: contentType,
-    };
-  } finally {
-    if (fs.existsSync(tmpPath)) {
-      try {
-        fs.unlinkSync(tmpPath);
-        await addTaskLog(input.taskId, 'video_tmp_cleaned', '视频临时文件已清理').catch(() => undefined);
-      } catch (err: any) {
-        await addTaskLog(input.taskId, 'video_tmp_clean_warning', `视频临时文件清理失败：${(err.message || err).toString().substring(0, 300)}`).catch(() => undefined);
-      }
-    }
+function validateVideoStreamContent(filePath: string, fileSize: number, contentType: string): void {
+  const declared = String(contentType || 'application/octet-stream').split(';')[0].trim().toLowerCase() || 'application/octet-stream';
+  if (fileSize <= 0) throw new Error('模型返回的视频内容为空');
+  const header = fs.readFileSync(filePath).subarray(0, 256);
+  const preview = mediaContentPreview(header);
+  const looksLikeTextError = /^[\s\uFEFF]*(\{|\[|<!doctype|<html|<\?xml)/i.test(preview);
+  if (looksLikeTextError || declared.includes('json') || declared.includes('html') || declared.startsWith('text/')) {
+    throw new Error(`模型返回内容不是有效视频，可能是错误页或 JSON 响应（content-type: ${declared}，开头: ${preview || '[binary]'}）`);
   }
+}
+
+function mediaContentPreview(buffer: Buffer): string {
+  return buffer
+    .toString('utf8')
+    .replace(/[^\x20-\x7E\u4e00-\u9fa5]+/g, ' ')
+    .trim()
+    .slice(0, 120);
 }
 
 export async function getTaskById(taskId: number, userId: number) {
@@ -1331,8 +1435,9 @@ export async function getTaskById(taskId: number, userId: number) {
   const formData = parseJson(inputRow?.form_data, {});
   const priceSnapshot = parseJson(task.price_snapshot, {});
 
-  const underReview = task.audit_status === 'pending';
-  const publicOutputs = underReview ? [] : outputs.map((o: any) => buildPublicTaskOutput(o, params)).filter(Boolean);
+  const publicOutputs = shouldHideTaskOutputs(task.audit_status)
+    ? []
+    : outputs.map((o: any) => buildPublicTaskOutput(o, params)).filter(Boolean);
   const firstOutput = publicOutputs[0] || null;
   return {
     id: task.id,
@@ -1372,18 +1477,24 @@ export async function getTaskById(taskId: number, userId: number) {
   };
 }
 
-export async function getTasksList(userId: number, options: { type?: string; status?: string; keyword?: string; page?: number; pageSize?: number }) {
-  const page = options.page || 1;
-  const pageSize = Math.min(options.pageSize || 20, 100);
-  const offset = (page - 1) * pageSize;
+export async function getTasksList(userId: number, options: { type?: string; status?: string; keyword?: string; page?: number; pageSize?: number; lastId?: number }) {
+  const page = Math.max(1, options.page || 1);
+  const pageSize = Math.min(Math.max(options.pageSize || 20, 1), 100);
+  const lastId = Number(options.lastId || 0);
+  const useCursor = Number.isFinite(lastId) && lastId > 0;
+  const offset = useCursor ? 0 : (page - 1) * pageSize;
   let where = 't.user_id = ?';
   const params: any[] = [userId];
   if (options.type) { where += ' AND t.task_type = ?'; params.push(options.type); }
   if (options.status) { where += ' AND t.status = ?'; params.push(options.status); }
   if (options.keyword) { where += ' AND (t.title LIKE ? OR i.prompt LIKE ?)'; params.push(`%${options.keyword}%`, `%${options.keyword}%`); }
+  if (useCursor) { where += ' AND t.id < ?'; params.push(lastId); }
 
-  const list = await query<any>(
-    `SELECT t.id, t.task_no, t.task_type, t.sub_type, t.title, t.status, t.progress, t.points_cost, t.points_refunded,
+  const conn = await getConnection();
+  try {
+    const [rows] = await conn.query(
+      `SELECT SQL_CALC_FOUND_ROWS
+       t.id, t.task_no, t.task_type, t.sub_type, t.title, t.status, t.progress, t.points_cost, t.points_refunded,
        t.price_snapshot, t.fail_reason, t.audit_status, t.audit_reason, t.created_at, t.completed_at,
        i.prompt, i.optimized_prompt, i.negative_prompt, i.form_data, i.params, i.edit_tool,
        o.output_index, o.output_name, o.output_type, o.title as output_title, o.subtitle as output_subtitle,
@@ -1393,10 +1504,51 @@ export async function getTasksList(userId: number, options: { type?: string; sta
      LEFT JOIN ai_task_inputs i ON i.task_id = t.id
      LEFT JOIN ai_task_outputs o ON o.task_id = t.id AND o.output_index = 0
      WHERE ${where}
-     ORDER BY t.created_at DESC LIMIT ? OFFSET ?`,
-    [...params, pageSize, offset],
+     ORDER BY t.id DESC LIMIT ? OFFSET ?`,
+      [...params, pageSize, offset],
+    ) as any;
+    const [foundRows] = await conn.query('SELECT FOUND_ROWS() AS total') as any;
+    const list = Array.isArray(rows) ? rows : [];
+    const total = Number(foundRows?.[0]?.total || 0);
+    const mappedList = mapTaskListRows(list);
+    const nextCursor = mappedList.length ? Number(mappedList[mappedList.length - 1].id || 0) : null;
+    return {
+      list: mappedList,
+      pagination: {
+        page,
+        pageSize,
+        total,
+        totalPages: Math.ceil(total / pageSize),
+        nextCursor,
+        hasMore: useCursor ? mappedList.length >= pageSize : page * pageSize < total,
+      },
+    };
+  } finally {
+    conn.release();
+  }
+}
+
+export async function getTasksByIds(userId: number, ids: number[]) {
+  const taskIds = [...new Set(ids.map(id => Number(id)).filter(id => Number.isInteger(id) && id > 0))].slice(0, 50);
+  if (!taskIds.length) return { list: [] };
+  const rows = await query<any>(
+    `SELECT t.id, t.task_no, t.task_type, t.sub_type, t.title, t.status, t.progress, t.points_cost, t.points_refunded,
+       t.price_snapshot, t.fail_reason, t.audit_status, t.audit_reason, t.created_at, t.completed_at,
+       i.prompt, i.optimized_prompt, i.negative_prompt, i.form_data, i.params, i.edit_tool,
+       o.output_index, o.output_name, o.output_type, o.title as output_title, o.subtitle as output_subtitle,
+       o.ratio as output_ratio, o.style as output_style, o.width as output_width, o.height as output_height,
+       o.cos_key, o.thumbnail_key, o.metadata as output_metadata
+     FROM ai_tasks t
+     LEFT JOIN ai_task_inputs i ON i.task_id = t.id
+     LEFT JOIN ai_task_outputs o ON o.task_id = t.id AND o.output_index = 0
+     WHERE t.user_id = ? AND t.id IN (${taskIds.map(() => '?').join(',')})
+     ORDER BY t.id ASC`,
+    [userId, ...taskIds],
   );
-  const [countRow] = await query<any>(`SELECT COUNT(*) as total FROM ai_tasks t LEFT JOIN ai_task_inputs i ON i.task_id = t.id WHERE ${where}`, params);
+  return { list: mapTaskListRows(rows) };
+}
+
+function mapTaskListRows(list: any[]) {
   return {
     list: list.map((t: any) => {
       const taskParams = parseJson(t.params, {});
@@ -1416,8 +1568,7 @@ export async function getTasksList(userId: number, options: { type?: string; sta
         thumbnail_key: t.thumbnail_key,
         metadata: t.output_metadata,
       }, taskParams) : null;
-      const underReview = t.audit_status === 'pending';
-      const publicOutputs = underReview ? [] : (output ? [output] : []);
+      const publicOutputs = shouldHideTaskOutputs(t.audit_status) ? [] : (output ? [output] : []);
       const firstOutput = publicOutputs[0] || null;
       return {
         id: t.id,
@@ -1456,19 +1607,15 @@ export async function getTasksList(userId: number, options: { type?: string; sta
         completedAt: t.completed_at,
       };
     }),
-    pagination: { page, pageSize, total: countRow?.total || 0, totalPages: Math.ceil((countRow?.total || 0) / pageSize) },
-  };
+  }.list;
 }
 
 export async function cancelTask(taskId: number, userId: number): Promise<boolean> {
-  const task = await queryOne<any>('SELECT * FROM ai_tasks WHERE id = ? AND user_id = ?', [taskId, userId]);
-  if (!task || ['completed', 'failed', 'cancelled'].includes(task.status)) return false;
-  if (task.status === 'processing') {
+  const result = await finalizeTaskCancelled(taskId, userId);
+  if (result === 'processing') {
     throw Object.assign(new Error('任务正在处理中，无法取消'), { code: 4000 });
   }
-  await finalizeTaskCancelled(taskId, task.points_cost);
-  await addTaskLog(taskId, 'cancelled', '任务已取消');
-  return true;
+  return result === 'cancelled';
 }
 
 export async function createMangaTask(_input: any) {
@@ -1515,6 +1662,27 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer!));
 }
 
+async function withPointAccountRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  const maxAttempts = 3;
+  let lastError: any = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      lastError = err;
+      if (!isPointVersionConflict(err) || attempt >= maxAttempts) break;
+      console.warn(`[Points] ${label} version conflict, retry ${attempt}/${maxAttempts}`);
+      await sleep(100);
+    }
+  }
+  throw lastError;
+}
+
+function isPointVersionConflict(err: any): boolean {
+  const message = String(err?.message || '');
+  return err?.code === 'POINT_VERSION_CONFLICT' || /积分账户.*(版本|并发)|version conflict/i.test(message);
+}
+
 function parseJson(value: any, fallback: any): any {
   if (value === null || value === undefined) return fallback;
   if (typeof value === 'object') return value;
@@ -1540,6 +1708,39 @@ function filterImageParams(params: Record<string, any>): Record<string, any> {
     else if (Array.isArray(value)) clean[key] = value.slice(0, 20);
   }
   return clean;
+}
+
+function normalizeImageResolutionParams(params: Record<string, any>, input: CreateImageTaskParams): void {
+  const explicitResolution = input.resolutionPreset ?? params.resolutionPreset;
+  const legacyQuality = params.quality;
+  const source = explicitResolution !== undefined ? explicitResolution : legacyQuality;
+  if (isResolutionPreset(source)) {
+    params.resolutionPreset = normalizeResolutionPreset(source);
+    if (legacyQuality !== undefined && isResolutionPreset(legacyQuality)) delete params.quality;
+  }
+  if (input.sizeKey !== undefined && input.sizeKey !== null) params.sizeKey = String(input.sizeKey).trim();
+  if (params.resolutionPreset && !params.resolutionLabel) {
+    params.resolutionLabel = params.resolutionPreset === 'auto' ? '自动' : `${params.resolutionPreset}清晰度`;
+  }
+}
+
+function normalizeImageCount(value: any, maxImages: number): number {
+  const count = positiveInt(value, 1);
+  return Math.max(1, Math.min(count, Math.max(1, Number(maxImages || 1))));
+}
+
+function applyImageCountPricing(tierResult: TierModelResult, imageCount: number): TierModelResult {
+  const count = Math.max(1, Number(imageCount || 1));
+  const unitBasePointsCost = tierResult.unitBasePointsCost ?? tierResult.basePointsCost;
+  const unitPointsCost = tierResult.unitPointsCost ?? tierResult.pointsCost;
+  return {
+    ...tierResult,
+    unitBasePointsCost,
+    unitPointsCost,
+    imageCount: count,
+    basePointsCost: unitBasePointsCost * count,
+    pointsCost: unitPointsCost * count,
+  };
 }
 
 function filterVideoParams(params: Record<string, any>): Record<string, any> {
@@ -1628,8 +1829,8 @@ async function resolveImageReferenceImages(
 
   const urls = new Set<string>();
   const metadata: any[] = [];
-  for (const item of mainItems) {
-    const resolved = await resolveSingleImageReference(userId, item);
+  const mainRefs = await Promise.all(mainItems.map((item) => resolveSingleImageReference(userId, item)));
+  for (const resolved of mainRefs) {
     if (!resolved?.url) continue;
     urls.add(resolved.url);
     metadata.push(resolved.metadata);
@@ -1642,8 +1843,8 @@ async function resolveImageReferenceImages(
   // 图生图额外处理风格参考图
   const referenceUrls: string[] = [];
   if (normalizedSubType === 'img2img' && refItems.length > 0) {
-    for (const item of refItems) {
-      const resolved = await resolveSingleImageReference(userId, item);
+    const refResults = await Promise.all(refItems.map((item) => resolveSingleImageReference(userId, item)));
+    for (const resolved of refResults) {
       if (!resolved?.url) continue;
       referenceUrls.push(resolved.url);
     }
@@ -1654,13 +1855,17 @@ async function resolveImageReferenceImages(
 
 async function resolveSingleImageReference(userId: number, item: any): Promise<{ url: string; metadata: any } | null> {
   const directUrl = extractDirectReferenceUrl(item);
-  if (directUrl) return { url: directUrl, metadata: { role: 'reference_image', url: directUrl } };
+  if (directUrl) {
+    assertPublicHttpReferenceUrl(directUrl);
+    return { url: directUrl, metadata: { role: 'reference_image', url: directUrl } };
+  }
 
   const fileLookup = extractFileReferenceLookup(item);
   if (!fileLookup) return null;
   const file = await loadImageFileByReference(fileLookup, userId);
   const url = file.cdn_url || file.access_url || storageKeyToUrl(file.storage_key);
   if (!url) throw paramError('参考图片缺少可访问地址');
+  assertPublicHttpReferenceUrl(url);
   return {
     url,
     metadata: {
@@ -1675,19 +1880,49 @@ async function resolveSingleImageReference(userId: number, item: any): Promise<{
   };
 }
 
+function assertPublicHttpReferenceUrl(url: string): void {
+  const text = String(url || '').trim();
+  if (text.startsWith('data:')) {
+    throw paramError('图生图参考图必须是公网可访问的 http/https URL，当前模型不支持 base64/data URL。请先上传图片并使用返回的公网地址。');
+  }
+  if (!/^https?:\/\//i.test(text)) {
+    throw paramError('参考图 URL 必须以 http 或 https 开头');
+  }
+  try {
+    const parsed = new URL(text);
+    const host = parsed.hostname.toLowerCase();
+    if (
+      host === 'localhost'
+      || host === '127.0.0.1'
+      || host === '::1'
+      || host.endsWith('.local')
+      || /^10\./.test(host)
+      || /^192\.168\./.test(host)
+      || /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
+    ) {
+      throw paramError('参考图必须是第三方模型可访问的公网 URL，不能使用 localhost、内网地址或本地文件地址。');
+    }
+  } catch (err: any) {
+    if (err?.code) throw err;
+    throw paramError('参考图 URL 格式不正确');
+  }
+}
+
 async function resolveImageEditAuxiliaryReferences(userId: number, params: Record<string, any>): Promise<{ metadata: any[] }> {
   const metadata: any[] = [];
-  const mask = await resolveOptionalImageReference(userId, params.maskFileId || params.maskImage || params.maskUrl || params.mask_url, 'mask');
+  const [mask, background] = await Promise.all([
+    resolveOptionalImageReference(userId, params.maskFileId || params.maskImage || params.maskUrl || params.mask_url, 'mask'),
+    resolveOptionalImageReference(
+      userId,
+      params.backgroundFileId || params.backgroundImage || params.backgroundUrl || params.background_url,
+      'background',
+    ),
+  ]);
   if (mask) {
     params.maskUrl = mask.url;
     params.mask_url = mask.url;
     metadata.push(mask.metadata);
   }
-  const background = await resolveOptionalImageReference(
-    userId,
-    params.backgroundFileId || params.backgroundImage || params.backgroundUrl || params.background_url,
-    'background',
-  );
   if (background) {
     params.backgroundUrl = background.url;
     params.background_url = background.url;
@@ -1720,7 +1955,7 @@ function extractFileReferenceLookup(item: any): { id?: number; fileNo?: string; 
     const text = item.trim();
     if (!text) return null;
     if (/^\d+$/.test(text)) return { id: Number(text) };
-    if (/^[A-Z0-9]{8,20}$/i.test(text) && !text.includes('/')) return { fileNo: text };
+    if (/^[A-Z0-9_-]{8,20}$/i.test(text) && !text.includes('/')) return { fileNo: text };
     if (text.startsWith('/')) return { fileUrl: text };
     return { storageKey: text };
   }
@@ -1758,7 +1993,7 @@ async function loadFileByReference(
   else throw paramError(`${label}参数无效`);
 
   const file = await queryOne<any>(
-    `SELECT id, file_no, user_id, mime_type, cdn_url, access_url, storage_key, width, height
+    `SELECT id, file_no, user_id, mime_type, cdn_url, access_url, storage_key, width, height, visibility
        FROM files
       WHERE ${where.join(' AND ')}
       LIMIT 1`,
@@ -1767,7 +2002,17 @@ async function loadFileByReference(
   if (!file) throw paramError(`${label}不存在或已删除`);
   if (file.user_id !== null && Number(file.user_id) !== Number(userId)) throw paramError(`${label}不属于当前用户`);
   if (!String(file.mime_type || '').startsWith(mimePrefix)) throw paramError(`${label}类型不正确`);
+  await ensureProviderReadableFile(file);
   return file;
+}
+
+async function ensureProviderReadableFile(file: any): Promise<void> {
+  if (!file?.id || file.visibility === 'public') return;
+  await query(
+    "UPDATE files SET visibility = 'public', updated_at = NOW(3) WHERE id = ? AND visibility <> 'public'",
+    [file.id],
+  );
+  file.visibility = 'public';
 }
 
 function storageKeyToUrl(storageKey: string): string {
@@ -1799,18 +2044,25 @@ function normalizeVideoMode(value: any): VideoMode {
   return mode;
 }
 
-function resolveVideoDuration(value: any, capabilities: TierCapabilities): { duration: number; durationText: string; source: 'input' | 'default' } {
-  const supported = (capabilities.durations || []).map(item => normalizeDuration(item)).filter(n => n > 0);
+function resolveVideoDuration(value: any, capabilities: TierCapabilities): { duration: number; durationText: string; durationRaw: string; source: 'input' | 'default' } {
+  const supportedValues = capabilities.durations || [];
+  const supportsAuto = supportedValues.map(item => String(item || '').trim().toLowerCase()).includes('auto');
+  const supported = supportedValues.map(item => normalizeDuration(item)).filter(n => n > 0);
   const max = capabilities.maxDurationSeconds || Math.max(...supported, 30);
   const defaultDuration = supported[0] || Math.min(5, max);
   const hasInput = value !== undefined && value !== null && value !== '';
+  const rawInput = String(value || '').trim();
+  if (hasInput && rawInput.toLowerCase() === 'auto') {
+    if (!supportsAuto) throw paramError('当前档位不支持自动时长');
+    return { duration: max || defaultDuration, durationText: 'auto', durationRaw: 'auto', source: 'input' };
+  }
   const duration = hasInput ? normalizeDuration(value) : defaultDuration;
   if (!Number.isFinite(duration) || duration <= 0) throw paramError('视频时长必须大于 0，常用值为 5 或 10 秒');
   if (duration > max) throw paramError(`视频时长不能超过 ${max} 秒`);
   if (supported.length > 0 && !supported.includes(duration)) {
     throw paramError(`当前档位不支持 ${duration} 秒，支持：${supported.join('、')} 秒`);
   }
-  return { duration, durationText: `${duration}s`, source: hasInput ? 'input' : 'default' };
+  return { duration, durationText: `${duration}s`, durationRaw: String(duration), source: hasInput ? 'input' : 'default' };
 }
 
 async function resolveVideoReferenceImages(
@@ -1852,8 +2104,23 @@ async function resolveVideoReferenceImages(
     metadata.push(resolved.metadata);
   }
 
+  const firstFramePromise = firstFrameFileId
+    ? loadUsableImageFile(firstFrameFileId, userId)
+    : Promise.resolve(null);
+  const uploadImagePromise = !firstFrameFileId && !referenceImage && videoMode === 'image_to_video' && uploadItems[0]
+    ? Promise.all(uploadItems.map((item) => resolveSingleImageReference(userId, item)))
+    : Promise.resolve([]);
+  const lastFramePromise = lastFrameFileId
+    ? loadUsableImageFile(lastFrameFileId, userId)
+    : Promise.resolve(null);
+  const [loadedFirstFrame, uploadImageResults, loadedLastFrame] = await Promise.all([
+    firstFramePromise,
+    uploadImagePromise,
+    lastFramePromise,
+  ]);
+
   if (firstFrameFileId) {
-    const file = await loadUsableImageFile(firstFrameFileId, userId);
+    const file = loadedFirstFrame;
     firstFrameFile = file;
     urls.push(file.url);
     metadata.push({ role: 'first_frame', fileId: file.id, fileNo: file.file_no, url: file.url, width: file.width, height: file.height });
@@ -1862,8 +2129,7 @@ async function resolveVideoReferenceImages(
     urls.push(referenceImage);
     metadata.push({ role: 'reference_image', url: referenceImage });
   } else if (videoMode === 'image_to_video' && uploadItems[0]) {
-    for (const item of uploadItems) {
-      const resolved = await resolveSingleImageReference(userId, item);
+    for (const resolved of uploadImageResults) {
       if (resolved?.url) {
         urls.push(resolved.url);
         metadata.push({ ...resolved.metadata, role: 'reference_image' });
@@ -1872,7 +2138,7 @@ async function resolveVideoReferenceImages(
   }
 
   if (lastFrameFileId) {
-    const file = await loadUsableImageFile(lastFrameFileId, userId);
+    const file = loadedLastFrame;
     lastFrameFile = file;
     urls.push(file.url);
     metadata.push({ role: 'last_frame', fileId: file.id, fileNo: file.file_no, url: file.url, width: file.width, height: file.height });
@@ -1914,7 +2180,7 @@ async function resolveSingleVideoReference(userId: number, item: any): Promise<{
 
 async function loadUsableImageFile(fileId: number, userId: number): Promise<any> {
   const file = await queryOne<any>(
-    `SELECT id, file_no, user_id, mime_type, cdn_url, access_url, storage_key, width, height
+    `SELECT id, file_no, user_id, mime_type, cdn_url, access_url, storage_key, width, height, visibility
        FROM files
       WHERE id = ? AND is_deleted = 0
       LIMIT 1`,
@@ -1923,12 +2189,15 @@ async function loadUsableImageFile(fileId: number, userId: number): Promise<any>
   if (!file) throw paramError('图片文件不存在或已删除');
   if (file.user_id !== null && Number(file.user_id) !== Number(userId)) throw paramError('图片文件不属于当前用户');
   if (!String(file.mime_type || '').startsWith('image/')) throw paramError('请选择图片文件');
+  await ensureProviderReadableFile(file);
   const url = file.cdn_url || file.access_url || file.storage_key;
   if (!url) throw paramError('图片文件缺少可访问地址');
   return { ...file, url };
 }
 
 function modelSupportsVideoMode(model: RealModelInfo, videoMode: VideoMode): boolean {
+  const configCapabilities = normalizeModelCapabilities(model.config);
+  if (configCapabilities.has(videoMode)) return true;
   const subType = String(model.subType || '').trim();
   if (!subType || subType === 'video' || subType === 'video_generation') return true;
   const normalized = normalizeVideoModelSubType(subType);
@@ -1939,10 +2208,59 @@ function normalizeVideoModelSubType(value: string): VideoMode | 'unknown' {
   try { return normalizeVideoMode(value); } catch { return 'unknown'; }
 }
 
+function normalizeModelCapabilities(config: any): Set<string> {
+  const source = config && typeof config === 'object' && !Array.isArray(config) ? config : {};
+  const values = Array.isArray(source.capabilities) ? source.capabilities : [];
+  const result = new Set<string>();
+  for (const item of values) {
+    const text = String(item || '').trim();
+    if (VIDEO_MODES.includes(text as VideoMode)) result.add(text);
+  }
+  return result;
+}
+
 function normalizeOutputUrl(value: string | null) {
   if (!value) return null;
-  if (/^https?:\/\//i.test(value)) return value;
-  return value.startsWith('local://') ? `/mock/${value.replace('local://', '')}` : value;
+  if (/^https?:\/\//i.test(value)) return isMiniProgramSafeDeliveryUrl(value) ? value : null;
+  let normalized = value.startsWith('local://') ? `/mock/${value.replace('local://', '')}` : value;
+  if (!normalized.startsWith('/') && !/^[a-z][a-z0-9+.-]*:/i.test(normalized)) {
+    try {
+      const adapter = StorageService.getActiveAdapter();
+      normalized = adapter.getCdnUrl(normalized) || adapter.getAccessUrl(normalized) || normalized;
+    } catch {
+      // Keep the original storage key when storage config is not available.
+    }
+  }
+  if (/^https?:\/\//i.test(normalized)) return isMiniProgramSafeDeliveryUrl(normalized) ? normalized : null;
+  if (!normalized.startsWith('/')) return null;
+  const publicBase = String(process.env.APP_PUBLIC_URL || process.env.PUBLIC_API_DOMAIN || process.env.SITE_API_DOMAIN || '').trim().replace(/\/+$/, '');
+  if (publicBase) {
+    const absolute = `${publicBase}${normalized}`;
+    return isMiniProgramSafeDeliveryUrl(absolute) ? absolute : null;
+  }
+  const localBase = String(process.env.LOCAL_BASE_URL || '').trim().replace(/\/+$/, '');
+  if (/^https?:\/\//i.test(localBase)) {
+    try {
+      const absolute = `${new URL(localBase).origin}${normalized}`;
+      return isMiniProgramSafeDeliveryUrl(absolute) ? absolute : null;
+    } catch {
+      return null;
+    }
+  }
+  return process.env.NODE_ENV === 'production' ? null : normalized;
+}
+
+function isMiniProgramSafeDeliveryUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    const isLocalHost = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.endsWith('.local');
+    if (!['http:', 'https:'].includes(url.protocol)) return false;
+    if (process.env.NODE_ENV !== 'production') return true;
+    return url.protocol === 'https:' && !isLocalHost;
+  } catch {
+    return false;
+  }
 }
 
 function buildPublicSize(params: any) {
@@ -1966,7 +2284,10 @@ function buildPublicTaskOutput(output: any, params: any) {
   const metadata = parseJson(output?.metadata, {});
   const outputType = output?.output_type || 'image';
   const url = normalizeOutputUrl(metadata.deliveryUrl || metadata.url || output?.cos_key || null);
-  const thumbnail = normalizeOutputUrl(output?.thumbnail_key || metadata.thumbnailUrl || metadata.thumbnail || url);
+  const thumbnail = normalizeOutputUrl(output?.thumbnail_key || null)
+    || normalizeOutputUrl(metadata.thumbnailUrl || metadata.thumbnail || null)
+    || url;
+  if (!url && !thumbnail) return null;
   return {
     id: output?.id ? String(output.id) : `output_${output?.output_index || 0}`,
     name: output?.output_name || `${outputType}${Number(output?.output_index || 0) + 1}`,
@@ -1987,6 +2308,10 @@ function buildPublicTaskOutput(output: any, params: any) {
     prompt: output?.prompt_used || '',
     providerStatus: safePublicProviderStatus(metadata.providerStatus),
   };
+}
+
+function shouldHideTaskOutputs(auditStatus: any): boolean {
+  return ['rejected', 'blocked'].includes(String(auditStatus || '').trim().toLowerCase());
 }
 
 function buildTaskMessage(task: any): string {

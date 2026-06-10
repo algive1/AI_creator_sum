@@ -7,6 +7,7 @@ import { queryOne, query, getConnection } from '../utils/db';
 import { success, error } from '../utils/response';
 import { ErrorCodes, JwtPayload } from '../types';
 import { StorageService } from '../services/storage/storage.service';
+import { preloadStorageConfigs } from '../services/storage/storage-config-loader';
 import { validateMimeType, validateFileSize, validateMagicBytes, getImageDimensions } from '../services/storage/upload-validator';
 import { FileCategory, FileVisibility, genFileNo } from '../services/storage/adapter.interface';
 import { getLocalBaseUrl, getLocalStaticMountPath, getLocalUploadDir } from '../services/storage/local-paths';
@@ -21,12 +22,50 @@ import multer from 'multer';
 import { translateError } from '../utils/error-translator';
 
 const router = Router();
-const MAX_FILE_SIZE = parseInt(process.env.UPLOAD_MAX_FILE_SIZE || '10485760', 10);
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_FILE_SIZE } });
+const MAX_IMAGE_FILE_SIZE = positiveInt(process.env.UPLOAD_MAX_FILE_SIZE, 10 * 1024 * 1024);
+const MAX_VIDEO_FILE_SIZE = positiveInt(process.env.UPLOAD_MAX_VIDEO_SIZE, 200 * 1024 * 1024);
+const MAX_UPLOAD_FILE_SIZE = Math.max(MAX_IMAGE_FILE_SIZE, MAX_VIDEO_FILE_SIZE);
+const FILE_CONTENT_PROXY_TIMEOUT_MS = positiveInt(process.env.FILE_CONTENT_PROXY_TIMEOUT_MS, 120000);
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_UPLOAD_FILE_SIZE } });
 const STORAGE_KEY_PATTERN = /^[a-z_]+\/\d{4}-\d{2}\/[a-zA-Z0-9_-]{8,16}\.[a-z0-9]{2,10}$/i;
 
+function positiveInt(value: unknown, fallback: number): number {
+  const parsed = Number.parseInt(String(value || '').trim(), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function maxFileSizeForMime(mimeType: string): number {
+  return String(mimeType || '').startsWith('video/') ? MAX_VIDEO_FILE_SIZE : MAX_IMAGE_FILE_SIZE;
+}
+
+function requestBaseUrl(req: Request): string {
+  const configured = String(process.env.APP_PUBLIC_URL || process.env.PUBLIC_API_DOMAIN || process.env.SITE_API_DOMAIN || '').trim().replace(/\/+$/, '');
+  if (/^https?:\/\//i.test(configured)) return configured;
+  return `${req.protocol}://${req.get('host') || ''}`.replace(/\/+$/, '');
+}
+
+function fileContentUrl(req: Request, fileNo: string): string {
+  return `${requestBaseUrl(req)}/api/v1/files/${encodeURIComponent(fileNo)}/content`;
+}
+
+function fileDeliveryUrl(req: Request, file: { file_no?: string; fileNo?: string; visibility?: string; cdn_url?: string; cdnUrl?: string; access_url?: string; accessUrl?: string }): string {
+  const fileNo = String(file.file_no || file.fileNo || '');
+  if (file.visibility === 'private' && fileNo) return fileContentUrl(req, fileNo);
+  return String(file.cdn_url || file.cdnUrl || file.access_url || file.accessUrl || '');
+}
+
+function assertFileOwner(file: any, userId: number): boolean {
+  return Number(file.user_id || 0) === Number(userId || 0);
+}
+
+function absoluteSourceUrl(req: Request, url: string): string {
+  if (/^https?:\/\//i.test(url)) return url;
+  const path = url.startsWith('/') ? url : `/${url}`;
+  return `${requestBaseUrl(req)}${path}`;
+}
+
 function getFileCategory(value: string): FileCategory {
-  const valid: FileCategory[] = ['avatar', 'ref_image', 'template_cover', 'ai_output', 'ai_video', 'general'];
+  const valid: FileCategory[] = ['avatar', 'ref_image', 'ref_video', 'template_cover', 'ai_output', 'ai_video', 'general'];
   return valid.includes(value as FileCategory) ? (value as FileCategory) : 'general';
 }
 function getVisibility(value: string | undefined): FileVisibility {
@@ -34,6 +73,7 @@ function getVisibility(value: string | undefined): FileVisibility {
 }
 
 function storageErrorCode(err: any): number {
+  if (typeof err?.code === 'number') return err.code;
   const code = String(err?.code || '');
   if (code === 'UNSUPPORTED_STORAGE_PROVIDER') return ErrorCodes.UNSUPPORTED_STORAGE_PROVIDER;
   if (code === 'STORAGE_PROVIDER_CONFIG_MISSING') return ErrorCodes.STORAGE_PROVIDER_CONFIG_MISSING;
@@ -107,6 +147,18 @@ async function confirmUploadedStorageObject(params: {
   const etag = String(params.etag || file.etag || '');
   const accessUrl = file.access_url || adapter.getAccessUrl(storageKey);
   const cdnUrl = file.cdn_url || adapter.getCdnUrl(storageKey);
+  const mimeCheck = validateMimeType(mimeType);
+  if (!mimeCheck.valid) {
+    const err: any = new Error(mimeCheck.reason || '不支持的文件类型');
+    err.code = 4002;
+    throw err;
+  }
+  const sizeCheck = validateFileSize(fileSize, mimeType, { image: MAX_IMAGE_FILE_SIZE, video: MAX_VIDEO_FILE_SIZE });
+  if (!sizeCheck.valid) {
+    const err: any = new Error(sizeCheck.reason || '文件大小超过限制');
+    err.code = 4001;
+    throw err;
+  }
 
   await query(
     `UPDATE files
@@ -128,7 +180,7 @@ async function confirmUploadedStorageObject(params: {
   return {
     fileId: file.id,
     fileNo: file.file_no,
-    url: cdnUrl || accessUrl,
+    url: fileDeliveryUrl(req, { ...file, cdn_url: cdnUrl, access_url: accessUrl }),
     mimeType,
     fileSize,
     confirmed: true,
@@ -138,6 +190,7 @@ async function confirmUploadedStorageObject(params: {
 // 5.1 GET /api/v1/files/upload-config
 router.get('/upload-config', authMiddleware, async (_req: Request, res: Response) => {
   try {
+    await preloadStorageConfigs();
     const provider = StorageService.getActiveProvider();
     StorageService.getActiveAdapter();
     success(res, {
@@ -147,9 +200,10 @@ router.get('/upload-config', authMiddleware, async (_req: Request, res: Response
       staticBaseUrl: provider === 'local' ? getLocalBaseUrl() : '',
       staticMountPath: provider === 'local' ? getLocalStaticMountPath() : '',
       localUploadDir: provider === 'local' ? getLocalUploadDir() : '',
-      maxFileSize: MAX_FILE_SIZE,
-      maxVideoSize: parseInt(process.env.UPLOAD_MAX_VIDEO_SIZE || '209715200', 10),
-      allowedMimeTypes: ['image/png','image/jpeg','image/webp','image/gif','image/svg+xml','video/mp4','video/quicktime','video/x-msvideo'],
+      maxFileSize: MAX_UPLOAD_FILE_SIZE,
+      maxImageSize: MAX_IMAGE_FILE_SIZE,
+      maxVideoSize: MAX_VIDEO_FILE_SIZE,
+      allowedMimeTypes: ['image/png','image/jpeg','image/webp','image/gif','image/svg+xml','video/mp4','video/quicktime','video/webm','video/x-msvideo'],
       maxConcurrent: 3,
     });
   } catch (err: any) {
@@ -165,14 +219,16 @@ router.get('/credential', authMiddleware, async (req: Request, res: Response) =>
     if (!fileCategory || !originalName || !fileSize || !contentType) { error(res, ErrorCodes.PARAM_ERROR, '缺少参数: fileCategory, originalName, fileSize, contentType'); return; }
     const size = parseInt(fileSize, 10);
     if (isNaN(size) || size <= 0) { error(res, ErrorCodes.PARAM_ERROR, 'fileSize 无效'); return; }
-    if (size > MAX_FILE_SIZE) { error(res, 4001, '文件大小超过限制'); return; }
     const mimeCheck = validateMimeType(contentType);
     if (!mimeCheck.valid) { error(res, 4002, mimeCheck.reason || '不支持的文件类型'); return; }
+    const sizeCheck = validateFileSize(size, contentType, { image: MAX_IMAGE_FILE_SIZE, video: MAX_VIDEO_FILE_SIZE });
+    if (!sizeCheck.valid) { error(res, 4001, sizeCheck.reason || '文件大小超过限制'); return; }
+    await preloadStorageConfigs();
     const adapter = StorageService.getActiveAdapter();
     const category = getFileCategory(fileCategory);
     const fileVisibility = getVisibility(visibility);
     const storageKey = StorageService.genStorageKey(category, originalName);
-    const credential = await adapter.generateCredential({ storageKey, contentType, maxFileSize: MAX_FILE_SIZE });
+    const credential = await adapter.generateCredential({ storageKey, contentType, maxFileSize: maxFileSizeForMime(contentType) });
     const fileNo = genFileNo();
     const [insertResult] = await query<any>(
       `INSERT INTO files
@@ -182,7 +238,8 @@ router.get('/credential', authMiddleware, async (req: Request, res: Response) =>
     );
     const fileId = Number((insertResult as any)?.insertId || 0);
     const { provider: _provider, ...safeCredential } = credential as any;
-    success(res, { ...safeCredential, fileId, fileNo });
+    const deliveryUrl = fileVisibility === 'private' ? fileContentUrl(req, fileNo) : credential.cdnUrl;
+    success(res, { ...safeCredential, cdnUrl: deliveryUrl, url: deliveryUrl, fileId, fileNo });
   } catch (err: any) {
     console.error('生成上传凭证失败:', err);
     error(res, storageErrorCode(err), storageFallbackMessage(err));
@@ -191,9 +248,9 @@ router.get('/credential', authMiddleware, async (req: Request, res: Response) =>
 
 // 5.3 POST /api/v1/files/upload (后端中转上传)
 router.post('/upload', authMiddleware, (req: Request, res: Response) => {
-  upload.single('file')(req, res, async (err: any) => {
+    upload.single('file')(req, res, async (err: any) => {
     if (err) {
-      if (err.code === 'LIMIT_FILE_SIZE') return error(res, 4001, '文件大小超出限制');
+      if (err.code === 'LIMIT_FILE_SIZE') return error(res, 4001, `文件大小超出限制，图片最大 ${Math.round(MAX_IMAGE_FILE_SIZE / 1024 / 1024)}MB，视频最大 ${Math.round(MAX_VIDEO_FILE_SIZE / 1024 / 1024)}MB`);
       return error(res, ErrorCodes.PARAM_ERROR, err.message || '上传失败');
     }
     const conn = await getConnection();
@@ -207,11 +264,12 @@ router.post('/upload', authMiddleware, (req: Request, res: Response) => {
 
       const mimeCheck = validateMimeType(file.mimetype);
       if (!mimeCheck.valid) return error(res, 4002, mimeCheck.reason!);
-      const sizeCheck = validateFileSize(file.size, file.mimetype);
+      const sizeCheck = validateFileSize(file.size, file.mimetype, { image: MAX_IMAGE_FILE_SIZE, video: MAX_VIDEO_FILE_SIZE });
       if (!sizeCheck.valid) return error(res, 4001, sizeCheck.reason!);
       const magicCheck = validateMagicBytes(file.buffer, file.mimetype);
       if (!magicCheck.valid) return error(res, 4002, magicCheck.reason!);
 
+      await preloadStorageConfigs();
       const adapter = StorageService.getActiveAdapter();
       const storageKey = StorageService.genStorageKey(category, file.originalname);
       const uploadStart = Date.now();
@@ -228,7 +286,7 @@ router.post('/upload', authMiddleware, (req: Request, res: Response) => {
       const durationMs = Date.now() - uploadStart;
       await conn.execute(`INSERT INTO file_upload_logs (file_id, user_id, upload_mode, file_size, mime_type, duration_ms, source_ip, user_agent, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'success', NOW(3))`, [fileId, userId, 'server_relay', file.size, file.mimetype, durationMs, req.ip || '', (req.headers['user-agent'] || '').substring(0, 500)]);
 
-      return success(res, { fileId, fileNo, url: publicUrl, mimeType: file.mimetype, fileSize: file.size, width: dims.width, height: dims.height });
+      return success(res, { fileId, fileNo, url: fileDeliveryUrl(req, { file_no: fileNo, visibility, cdn_url: publicUrl, access_url: uploadResult.url }), mimeType: file.mimetype, fileSize: file.size, width: dims.width, height: dims.height });
     } catch (uploadErr: any) {
       console.error('文件上传失败:', uploadErr);
       return error(res, storageErrorCode(uploadErr), storageFallbackMessage(uploadErr));
@@ -385,12 +443,13 @@ router.get('/:fileNo', authMiddleware, async (req: Request, res: Response) => {
   try {
     const file = await queryOne<any>('SELECT * FROM files WHERE file_no = ? AND is_deleted = 0', [req.params.fileNo]);
     if (!file) { error(res, ErrorCodes.FILE_NOT_FOUND, '文件不存在', 404); return; }
-    if (file.visibility === 'private' && file.user_id !== req.user!.userId) { error(res, ErrorCodes.FILE_PERMISSION_DENIED, '文件不属于当前用户', 403); return; }
+    if (file.visibility === 'private' && !assertFileOwner(file, req.user!.userId)) { error(res, ErrorCodes.FILE_PERMISSION_DENIED, '文件不属于当前用户', 403); return; }
+    const deliveryUrl = fileDeliveryUrl(req, file);
     success(res, {
       fileId: file.id,
       fileNo: file.file_no,
-      url: file.cdn_url || file.access_url || '',
-      cdnUrl: file.cdn_url || file.access_url || '',
+      url: deliveryUrl,
+      cdnUrl: deliveryUrl,
       mimeType: file.mime_type,
       fileSize: file.file_size,
       width: file.width,
@@ -441,22 +500,55 @@ router.post('/batch-delete', authMiddleware, async (req: Request, res: Response)
   } catch (err: any) { error(res, storageErrorCode(err), storageFallbackMessage(err)); }
 });
 
+function verifyPrivateFileRequest(req: Request, res: Response, file: any): boolean {
+  if (file.visibility !== 'private') return true;
+  const hdr = req.headers.authorization;
+  if (!hdr || !hdr.startsWith('Bearer ')) { error(res, ErrorCodes.UNAUTHORIZED, '未登录', 401); return false; }
+  try {
+    const { verifyToken } = require('../services/auth.service');
+    const payload = verifyToken(hdr.substring(7)) as JwtPayload;
+    if (!assertFileOwner(file, payload.userId)) { error(res, ErrorCodes.FILE_PERMISSION_DENIED, '文件不属于当前用户', 403); return false; }
+    return true;
+  } catch {
+    error(res, ErrorCodes.UNAUTHORIZED, '未登录', 401);
+    return false;
+  }
+}
+
 // 5.9 GET /api/v1/files/:fileNo/url
 router.get('/:fileNo/url', async (req: Request, res: Response) => {
   try {
     const file = await queryOne<any>('SELECT * FROM files WHERE file_no = ? AND is_deleted = 0', [req.params.fileNo]);
     if (!file) { error(res, ErrorCodes.FILE_NOT_FOUND, '文件不存在', 404); return; }
-    if (file.visibility === 'private') {
-      const hdr = req.headers.authorization;
-      if (!hdr || !hdr.startsWith('Bearer ')) { error(res, ErrorCodes.UNAUTHORIZED, '未登录', 401); return; }
-      try {
-        const { verifyToken } = require('../services/auth.service');
-        const payload = verifyToken(hdr.substring(7)) as JwtPayload;
-        if (file.user_id !== payload.userId) { error(res, ErrorCodes.FILE_PERMISSION_DENIED, '文件不属于当前用户', 403); return; }
-      } catch { error(res, ErrorCodes.UNAUTHORIZED, '未登录', 401); return; }
-    }
-    success(res, { fileNo: req.params.fileNo, url: file.cdn_url || file.access_url || '' });
+    if (!verifyPrivateFileRequest(req, res, file)) return;
+    success(res, { fileNo: req.params.fileNo, url: fileDeliveryUrl(req, file) });
   } catch (err: any) { error(res, storageErrorCode(err), storageFallbackMessage(err)); }
+});
+
+router.get('/:fileNo/content', async (req: Request, res: Response) => {
+  try {
+    const file = await queryOne<any>('SELECT * FROM files WHERE file_no = ? AND is_deleted = 0', [req.params.fileNo]);
+    if (!file) { error(res, ErrorCodes.FILE_NOT_FOUND, '文件不存在', 404); return; }
+    if (!verifyPrivateFileRequest(req, res, file)) return;
+    const sourceUrl = absoluteSourceUrl(req, file.cdn_url || file.access_url || StorageService.getActiveAdapter().getAccessUrl(file.storage_key));
+    if (!sourceUrl) { error(res, ErrorCodes.FILE_STORAGE_ERROR, '文件地址不存在', 404); return; }
+    const response = await axios.get(sourceUrl, {
+      responseType: 'stream',
+      timeout: FILE_CONTENT_PROXY_TIMEOUT_MS,
+      headers: req.headers.authorization ? { Authorization: req.headers.authorization } : undefined,
+    });
+    res.setHeader('Content-Type', file.mime_type || response.headers['content-type'] || 'application/octet-stream');
+    const contentLength = response.headers['content-length'];
+    if (typeof contentLength === 'string' || typeof contentLength === 'number') res.setHeader('Content-Length', contentLength);
+    res.setHeader('Cache-Control', file.visibility === 'private' ? 'private, no-store' : 'public, max-age=31536000');
+    response.data.pipe(res);
+  } catch (err: any) {
+    if (res.headersSent) {
+      res.destroy(err);
+      return;
+    }
+    error(res, storageErrorCode(err), storageFallbackMessage(err));
+  }
 });
 
 async function createExportRecord(fileId: number, userId: number, status: string, failReason: string) {

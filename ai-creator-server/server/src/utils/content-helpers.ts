@@ -20,6 +20,13 @@ export async function matchesTarget(row: any, userId: number): Promise<boolean> 
     const ids = Array.isArray(row.target_user_ids) ? row.target_user_ids : parseJson(row.target_user_ids, []);
     return ids.map(Number).includes(Number(userId));
   }
+  if (targetType === 'new_users') {
+    const user = await queryOne<any>(
+      'SELECT id FROM users WHERE id = ? AND created_at >= DATE_SUB(NOW(3), INTERVAL 7 DAY) AND deleted_at IS NULL LIMIT 1',
+      [userId],
+    );
+    return !!user;
+  }
   if (targetType === 'vip' || targetType === 'free') {
     const m = await queryOne<any>(
       'SELECT level_after FROM user_memberships WHERE user_id = ? AND status = ? AND expire_at > NOW(3) ORDER BY expire_at DESC LIMIT 1',

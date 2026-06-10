@@ -29,7 +29,12 @@ export interface ImageWatermarkResult {
 
 export async function postprocessImage(input: ImagePostprocessInput): Promise<ImagePostprocessResult> {
   const sourcePath = input.sourcePath || await downloadToTemp(input.sourceUrl || '');
-  const meta = await sharp(sourcePath).metadata();
+  let meta: sharp.Metadata;
+  try {
+    meta = await sharp(sourcePath).metadata();
+  } catch {
+    throw new Error('模型返回内容不是有效图片，无法执行图片后处理');
+  }
   const outputPath = path.join(os.tmpdir(), `ai-output-${Date.now()}-${Math.random().toString(16).slice(2)}.png`);
 
   let pipeline = sharp(sourcePath);
@@ -78,9 +83,32 @@ export async function addPlatformWatermark(buffer: Buffer): Promise<ImageWaterma
 }
 
 async function downloadToTemp(url: string): Promise<string> {
-  if (!url) throw new Error('缺少待处理图片地址');
-  const resp = await axios.get(url, { responseType: 'arraybuffer', timeout: 60000 });
+  const source = String(url || '').trim();
+  if (!source) throw new Error('缺少待处理图片地址');
+  const inlineBuffer = decodeInlineBase64(source);
+  if (inlineBuffer) return writeTempBuffer(inlineBuffer);
+  const resp = await axios.get(source, { responseType: 'arraybuffer', timeout: 60000 });
+  return writeTempBuffer(Buffer.from(resp.data));
+}
+
+function decodeInlineBase64(source: string): Buffer | null {
+  if (source.startsWith('data:')) {
+    const match = source.match(/^data:[^;,]*;base64,([\s\S]+)$/);
+    if (!match) throw new Error('base64 图片格式不正确');
+    return Buffer.from(match[1], 'base64');
+  }
+  if (!isProbablyBase64(source)) return null;
+  return Buffer.from(source, 'base64');
+}
+
+function isProbablyBase64(value: string): boolean {
+  const text = value.trim();
+  if (text.length < 80 || text.length % 4 !== 0) return false;
+  return /^[A-Za-z0-9+/]+={0,2}$/.test(text);
+}
+
+function writeTempBuffer(buffer: Buffer): string {
   const filePath = path.join(os.tmpdir(), `ai-source-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-  fs.writeFileSync(filePath, Buffer.from(resp.data));
+  fs.writeFileSync(filePath, buffer);
   return filePath;
 }

@@ -7,7 +7,10 @@
       :class="{ active: activePath === item.path, center: item.center }"
       @tap="go(item.path)"
     >
-      <view class="tab-icon" :class="item.icon"><text class="icon-core"></text></view>
+      <view class="tab-icon" :class="[getIconUrl(item) ? 'has-image' : item.icon]">
+        <image v-if="getIconUrl(item)" class="tab-icon-image" :src="getIconUrl(item)" mode="aspectFit" />
+        <text v-else class="icon-core"></text>
+      </view>
       <text class="tab-text">{{ item.text }}</text>
     </button>
   </view>
@@ -22,23 +25,38 @@ type TabItem = {
   text: string;
   path: string;
   icon: string;
+  iconPath?: string;
+  selectedIconPath?: string;
   center?: boolean;
 };
 
 const fallbackTabs: TabItem[] = [
   { text: '首页', path: PAGE_ROUTES.home, icon: 'home' },
   { text: '灵感', path: PAGE_ROUTES.inspiration, icon: 'spark' },
-  { text: '漫剧', path: PAGE_ROUTES.comic, icon: 'film', center: true },
+  { text: '漫剧', path: PAGE_ROUTES.comic, icon: 'create', center: true },
   { text: '记录', path: PAGE_ROUTES.history, icon: 'record' },
   { text: '我的', path: PAGE_ROUTES.profile, icon: 'mine' }
 ];
+const TAB_ICON_BASE = '/static/icons/tabbar';
 const config = useConfigStore();
 const pathIconMap: Record<string, string> = {
   [PAGE_ROUTES.home]: 'home',
   [PAGE_ROUTES.inspiration]: 'spark',
-  [PAGE_ROUTES.comic]: 'film',
+  [PAGE_ROUTES.comic]: 'create',
   [PAGE_ROUTES.history]: 'record',
   [PAGE_ROUTES.profile]: 'mine'
+};
+const localTabIconMap: Record<string, { iconPath: string; selectedIconPath: string }> = {
+  home: { iconPath: `${TAB_ICON_BASE}/tab-home.svg`, selectedIconPath: `${TAB_ICON_BASE}/tab-home-active.svg` },
+  spark: { iconPath: `${TAB_ICON_BASE}/tab-spark.svg`, selectedIconPath: `${TAB_ICON_BASE}/tab-spark-active.svg` },
+  inspiration: { iconPath: `${TAB_ICON_BASE}/tab-spark.svg`, selectedIconPath: `${TAB_ICON_BASE}/tab-spark-active.svg` },
+  create: { iconPath: `${TAB_ICON_BASE}/tab-create.svg`, selectedIconPath: `${TAB_ICON_BASE}/tab-create-active.svg` },
+  film: { iconPath: `${TAB_ICON_BASE}/tab-create.svg`, selectedIconPath: `${TAB_ICON_BASE}/tab-create-active.svg` },
+  comic: { iconPath: `${TAB_ICON_BASE}/tab-create.svg`, selectedIconPath: `${TAB_ICON_BASE}/tab-create-active.svg` },
+  record: { iconPath: `${TAB_ICON_BASE}/tab-record.svg`, selectedIconPath: `${TAB_ICON_BASE}/tab-record-active.svg` },
+  history: { iconPath: `${TAB_ICON_BASE}/tab-record.svg`, selectedIconPath: `${TAB_ICON_BASE}/tab-record-active.svg` },
+  mine: { iconPath: `${TAB_ICON_BASE}/tab-mine.svg`, selectedIconPath: `${TAB_ICON_BASE}/tab-mine-active.svg` },
+  profile: { iconPath: `${TAB_ICON_BASE}/tab-mine.svg`, selectedIconPath: `${TAB_ICON_BASE}/tab-mine-active.svg` }
 };
 const pathTextMap: Record<string, string> = fallbackTabs.reduce((map, item) => {
   map[item.path] = item.text;
@@ -92,9 +110,19 @@ function normalizeTab(item: unknown): TabItem | null {
   return {
     text: String(raw.text || raw.title || raw.name || raw.label || pathTextMap[path] || ''),
     path,
-    icon: String(raw.icon || raw.iconKey || pathIconMap[path] || 'home'),
+    icon: normalizeIconKey(raw.iconKey || (isImageUrl(raw.icon) ? '' : raw.icon) || pathIconMap[path] || 'home'),
+    iconPath: normalizeIconUrl(raw.iconPath || raw.iconUrl || raw.defaultIconPath || raw.defaultIconUrl || raw.iconImage || raw.icon),
+    selectedIconPath: normalizeIconUrl(raw.selectedIconPath || raw.activeIconPath || raw.selectedIconUrl || raw.activeIconUrl),
     center: Boolean(raw.center || raw.primary || path === PAGE_ROUTES.comic)
   };
+}
+
+function getIconUrl(item: TabItem) {
+  if (activePath.value === item.path && item.selectedIconPath) return item.selectedIconPath;
+  if (item.iconPath) return item.iconPath;
+  const local = localTabIconMap[item.icon] || localTabIconMap[pathIconMap[item.path]];
+  if (!local) return '';
+  return activePath.value === item.path ? local.selectedIconPath : local.iconPath;
 }
 
 function readCachedTabs(): TabItem[] {
@@ -132,6 +160,35 @@ function normalizePath(value: unknown) {
   return raw.startsWith('/') ? raw : `/${raw}`;
 }
 
+function normalizeIconUrl(value: unknown) {
+  const raw = String(value || '').trim();
+  return isImageUrl(raw) ? raw : '';
+}
+
+function normalizeIconKey(value: unknown) {
+  const raw = String(value || '').trim();
+  const aliasMap: Record<string, string> = {
+    index: 'home',
+    inspiration: 'spark',
+    idea: 'spark',
+    ideas: 'spark',
+    comic: 'create',
+    manga: 'create',
+    film: 'create',
+    video: 'create',
+    history: 'record',
+    records: 'record',
+    profile: 'mine',
+    user: 'mine'
+  };
+  return aliasMap[raw] || raw || 'home';
+}
+
+function isImageUrl(value: unknown) {
+  const raw = String(value || '').trim();
+  return /^https?:\/\//i.test(raw) || raw.startsWith('/');
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? value as Record<string, unknown> : {};
 }
@@ -141,7 +198,7 @@ function asRecord(value: unknown): Record<string, unknown> {
 .tabbar {
   position: fixed;
   right: 18rpx;
-  bottom: calc(14rpx + env(safe-area-inset-bottom));
+  bottom: calc(8rpx + env(safe-area-inset-bottom));
   left: 18rpx;
   z-index: 90;
   display: grid;
@@ -171,19 +228,31 @@ function asRecord(value: unknown): Record<string, unknown> {
   color: #7a5cff;
 }
 
+.tab-item.active:not(.center)::after {
+  position: absolute;
+  bottom: 2rpx;
+  left: 50%;
+  width: 24rpx;
+  height: 5rpx;
+  border-radius: 999rpx;
+  background: linear-gradient(90deg, #7a5cff, #ff7acb);
+  content: "";
+  transform: translateX(-50%);
+}
+
 .tab-icon {
   position: relative;
-  width: 46rpx;
-  height: 46rpx;
+  width: 50rpx;
+  height: 50rpx;
   margin-bottom: 6rpx;
-  border-radius: 16rpx;
-  background: #e8f0ff;
-  box-shadow: inset -4rpx -6rpx 0 rgba(122, 92, 255, 0.1);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .active .tab-icon {
-  background: linear-gradient(135deg, #7a5cff, #ff7acb);
-  box-shadow: 0 12rpx 22rpx rgba(122, 92, 255, 0.22);
+  background: transparent;
+  box-shadow: none;
 }
 
 .icon-core {
@@ -195,6 +264,12 @@ function asRecord(value: unknown): Record<string, unknown> {
   border-radius: 50%;
   background: currentColor;
   transform: translate(-50%, -50%);
+}
+
+.tab-icon-image {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .active .icon-core {
@@ -220,17 +295,47 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 .center {
-  transform: translateY(-26rpx);
+  transform: translateY(-38rpx);
 }
 
 .center .tab-icon {
-  width: 78rpx;
-  height: 78rpx;
-  margin-bottom: 4rpx;
-  border: 8rpx solid rgba(255, 255, 255, 0.9);
+  z-index: 1;
+  width: 102rpx;
+  height: 102rpx;
+  box-sizing: border-box;
+  margin-bottom: -2rpx;
+  padding: 22rpx;
+  border: 8rpx solid rgba(255, 255, 255, 0.94);
   border-radius: 50%;
-  background: linear-gradient(135deg, #7a5cff, #ff7acb);
-  box-shadow: 0 18rpx 34rpx rgba(122, 92, 255, 0.32);
+  background:
+    radial-gradient(circle at 32% 22%, rgba(255, 255, 255, 0.46), transparent 26%),
+    linear-gradient(135deg, #7a5cff 0%, #a653ff 48%, #ff4fc3 100%);
+  box-shadow: 0 20rpx 34rpx rgba(122, 92, 255, 0.34), 0 8rpx 18rpx rgba(255, 79, 195, 0.22);
+}
+
+.center .tab-icon::after {
+  position: absolute;
+  inset: -14rpx;
+  z-index: -1;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(122, 92, 255, 0.18), rgba(122, 92, 255, 0));
+  content: "";
+}
+
+.center.active .tab-icon {
+  border-color: #ffffff;
+  background:
+    radial-gradient(circle at 30% 20%, rgba(255, 255, 255, 0.54), transparent 28%),
+    linear-gradient(135deg, #6f4cff 0%, #9f45ff 46%, #ff3db8 100%);
+  box-shadow: 0 24rpx 42rpx rgba(122, 92, 255, 0.42), 0 10rpx 22rpx rgba(255, 79, 195, 0.26);
+}
+
+.center.active .tab-icon::before {
+  position: absolute;
+  inset: -5rpx;
+  border: 3rpx solid rgba(122, 92, 255, 0.18);
+  border-radius: 50%;
+  content: "";
 }
 
 .center .icon-core {
@@ -241,6 +346,8 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 .center .tab-text {
   color: #7a5cff;
-  font-size: 19rpx;
+  font-size: 20rpx;
+  font-weight: 1000;
+  line-height: 24rpx;
 }
 </style>

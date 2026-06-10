@@ -3,7 +3,6 @@
 
 import * as crypto from 'crypto';
 import { IStorageAdapter, UploadResult, CredentialOptions, CredentialResult } from './adapter.interface';
-import { streamToBuffer } from './stream-helpers';
 
 interface OssConfig {
   accessKeyId: string;
@@ -132,9 +131,40 @@ export class OssAdapter implements IStorageAdapter {
     };
   }
 
-  async uploadLarge(key: string, stream: NodeJS.ReadableStream, contentType: string, _size: number): Promise<UploadResult> {
-    const buffer = await streamToBuffer(stream, contentType);
-    return this.upload(key, buffer, contentType);
+  async uploadLarge(key: string, stream: NodeJS.ReadableStream, contentType: string, size: number): Promise<UploadResult> {
+    const cfg = this.cfg;
+    const host = this.buildHost();
+    const date = new Date().toUTCString();
+    const verb = 'PUT';
+    const resource = `/${cfg.bucket}/${key}`;
+    const stringToSign = `${verb}\n\n${contentType}\n${date}\nx-oss-security-token:${''}\n${resource}`;
+    const signature = crypto.createHmac('sha1', cfg.accessKeySecret).update(stringToSign).digest('base64');
+    const headers: Record<string, string> = {
+      'Content-Type': contentType,
+      'Date': date,
+      'Authorization': `OSS ${cfg.accessKeyId}:${signature}`,
+      'Host': host,
+    };
+    if (size > 0) headers['Content-Length'] = String(size);
+
+    const resp = await fetch(`${cfg.endpoint}/${key}`, {
+      method: 'PUT',
+      headers,
+      body: stream as any,
+      duplex: 'half',
+    } as any);
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`OSS putObject failed: ${resp.status} ${text}`);
+    }
+
+    const cdn = cfg.cdnDomain || cfg.endpoint;
+    return {
+      url: `${cfg.endpoint}/${key}`,
+      cdnUrl: `${cdn.replace(/\/$/, '')}/${key}`,
+      etag: resp.headers.get('etag') || '',
+    };
   }
 
   async delete(key: string): Promise<void> {

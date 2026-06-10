@@ -4,6 +4,7 @@ import {
   claimMakeupCheckin,
   claimNormalCheckin,
   claimSuperCheckin,
+  createSuperCheckinAdSession,
   getSigninStatus,
 } from '../services/signin.service';
 import { success, error } from '../utils/response';
@@ -31,6 +32,15 @@ async function normalCheckin(req: Request, res: Response) {
 
 router.post('/', authMiddleware, normalCheckin);
 router.post('/normal', authMiddleware, normalCheckin);
+
+router.post('/super/session', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const result = await createSuperCheckinAdSession(req.user!.userId);
+    success(res, result);
+  } catch (err: any) {
+    error(res, err?.code || ErrorCodes.SERVER_ERROR, err?.message || '创建超级签到广告会话失败');
+  }
+});
 
 router.post('/super', authMiddleware, async (req: Request, res: Response) => {
   try {

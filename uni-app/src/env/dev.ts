@@ -1,6 +1,6 @@
 export const devEnv = {
   name: 'development',
-  baseURL: 'http://127.0.0.1:3000/api/v1',
+  baseURL: String(import.meta.env.VITE_API_BASE_URL || 'https://mini.thtapi.com/api/v1').trim().replace(/\/+$/, ''),
   timeout: 15000,
   devLoginCode: 'dev_uni_app_user'
 } as const;

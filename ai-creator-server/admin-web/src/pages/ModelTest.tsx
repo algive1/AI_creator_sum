@@ -51,6 +51,7 @@ import {
   VideoCameraOutlined,
 } from '@ant-design/icons';
 import api from '../services/api';
+import { EllipsisText, TimeText } from '../utils/tableCells';
 
 const { Text, Title, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -633,9 +634,10 @@ export default function ModelTest() {
   };
 
   const buildPayloadForCategory = (values: Record<string, any>, category: ModelCategory) => {
-    // 后端测试接口当前只识别 prompt/taskType/images/nativeSize/quality/duration/ratio；
+    // 后端测试接口当前只识别确认标记和 prompt/taskType/images/nativeSize/quality/duration/ratio；
     // 其它高级参数保留为前端兼容展示，提交前过滤，避免未知字段影响接口。
     const payload: Record<string, unknown> = {
+      confirmRealCost: true,
       prompt: String(values.prompt || '').trim(),
       taskType: values.testType,
     };
@@ -1563,13 +1565,13 @@ export default function ModelTest() {
   };
 
   const runRowColumns: ColumnsType<TestRunRow> = [
-    { title: '模型名称', dataIndex: 'modelName', ellipsis: true },
-    { title: '供应商', dataIndex: 'providerName', width: 130, ellipsis: true },
+    { title: '模型名称', dataIndex: 'modelName', width: 180, ellipsis: true, render: (value) => <EllipsisText value={value} maxWidth={158} strong /> },
+    { title: '供应商', dataIndex: 'providerName', width: 130, ellipsis: true, render: (value) => <EllipsisText value={value} maxWidth={108} /> },
     { title: '模型类型', dataIndex: 'modelType', width: 110, render: (value) => CATEGORY_LABELS[value as ModelCategory] || safeText(value) },
     { title: '状态', dataIndex: 'status', width: 100, render: (value) => statusTag(value) },
     { title: '响应时间', dataIndex: 'responseTime', width: 110, render: (value) => value ? `${value}ms` : '-' },
     { title: '成本', dataIndex: 'cost', width: 90, render: (value) => safeText(value) },
-    { title: '错误信息', dataIndex: 'error', ellipsis: true, render: (value) => value ? <Text type="danger">{value}</Text> : '-' },
+    { title: '错误信息', dataIndex: 'error', width: 260, ellipsis: true, render: (value) => value ? <EllipsisText value={value} maxWidth={238} type="danger" /> : '-' },
   ];
 
   const modelStatus = selectedModel?.status === 'active' ? '启用' : selectedModel?.status === 'inactive' ? '停用' : safeText(selectedModel?.status);
@@ -1952,6 +1954,8 @@ export default function ModelTest() {
               pagination={false}
               dataSource={batchRows}
               columns={runRowColumns}
+              tableLayout="fixed"
+              scroll={{ x: 980 }}
             />
           </Space>
         ) : null}
@@ -2142,11 +2146,11 @@ export default function ModelTest() {
           pagination={{ pageSize: 10 }}
           locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无测试记录" /> }}
           columns={[
-            { title: '测试时间', dataIndex: 'createdAt', width: 170, render: (value) => formatDate(value) },
-            { title: '模型名称', dataIndex: 'modelName', width: 160, ellipsis: true },
-            { title: '供应商', dataIndex: 'providerName', width: 130, ellipsis: true },
+            { title: '测试时间', dataIndex: 'createdAt', width: 170, render: (value) => <TimeText value={value} /> },
+            { title: '模型名称', dataIndex: 'modelName', width: 180, ellipsis: true, render: (value) => <EllipsisText value={value} maxWidth={158} strong /> },
+            { title: '供应商', dataIndex: 'providerName', width: 130, ellipsis: true, render: (value) => <EllipsisText value={value} maxWidth={108} /> },
             { title: '测试类型', dataIndex: 'testType', width: 120 },
-            { title: '参数摘要', dataIndex: 'summary', ellipsis: true },
+            { title: '参数摘要', dataIndex: 'summary', width: 280, ellipsis: true, render: (value) => <EllipsisText value={value} maxWidth={258} /> },
             { title: '状态', dataIndex: 'status', width: 90, render: (value) => statusTag(value) },
             { title: '响应时间', dataIndex: 'responseTime', width: 110, render: (value) => `${value}ms` },
             { title: '成本', dataIndex: 'cost', width: 90, render: (value) => safeText(value) },
@@ -2159,6 +2163,8 @@ export default function ModelTest() {
               ),
             },
           ]}
+          tableLayout="fixed"
+          scroll={{ x: 1320 }}
         />
       </Drawer>
     </div>

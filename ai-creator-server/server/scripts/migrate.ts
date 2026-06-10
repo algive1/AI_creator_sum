@@ -17,6 +17,7 @@ interface MigrationFile {
 
 const migrationsDir = path.resolve(__dirname, '../src/migrations');
 const forbiddenPattern = /\b(DROP\s+DATABASE|TRUNCATE)\b/i;
+const unsupportedDelimiterPattern = /\bDELIMITER\b|\bCREATE\s+(PROCEDURE|FUNCTION|TRIGGER|EVENT)\b/i;
 
 function checksum(content: string): string {
   return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
@@ -203,6 +204,9 @@ async function executeStatements(conn: mysql.Connection, migration: MigrationFil
   const sqlWithoutComments = removeSqlComments(migration.sql);
   if (forbiddenPattern.test(sqlWithoutComments)) {
     throw new Error('Forbidden SQL found: DROP DATABASE or TRUNCATE');
+  }
+  if (unsupportedDelimiterPattern.test(sqlWithoutComments)) {
+    throw new Error('Unsupported SQL found: DELIMITER/PROCEDURE/FUNCTION/TRIGGER/EVENT migrations are not safe with the built-in statement splitter');
   }
 
   const statements = splitSqlStatements(sqlWithoutComments);
