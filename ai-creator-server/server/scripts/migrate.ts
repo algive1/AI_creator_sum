@@ -200,6 +200,17 @@ async function recordMigration(conn: mysql.Connection, migration: MigrationFile,
   );
 }
 
+function formatSqlExecutionError(migration: MigrationFile, statementIndex: number, statement: string, error: any): string {
+  const preview = statement.replace(/\s+/g, ' ').slice(0, 240);
+  const reason = error?.sqlMessage || error?.message || String(error);
+  const meta = [
+    error?.code ? `code=${error.code}` : '',
+    error?.errno ? `errno=${error.errno}` : '',
+    error?.sqlState ? `sqlState=${error.sqlState}` : '',
+  ].filter(Boolean).join(', ');
+  return `${migration.filename} SQL #${statementIndex + 1} failed: ${reason}${meta ? ` (${meta})` : ''}; SQL preview: ${preview}`;
+}
+
 async function executeStatements(conn: mysql.Connection, migration: MigrationFile) {
   const sqlWithoutComments = removeSqlComments(migration.sql);
   if (forbiddenPattern.test(sqlWithoutComments)) {
@@ -214,8 +225,13 @@ async function executeStatements(conn: mysql.Connection, migration: MigrationFil
     throw new Error('Migration has no executable SQL statements');
   }
 
-  for (const statement of statements) {
-    await conn.query(statement);
+  for (let statementIndex = 0; statementIndex < statements.length; statementIndex += 1) {
+    const statement = statements[statementIndex];
+    try {
+      await conn.query(statement);
+    } catch (err: any) {
+      throw new Error(formatSqlExecutionError(migration, statementIndex, statement, err), { cause: err });
+    }
   }
 }
 

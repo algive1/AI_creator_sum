@@ -226,7 +226,7 @@ function assertUsersAndTasks(): void {
   if (!/router\.get\(\s*['"`]\/public\/model-tiers['"`]/.test(pc)) {
     fail('GET /api/v1/public/model-tiers must exist.');
   }
-  if (!/getModelTierList\(feature,\s*req\.user\?\.userId\)/.test(pc)) {
+  if (!/getModelTierList\(\s*feature,\s*req\.user\?\.userId(?:,\s*\{\s*clientType\s*\})?\s*\)/.test(pc)) {
     fail('GET /api/v1/public/model-tiers must use getModelTierList with optional user discount.');
   }
   for (const key of ['id', 'tierId', 'tierKey', 'tierName', 'description', 'iconUrl', 'pointsCost', 'capabilities', 'isDefault', 'isRecommended']) {

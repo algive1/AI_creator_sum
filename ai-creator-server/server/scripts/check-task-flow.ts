@@ -126,7 +126,7 @@ async function main() {
 
   const imageInput = await db.queryOne<any>('SELECT params FROM ai_task_inputs WHERE task_id = ?', [imageTask.taskId]);
   const imageParams = parseJson(imageInput?.params);
-  await assertEqual('image size ratio', imageParams.sizePlan?.targetRatio, '16:9');
+  await assertEqual('image size ratio', imageParams.sizePlan?.targetRatio, '9:16');
   await assertEqual('image size conflict', imageParams.sizePlan?.conflict, true);
 
   let account = await db.queryOne<any>('SELECT balance, frozen_balance FROM point_accounts WHERE user_id = ?', [userId]);

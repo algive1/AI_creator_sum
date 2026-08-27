@@ -22,15 +22,15 @@ async function main() {
   );
 
   assertPlan(
-    'prompt pixel before ui ratio',
+    'ui ratio before prompt pixel',
     resolveImageSize({ prompt: '电商横幅 320x100', ratio: '1:1' }),
-    { width: 320, height: 100, ratio: '16:5', source: 'prompt_pixel', conflict: true },
+    { width: 1024, height: 1024, ratio: '1:1', source: 'ui_ratio', conflict: true, conflictType: 'ui_ratio_overrides_prompt_pixel' },
   );
 
   assertPlan(
-    'prompt ratio before ui ratio',
+    'ui ratio before prompt ratio',
     resolveImageSize({ prompt: '做成 16:9 横版', ratio: '1:1' }),
-    { width: 1536, height: 864, ratio: '16:9', source: 'prompt_ratio', conflict: true },
+    { width: 1024, height: 1024, ratio: '1:1', source: 'ui_ratio', conflict: true, conflictType: 'ui_ratio_overrides_prompt_ratio' },
   );
 
   assertPlan(

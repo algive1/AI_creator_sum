@@ -13,12 +13,12 @@ export function choosePublicFileDeliveryUrl(options: PublicFileDeliveryOptions):
   const accessUrl = String(options.accessUrl || '').trim();
   const preferProxy = options.preferProxy !== false;
 
-  if (cdnUrl) return cdnUrl;
-  if (accessUrl) return accessUrl;
-
   if (preferProxy && apiBaseUrl && fileNo) {
     return `${apiBaseUrl}/api/v1/files/${encodeURIComponent(fileNo)}/content`;
   }
+
+  if (cdnUrl) return cdnUrl;
+  if (accessUrl) return accessUrl;
 
   return fileNo && apiBaseUrl ? `${apiBaseUrl}/api/v1/files/${encodeURIComponent(fileNo)}/content` : '';
 }
