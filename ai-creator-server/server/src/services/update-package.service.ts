@@ -345,7 +345,11 @@ export async function getCurrentReleaseVersion(): Promise<{ version: string; war
       const row = await queryOne<any>(
         "SELECT version FROM app_releases WHERE status = 'installed' ORDER BY installed_at DESC, id DESC LIMIT 1",
       );
-      if (row?.version) return { version: String(row.version), warnings };
+      const installedVersion = typeof row?.version === 'string' ? row.version.trim() : '';
+      if (SEMVER_PATTERN.test(installedVersion)) return { version: installedVersion, warnings };
+      if (row?.version) {
+        warnings.push(`app_releases contains an invalid installed release version: ${String(row.version)}`);
+      }
       warnings.push('app_releases has no installed release record; checking runtime release.json');
     } else {
       warnings.push('app_releases table not found; checking runtime release.json');

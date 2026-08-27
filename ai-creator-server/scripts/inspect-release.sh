@@ -66,6 +66,20 @@ forbid() {
   fi
 }
 
+forbid_real_env_files() {
+  local matches
+  matches="$(printf '%s\n' "$LISTING" \
+    | grep -E '(^|/)\.env($|\.)' \
+    | grep -Ev '^server/\.env\.example$|^server/\.env\.production\.example$' \
+    || true)"
+  if [[ -n "$matches" ]]; then
+    fail_check "found forbidden real env files:"
+    printf '%s\n' "$matches" | sed 's/^/[FAIL] - /' >&2
+  else
+    ok "forbidden check passed: real env files"
+  fi
+}
+
 check_archive_entries() {
   local entry line mode
   while IFS= read -r entry; do
@@ -185,7 +199,7 @@ check_release_json
 
 check_dist_locations
 forbid "node_modules" '(^|/)node_modules(/|$)'
-forbid "real env files" '(^|/)\.env($|\.installed$|\.local$|\.production$|\.development$)'
+forbid_real_env_files
 forbid "runtime data" '(^|/)(uploads|logs|backups|update-packages)(/|$)'
 forbid "git/codex local files" '(^|/)(\.git|\.codex-qa|\.release-staging)(/|$)|(^|/)codex[^/]*(/|$)'
 forbid "local archives" '(^|/).*\.(zip|tar\.gz|tgz)$'
