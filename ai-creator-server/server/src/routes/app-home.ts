@@ -109,13 +109,16 @@ async function getFeatureEntries() {
 
 async function getTemplates(sortBy: 'recommended' | 'hot') {
   const publicUserTemplatesEnabled = await SettingsService.getBoolean('template.user_public_enabled', false);
-  const sourceFilter = publicUserTemplatesEnabled ? '' : "AND source = 'official'";
+  const sourceFilter = publicUserTemplatesEnabled ? '' : "AND t.source = 'official'";
+  const orderBy = sortBy === 'hot'
+    ? 't.usage_count DESC, t.favorite_count DESC, t.created_at DESC, t.id DESC'
+    : 't.is_recommended DESC, t.created_at DESC, t.id DESC';
   const rows = await query<any>(
-    `SELECT id, title, description, template_type, cover_url, prompt, ratio, style, duration, usage_count, favorite_count, is_hot, is_recommended
-       FROM templates
-      WHERE is_enabled = 1 AND visibility = 'public' AND status = 'approved' AND review_status = 'approved' AND deleted_at IS NULL
+    `SELECT t.id, t.title, t.description, t.template_type, t.cover_url, t.prompt, t.ratio, t.style, t.duration, t.usage_count, t.favorite_count, t.is_hot, t.is_recommended
+       FROM templates t
+      WHERE t.is_enabled = 1 AND t.visibility = 'public' AND t.status = 'approved' AND t.review_status = 'approved' AND t.deleted_at IS NULL
         ${sourceFilter}
-      ORDER BY ${sortBy === 'hot' ? 'usage_count DESC, favorite_count DESC' : 'is_recommended DESC, sort_order DESC'}
+      ORDER BY ${orderBy}
       LIMIT 8`,
   );
   return rows.map((row: any) => ({

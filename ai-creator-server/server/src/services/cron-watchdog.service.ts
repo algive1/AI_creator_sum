@@ -6,7 +6,7 @@
  * 同时暴露 runCronTask() 供 HTTP 手动触发（admin-system.ts 的 /cron/:taskName 端点调用）。
  */
 
-export type CronTaskName = 'membership-expiry' | 'monthly-points' | 'daily-backup' | 'ad-cleanup';
+export type CronTaskName = 'membership-expiry' | 'monthly-points' | 'daily-backup' | 'ad-cleanup' | 'free-image-quota-recovery' | 'media-asset-cleanup';
 
 interface CronEntry {
   name: CronTaskName;

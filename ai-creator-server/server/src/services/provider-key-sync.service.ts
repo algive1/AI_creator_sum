@@ -17,12 +17,14 @@ export interface ProviderKeySyncResult {
 const PROVIDER_KEY_MAPPINGS: ProviderKeyMapping[] = [
   { providerKey: 'openai', envKeys: ['OPENAI_API_KEY'] },
   { providerKey: 'xiaoma', envKeys: ['XIAOMA_API_KEY', 'LK888_API_KEY'] },
+  { providerKey: 'deepseek', envKeys: ['DEEPSEEK_API_KEY', 'DEEPSEEK_TOKEN'] },
   { providerKey: 'bagege', envKeys: ['BAGEGE_API_KEY'] },
   { providerKey: 'wellapi', envKeys: ['WELLAPI_API_KEY'] },
   { providerKey: 'codesonline_image', envKeys: ['CODESONLINE_IMAGE_API_KEY', 'CODESONLINE_API_KEY'] },
   { providerKey: 'apimart', envKeys: ['APIMART_API_KEY'] },
   { providerKey: 'runninghub', envKeys: ['RUNNINGHUB_API_KEY', 'RUNNINGHUB_API_TOKEN'] },
   { providerKey: 'agnes_ai', envKeys: ['AGNES_API_KEY', 'AGNES_API_TOKEN', 'APIHUB_AGNES_API_KEY'] },
+  { providerKey: 'hongniao', envKeys: ['HONGNIAO_API_KEY', 'HONGNIAOAI_API_KEY'] },
 ];
 
 function usableSecret(value: string | undefined): value is string {

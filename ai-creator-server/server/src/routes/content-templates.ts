@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { authMiddleware } from '../middleware/auth';
-import { query, queryOne } from '../utils/db';
+import { getConnection, query, queryOne } from '../utils/db';
 import { success, error } from '../utils/response';
 import { parseJson } from '../utils/content-helpers';
 import { ErrorCodes } from '../types';
@@ -8,6 +8,8 @@ import { optionalUserId } from '../utils/content-helpers';
 import { hasComplianceConfirmation } from './compliance';
 import { SettingsService } from '../services/settings.service';
 import { isActiveMember } from '../services/membership.service';
+import { createTemplateFavoriteNotification } from '../services/template-notification.service';
+import { normalizePublicMediaUrl } from '../utils/public-media-url';
 import {
   normalizeTemplateTargetFeatureKey,
   parseTemplateJson,
@@ -17,6 +19,7 @@ import {
 const router = Router();
 const TEMPLATE_SAVE_USE_MEMBER_MESSAGE = '\u8be5\u6a21\u677f\u4e3a\u4f1a\u5458\u4e13\u5c5e\uff0c\u5f00\u901a\u4f1a\u5458\u540e\u53ef\u4fdd\u5b58\u7d20\u6750\u548c\u4f7f\u7528\u6a21\u677f\u3002';
 const TEMPLATE_MEMBER_MESSAGE = '该灵感模板为会员专享，开通会员后可使用。';
+const PROFILE_REQUIRED = 4610;
 
 router.get('/categories', async (_req: Request, res: Response) => {
   try {
@@ -42,7 +45,7 @@ router.get('/categories', async (_req: Request, res: Response) => {
 router.get('/', async (req: Request, res: Response) => {
   try {
     const userId = await optionalUserId(req);
-    const listResult = await queryTemplates(userId || 0, req.query as any);
+    const listResult = await queryTemplates(userId || 0, req.query as any, req);
     success(res, {
       list: listResult.list,
       pagination: listResult.pagination,
@@ -55,7 +58,7 @@ router.get('/', async (req: Request, res: Response) => {
 router.get('/recommended', async (req: Request, res: Response) => {
   try {
     const userId = await optionalUserId(req);
-    const result = await queryTemplates(userId || 0, { ...req.query, pageSize: '8', sortBy: 'recommended' });
+    const result = await queryTemplates(userId || 0, { ...req.query, pageSize: '8', sortBy: 'recommended' }, req);
     success(res, result);
   } catch {
     error(res, ErrorCodes.SERVER_ERROR, '获取推荐模板失败');
@@ -65,7 +68,7 @@ router.get('/recommended', async (req: Request, res: Response) => {
 router.get('/search', async (req: Request, res: Response) => {
   try {
     const userId = await optionalUserId(req);
-    const result = await queryTemplates(userId || 0, { ...req.query, keyword: req.query.keyword || (req.query as any).q });
+    const result = await queryTemplates(userId || 0, { ...req.query, keyword: req.query.keyword || (req.query as any).q }, req);
     success(res, result);
   } catch {
     error(res, ErrorCodes.SERVER_ERROR, '搜索模板失败');
@@ -75,23 +78,182 @@ router.get('/search', async (req: Request, res: Response) => {
 router.get('/inspirations', async (req: Request, res: Response) => {
   try {
     const userId = await optionalUserId(req);
+    const list = await queryDisplayPositionTemplates('inspiration', userId || 0, req);
+    success(res, { list });
+  } catch {
+    error(res, ErrorCodes.SERVER_ERROR, '获取灵感模板失败');
+  }
+});
+
+router.get('/home-inspirations', async (req: Request, res: Response) => {
+  try {
+    const userId = await optionalUserId(req);
+    let list = await queryDisplayPositionTemplates('home_inspiration', userId || 0, req);
+    const fallback = list.length === 0;
+    if (fallback) {
+      list = await queryDisplayPositionTemplates('inspiration', userId || 0, req);
+    }
+    success(res, { list, fallback });
+  } catch {
+    error(res, ErrorCodes.SERVER_ERROR, '获取首页灵感推荐失败');
+  }
+});
+
+router.get('/inspirations/top', async (req: Request, res: Response) => {
+  try {
+    const userId = await optionalUserId(req);
+    const pageSize = Math.min(Math.max(parseInt(String(req.query.pageSize || '12'), 10) || 12, 1), 50);
+    const publicUserTemplatesEnabled = await SettingsService.getBoolean('template.user_public_enabled', false);
+    const sourceFilter = publicTemplateSourceFilter(publicUserTemplatesEnabled);
     const rows = await query<any>(
-      `SELECT t.*, c.name AS category_name, c.category_key
+      `SELECT t.*, c.name AS category_name, c.category_key, u.nickname, u.avatar_url
          FROM templates t
          LEFT JOIN template_categories c ON c.id = t.category_id
+         LEFT JOIN users u ON u.id = t.user_id
         WHERE t.deleted_at IS NULL AND t.is_enabled = 1 AND t.status = 'approved' AND t.review_status = 'approved'
-          AND t.source = 'official'
-          AND (t.template_type = 'inspiration' OR JSON_EXTRACT(t.display_config, '$.inspiration') IS NOT NULL)
-        ORDER BY ${displayPositionOrderBy('inspiration')}, is_hot DESC, is_recommended DESC, sort_order DESC, id DESC`,
+          ${sourceFilter}
+          AND t.template_type IN ('image', 'video')
+          AND JSON_EXTRACT(t.display_config, '$.inspiration_top') IS NOT NULL
+        ORDER BY ${templateDefaultOrderBy('inspiration_top', isRandomTemplateRequest(req))}
+        LIMIT ?`,
+      [pageSize],
     );
     const list = [];
     for (const row of rows) {
-      const item = await toPublicTemplate(row, userId || 0);
+      const item = await toPublicTemplate(row, userId || 0, req);
       if (item.canView !== false) list.push(item);
     }
     success(res, { list });
   } catch {
-    error(res, ErrorCodes.SERVER_ERROR, '获取灵感模板失败');
+    error(res, ErrorCodes.SERVER_ERROR, '获取顶部灵感模板失败');
+  }
+});
+
+router.get('/my-favorites', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = req.user!.userId;
+    const page = Math.max(parseInt(String(req.query.page || '1'), 10) || 1, 1);
+    const pageSize = Math.min(Math.max(parseInt(String(req.query.pageSize || '20'), 10) || 20, 1), 100);
+    const offset = (page - 1) * pageSize;
+    const rows = await query<any>(
+      `SELECT t.*, c.name AS category_name, c.category_key, u.nickname, u.avatar_url, f.created_at AS favorited_at
+         FROM template_favorites f
+         JOIN templates t ON t.id = f.template_id
+         LEFT JOIN template_categories c ON c.id = t.category_id
+         LEFT JOIN users u ON u.id = t.user_id
+        WHERE f.user_id = ?
+          AND t.deleted_at IS NULL
+          AND t.is_enabled = 1
+          AND t.status = 'approved'
+          AND t.review_status = 'approved'
+        ORDER BY f.created_at DESC, f.id DESC
+        LIMIT ? OFFSET ?`,
+      [userId, pageSize, offset],
+    );
+    const [countRow] = await query<any>(
+      `SELECT COUNT(*) AS total
+         FROM template_favorites f
+         JOIN templates t ON t.id = f.template_id
+        WHERE f.user_id = ?
+          AND t.deleted_at IS NULL
+          AND t.is_enabled = 1
+          AND t.status = 'approved'
+          AND t.review_status = 'approved'`,
+      [userId],
+    );
+    const list = [];
+    for (const row of rows) {
+      const item = await toPublicTemplate(row, userId, req);
+      if (item.canView !== false) list.push({ ...item, favoritedAt: row.favorited_at });
+    }
+    const total = Number(countRow?.total || 0);
+    success(res, {
+      list,
+      pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) },
+    });
+  } catch {
+    error(res, ErrorCodes.SERVER_ERROR, '获取我的收藏失败');
+  }
+});
+
+router.post('/:id(\\d+)/favorite', authMiddleware, async (req: Request, res: Response) => {
+  const conn = await getConnection();
+  try {
+    const userId = req.user!.userId;
+    const templateId = Number(req.params.id);
+    await conn.beginTransaction();
+    const template = await selectVisibleTemplateForFavorite(conn, templateId, userId);
+    if (!template) {
+      await conn.rollback();
+      error(res, ErrorCodes.NOT_FOUND, '模板不存在', 404);
+      return;
+    }
+    const [existingFavorites] = await conn.execute(
+      'SELECT id FROM template_favorites WHERE user_id = ? AND template_id = ? LIMIT 1',
+      [userId, templateId],
+    ) as any;
+    if (!existingFavorites.length) {
+      const [insertedFavorite] = await conn.execute(
+        'INSERT INTO template_favorites (user_id, template_id, created_at) VALUES (?, ?, NOW(3))',
+        [userId, templateId],
+      ) as any;
+      const favoriteId = Number(insertedFavorite?.insertId || 0);
+      await conn.execute('UPDATE templates SET favorite_count = COALESCE(favorite_count, 0) + 1, updated_at = NOW(3) WHERE id = ?', [templateId]);
+      await conn.execute(
+        `INSERT INTO user_assets (user_id, total_favorites, created_at, updated_at)
+         VALUES (?, 1, NOW(3), NOW(3))
+         ON DUPLICATE KEY UPDATE total_favorites = total_favorites + 1, updated_at = NOW(3)`,
+        [userId],
+      );
+      await createTemplateFavoriteNotification({
+        ownerUserId: Number(template.user_id || 0),
+        actorUserId: userId,
+        templateId,
+        favoriteId,
+      }, conn);
+    }
+    await conn.commit();
+    success(res, await favoriteStatePayload(userId, templateId));
+  } catch {
+    await conn.rollback();
+    error(res, ErrorCodes.SERVER_ERROR, '收藏模板失败');
+  } finally {
+    conn.release();
+  }
+});
+
+router.delete('/:id(\\d+)/favorite', authMiddleware, async (req: Request, res: Response) => {
+  const conn = await getConnection();
+  try {
+    const userId = req.user!.userId;
+    const templateId = Number(req.params.id);
+    await conn.beginTransaction();
+    const template = await selectVisibleTemplateForFavorite(conn, templateId, userId);
+    if (!template) {
+      await conn.rollback();
+      error(res, ErrorCodes.NOT_FOUND, '模板不存在', 404);
+      return;
+    }
+    const [deleted] = await conn.execute(
+      'DELETE FROM template_favorites WHERE user_id = ? AND template_id = ?',
+      [userId, templateId],
+    ) as any;
+    if (Number(deleted?.affectedRows || 0) > 0) {
+      await conn.execute('UPDATE templates SET favorite_count = GREATEST(COALESCE(favorite_count, 0) - 1, 0), updated_at = NOW(3) WHERE id = ?', [templateId]);
+      await conn.execute(
+        `INSERT INTO user_assets (user_id, total_favorites, created_at, updated_at)
+         VALUES (?, 0, NOW(3), NOW(3))
+         ON DUPLICATE KEY UPDATE total_favorites = GREATEST(total_favorites - 1, 0), updated_at = NOW(3)`,
+        [userId],
+      );
+    }
+    await conn.commit();
+    success(res, await favoriteStatePayload(userId, templateId));
+  } catch {
+    await conn.rollback();
+    error(res, ErrorCodes.SERVER_ERROR, '取消收藏失败');
+  } finally {
+    conn.release();
   }
 });
 
@@ -99,7 +261,11 @@ router.get('/:id(\\d+)', async (req: Request, res: Response) => {
   try {
     const userId = await optionalUserId(req) || 0;
     const row = await queryOne<any>(
-      `SELECT * FROM templates WHERE id = ? AND deleted_at IS NULL`,
+      `SELECT t.*, c.name AS category_name, c.category_key, u.nickname, u.avatar_url
+         FROM templates t
+         LEFT JOIN template_categories c ON c.id = t.category_id
+         LEFT JOIN users u ON u.id = t.user_id
+        WHERE t.id = ? AND t.deleted_at IS NULL`,
       [Number(req.params.id)],
     );
     if (!row) {
@@ -117,7 +283,7 @@ router.get('/:id(\\d+)', async (req: Request, res: Response) => {
       error(res, ErrorCodes.NOT_FOUND, '模板不存在', 404);
       return;
     }
-    const item = await toPublicTemplate(row, userId);
+    const item = await toPublicTemplate(row, userId, req);
     if (!isOwner && item.canView === false) {
       error(res, ErrorCodes.MEMBERSHIP_REQUIRED, TEMPLATE_MEMBER_MESSAGE, 403);
       return;
@@ -191,6 +357,11 @@ router.post('/share', authMiddleware, async (req: Request, res: Response) => {
     const shareEnabled = await SettingsService.getBoolean('template.user_share_enabled', true);
     if (!shareEnabled) {
       error(res, ErrorCodes.FORBIDDEN, '当前不允许用户分享模板', 403);
+      return;
+    }
+    const shareNickname = await getShareProfileNickname(userId);
+    if (!hasShareProfileNickname(shareNickname)) {
+      error(res, PROFILE_REQUIRED, '请先设置昵称后再分享模板');
       return;
     }
 
@@ -292,7 +463,7 @@ router.post('/share', authMiddleware, async (req: Request, res: Response) => {
         is_enabled, visibility, status, review_status, review_reason, reviewed_by, reviewed_at, usage_count, view_count, favorite_count,
         content_check_result, access_level, visibility_scope, usage_scope, required_member_plan_id, member_badge_text, member_lock_message,
         created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(3), NOW(3))`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(3), NOW(3))`,
       [
         row.title,
         row.description,
@@ -382,16 +553,21 @@ router.post('/:id(\\d+)/cancel-public', authMiddleware, async (req: Request, res
 router.get('/my-templates', authMiddleware, async (req: Request, res: Response) => {
   try {
     const rows = await query<any>(
-      `SELECT * FROM templates WHERE user_id = ? AND deleted_at IS NULL ORDER BY created_at DESC, id DESC`,
+      `SELECT t.*, c.name AS category_name, c.category_key, u.nickname, u.avatar_url
+         FROM templates t
+         LEFT JOIN template_categories c ON c.id = t.category_id
+         LEFT JOIN users u ON u.id = t.user_id
+        WHERE t.user_id = ? AND t.deleted_at IS NULL
+        ORDER BY t.created_at DESC, t.id DESC`,
       [req.user!.userId],
     );
-    success(res, { list: await Promise.all(rows.map(row => toPublicTemplate(row, req.user!.userId))) });
+    success(res, { list: await Promise.all(rows.map(row => toPublicTemplate(row, req.user!.userId, req))) });
   } catch {
     error(res, ErrorCodes.SERVER_ERROR, '获取我的模板失败');
   }
 });
 
-async function toPublicTemplate(row: any, userId: number) {
+async function toPublicTemplate(row: any, userId: number, req?: Request) {
   const permission = await checkMembershipPermission(userId, row);
   const imageUseMemberOnly = await isImageTemplateUseMemberOnly(row, userId);
   const canUse = permission.canUse && !imageUseMemberOnly;
@@ -402,18 +578,22 @@ async function toPublicTemplate(row: any, userId: number) {
   const displayConfig = parseTemplateJson<Record<string, any> | null>(row.display_config, null);
   const targetFeature = normalizeTemplateTargetFeatureKey(row.target_feature);
   const usageType = resolveTemplateUsageType(row.template_type, row.usage_type, targetFeature, displayConfig);
-  const coverUrl = await normalizeTemplateMediaUrl(row.cover_url);
-  const previewUrl = await normalizeTemplateMediaUrl(row.preview_url);
+  const coverUrl = await normalizePublicMediaUrl(req, row.cover_url);
+  const previewUrl = await normalizePublicMediaUrl(req, row.preview_url);
   return {
     id: row.id,
-    title: row.title,
-    name: row.title,
+    title: row.title || row.prompt || '灵感模板',
+    name: row.title || row.prompt || '灵感模板',
     description: row.description,
     templateType: row.template_type,
     targetFeature,
     usageType,
     displayConfig,
     source: row.source,
+    author: displayTemplateAuthor(row),
+    nickname: displayTemplateAuthor(row),
+    avatarUrl: row.avatar_url || '',
+    authorAvatar: row.avatar_url || '',
     coverUrl,
     previewUrl,
     prompt: row.prompt,
@@ -450,40 +630,59 @@ async function toPublicTemplate(row: any, userId: number) {
     usageCount: row.usage_count,
     viewCount: row.view_count,
     favoriteCount: row.favorite_count,
+    isFavorited: userId > 0 ? await isTemplateFavorited(userId, Number(row.id)) : false,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
-async function normalizeTemplateMediaUrl(url: string): Promise<string> {
-  const value = String(url || '').trim();
-  if (!value || /^https?:\/\//i.test(value) || !value.startsWith('/')) return value;
-
-  const apiDomain = String(process.env.APP_PUBLIC_URL || process.env.PUBLIC_API_DOMAIN || process.env.SITE_API_DOMAIN || '').trim().replace(/\/+$/, '')
-    || String(await SettingsService.getString('site.api_domain', '')).trim().replace(/\/+$/, '');
-  if (apiDomain) return `${apiDomain}${value}`;
-
-  if (value.startsWith('/static/')) {
-    const localBaseUrl = String(process.env.LOCAL_BASE_URL || '').trim().replace(/\/+$/, '')
-      || String(await SettingsService.getString('storage.local.base_url', '')).trim().replace(/\/+$/, '');
-    try {
-      const parsed = new URL(localBaseUrl);
-      return `${parsed.origin}${value}`;
-    } catch {
-      return value;
-    }
-  }
-
-  return value;
+function displayTemplateAuthor(row: any) {
+  if (String(row.source || '') === 'official') return '@官方灵感';
+  const nickname = String(row.nickname || '').trim();
+  if (nickname) return nickname.startsWith('@') ? nickname : `@${nickname}`;
+  if (row.user_id) return `@用户${row.user_id}`;
+  return '@官方灵感';
 }
 
-async function queryTemplates(userId: number, queryParams: any) {
+async function isTemplateFavorited(userId: number, templateId: number) {
+  if (!userId || !templateId) return false;
+  const row = await queryOne<any>('SELECT id FROM template_favorites WHERE user_id = ? AND template_id = ? LIMIT 1', [userId, templateId]);
+  return !!row;
+}
+
+async function favoriteStatePayload(userId: number, templateId: number) {
+  const template = await queryOne<any>('SELECT favorite_count FROM templates WHERE id = ?', [templateId]);
+  const assets = await queryOne<any>('SELECT total_favorites FROM user_assets WHERE user_id = ?', [userId]);
+  return {
+    templateId,
+    isFavorited: await isTemplateFavorited(userId, templateId),
+    favoriteCount: Number(template?.favorite_count || 0),
+    totalFavorites: Number(assets?.total_favorites || 0),
+  };
+}
+
+async function selectVisibleTemplateForFavorite(conn: any, templateId: number, userId: number) {
+  if (!templateId) return null;
+  const [rows] = await conn.execute('SELECT * FROM templates WHERE id = ? AND deleted_at IS NULL FOR UPDATE', [templateId]) as any;
+  const template = rows?.[0];
+  if (!template) return null;
+  const isOwner = Number(template.user_id) === Number(userId);
+  if (!isOwner && !isApprovedPublicTemplate(template)) return null;
+  const publicUserTemplatesEnabled = await SettingsService.getBoolean('template.user_public_enabled', false);
+  if (!isOwner && !publicUserTemplatesEnabled && template.source === 'user') return null;
+  const permission = await checkMembershipPermission(userId, template);
+  if (!isOwner && permission.canView === false) return null;
+  return template;
+}
+
+async function queryTemplates(userId: number, queryParams: any, req?: Request) {
   const { templateType, targetFeature, source, keyword, categoryId, page, pageSize, sortBy } = queryParams;
   const pg = Math.max(parseInt(page || '1', 10), 1);
   const ps = Math.min(Math.max(parseInt(pageSize || '20', 10), 1), 100);
   const offset = (pg - 1) * ps;
   const publicUserTemplatesEnabled = await SettingsService.getBoolean('template.user_public_enabled', false);
   const normalizedTargetFeature = targetFeature ? normalizeTemplateTargetFeatureKey(targetFeature) : '';
+  const randomRequested = isRandomTemplateRequest({ query: queryParams } as Request);
 
   const where: string[] = [
     't.deleted_at IS NULL',
@@ -522,14 +721,16 @@ async function queryTemplates(userId: number, queryParams: any) {
     ? 't.usage_count DESC, t.favorite_count DESC, t.sort_order DESC'
     : sortBy === 'new'
       ? 't.created_at DESC'
-      : 't.is_recommended DESC, t.is_hot DESC, t.sort_order DESC, t.id DESC';
+      : templateDefaultOrderBy(normalizedTargetFeature, randomRequested);
   const orderBy = normalizedTargetFeature && sortBy !== 'hot' && sortBy !== 'new'
-    ? `${displayPositionOrderBy(normalizedTargetFeature)}, ${defaultOrderBy}`
+    ? templateDefaultOrderBy(normalizedTargetFeature, randomRequested)
     : defaultOrderBy;
 
   const rows = await query<any>(
-    `SELECT t.*
+    `SELECT t.*, c.name AS category_name, c.category_key, u.nickname, u.avatar_url
        FROM templates t
+       LEFT JOIN template_categories c ON c.id = t.category_id
+       LEFT JOIN users u ON u.id = t.user_id
       WHERE ${where.join(' AND ')}
       ORDER BY ${orderBy}
       LIMIT ? OFFSET ?`,
@@ -543,13 +744,36 @@ async function queryTemplates(userId: number, queryParams: any) {
   );
   const list = [];
   for (const row of rows) {
-    const item = await toPublicTemplate(row, userId);
+    const item = await toPublicTemplate(row, userId, req);
     if (item.canView !== false) list.push(item);
   }
   return {
     list,
     pagination: { page: pg, pageSize: ps, total: Number(countRow?.total || 0), totalPages: Math.ceil(Number(countRow?.total || 0) / ps) },
   };
+}
+
+async function queryDisplayPositionTemplates(position: 'home_inspiration' | 'inspiration', userId: number, req?: Request) {
+  const publicUserTemplatesEnabled = await SettingsService.getBoolean('template.user_public_enabled', false);
+  const sourceFilter = publicUserTemplatesEnabled ? '' : "AND t.source = 'official'";
+  const includeUserShared = position === 'inspiration' && publicUserTemplatesEnabled;
+  const displayPath = displayConfigJsonPath(position);
+  const rows = await query<any>(
+    `SELECT t.*, c.name AS category_name, c.category_key, u.nickname, u.avatar_url
+       FROM templates t
+       LEFT JOIN template_categories c ON c.id = t.category_id
+       LEFT JOIN users u ON u.id = t.user_id
+      WHERE t.deleted_at IS NULL AND t.is_enabled = 1 AND t.status = 'approved' AND t.review_status = 'approved'
+        ${sourceFilter}
+        AND (JSON_EXTRACT(t.display_config, '${displayPath}') IS NOT NULL${includeUserShared ? " OR t.source = 'user'" : ''})
+      ORDER BY ${templateDefaultOrderBy(position, isRandomTemplateRequest(req))}`,
+  );
+  const list = [];
+  for (const row of rows) {
+    const item = await toPublicTemplate(row, userId, req);
+    if (item.canView !== false) list.push(item);
+  }
+  return list;
 }
 
 async function isImageTemplateUseMemberOnly(row: any, userId: number) {
@@ -617,6 +841,38 @@ function displayPositionOrderBy(feature: string) {
     `JSON_UNQUOTE(JSON_EXTRACT(display_config, '${path}.pinned')) = 'true' DESC`,
     `CAST(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(display_config, '${path}.pinOrder')), '0') AS UNSIGNED) DESC`,
   ].join(', ');
+}
+
+function templateDefaultOrderBy(feature: string, random = false) {
+  const nonPinnedOrder = random ? templateRandomOrderBy() : 't.created_at DESC, t.id DESC';
+  return `${displayPositionOrderBy(feature)}, ${nonPinnedOrder}`;
+}
+
+function templateRandomOrderBy() {
+  return 'RAND(), t.created_at DESC, t.id DESC';
+}
+
+function publicTemplateSourceFilter(publicUserTemplatesEnabled: boolean) {
+  return publicUserTemplatesEnabled ? '' : "AND t.source = 'official'";
+}
+
+function isRandomTemplateRequest(req?: Request | { query?: Record<string, any> }) {
+  const query = req?.query || {};
+  const value = String(query.random ?? query.sortBy ?? query.sort_by ?? '').trim().toLowerCase();
+  return ['1', 'true', 'yes', 'random'].includes(value);
+}
+
+async function getShareProfileNickname(userId: number) {
+  if (!userId) return '';
+  const row = await queryOne<any>('SELECT nickname FROM users WHERE id = ? AND deleted_at IS NULL', [userId]);
+  return String(row?.nickname || '').trim();
+}
+
+function hasShareProfileNickname(nickname: string) {
+  const value = String(nickname || '').trim();
+  if (!value) return false;
+  const normalized = value.replace(/^@+/, '').trim().toLowerCase();
+  return !['用户', '微信用户', '创意小助手', 'ai用户', 'ai创作用户'].includes(normalized);
 }
 
 function toPositiveId(value: any) {

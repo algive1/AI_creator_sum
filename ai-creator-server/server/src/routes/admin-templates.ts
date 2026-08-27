@@ -21,21 +21,30 @@ const router = Router();
 router.get('/templates', adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
     const templateType = req.query.type as string;
+    const keyword = String(req.query.keyword || '').trim().slice(0, 80);
     const page = Math.max(1, parseInt(req.query.page as string) || 1);
     const pageSize = Math.min(Math.max(1, parseInt(req.query.pageSize as string) || 20), 100);
     const offset = (page - 1) * pageSize;
-    const where = ['t.deleted_at IS NULL', "t.source = 'official'"];
+    const where = ['t.deleted_at IS NULL', adminManageableTemplateWhere('t')];
     const params: any[] = [];
     if (templateType) {
       if (templateType === 'inspiration') {
-        where.push("(t.template_type = 'inspiration' OR JSON_EXTRACT(t.display_config, '$.inspiration') IS NOT NULL)");
+        where.push("(JSON_EXTRACT(t.display_config, '$.home_inspiration') IS NOT NULL OR JSON_EXTRACT(t.display_config, '$.inspiration') IS NOT NULL)");
       } else {
         where.push('t.template_type = ?');
         params.push(templateType);
       }
     }
+    if (keyword) {
+      const pattern = `%${keyword}%`;
+      where.push('(t.title LIKE ? OR t.prompt LIKE ? OR t.description LIKE ? OR c.name LIKE ?)');
+      params.push(pattern, pattern, pattern, pattern);
+    }
     const [countRow] = await query<any>(
-      `SELECT COUNT(*) AS total FROM templates t WHERE ${where.join(' AND ')}`,
+      `SELECT COUNT(*) AS total
+         FROM templates t
+         LEFT JOIN template_categories c ON c.id = t.category_id
+        WHERE ${where.join(' AND ')}`,
       params,
     );
     const rows = await query<any>(
@@ -43,7 +52,7 @@ router.get('/templates', adminAuthMiddleware, async (req: Request, res: Response
          FROM templates t
          LEFT JOIN template_categories c ON c.id = t.category_id
         WHERE ${where.join(' AND ')}
-        ORDER BY t.template_type, t.sort_order, t.id
+        ORDER BY t.created_at DESC, t.id DESC
         LIMIT ? OFFSET ?`,
       [...params, pageSize, offset],
     );
@@ -60,16 +69,16 @@ router.get('/templates', adminAuthMiddleware, async (req: Request, res: Response
 router.post('/templates', adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
     const payload = normalizeAdminTemplateBody(req.body);
-    if (!payload.title || !payload.prompt) {
-      error(res, ErrorCodes.PARAM_ERROR, '缺少模板名称或提示词');
+    if (!payload.prompt) {
+      error(res, ErrorCodes.PARAM_ERROR, '缺少模板提示词');
       return;
     }
     await query(
       `INSERT INTO templates
        (title, description, template_type, target_feature, usage_type, display_config, source, cover_url, preview_url, prompt, negative_prompt,
-        params_json, ratio, duration, style, scene, category_id, tags_json, sort_order, is_recommended, is_hot,
+        params_json, ratio, duration, style, scene, category_id, tags_json, sort_order, usage_count, is_recommended, is_hot,
         is_enabled, visibility, status, review_status, access_level, visibility_scope, usage_scope, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'official', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'free', 'all', 'all', NOW(3), NOW(3))`,
+       VALUES (?, ?, ?, ?, ?, ?, 'official', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'free', 'all', 'all', NOW(3), NOW(3))`,
       [
         payload.title,
         payload.description,
@@ -89,6 +98,7 @@ router.post('/templates', adminAuthMiddleware, async (req: Request, res: Respons
         payload.categoryId,
         JSON.stringify(payload.tagsJson),
         payload.sortOrder,
+        payload.usageCount,
         payload.isRecommended,
         payload.isHot,
         payload.statusPatch.isEnabled,
@@ -107,7 +117,10 @@ router.post('/templates', adminAuthMiddleware, async (req: Request, res: Respons
 router.put('/templates/:id(\\d+)', adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
     const id = Number(req.params.id);
-    const existing = await queryOne<any>('SELECT * FROM templates WHERE id = ? AND source = ? AND deleted_at IS NULL', [id, 'official']);
+    const existing = await queryOne<any>(
+      `SELECT t.* FROM templates t WHERE t.id = ? AND ${adminManageableTemplateWhere('t')} AND t.deleted_at IS NULL`,
+      [id],
+    );
     if (!existing) {
       error(res, ErrorCodes.NOT_FOUND, '模板不存在', 404);
       return;
@@ -128,10 +141,14 @@ router.put('/templates/:id(\\d+)', adminAuthMiddleware, async (req: Request, res
       : normalizeTemplateUsageType(nextTemplateType, existing.usage_type);
     const nextDisplayConfig = displayConfigChanged ? body.displayConfig : existing.display_config;
 
-    const title = firstText(body.title, body.name);
-    if (title !== undefined) { sets.push('title = ?'); values.push(title); }
-    if (body.description !== undefined) { sets.push('description = ?'); values.push(String(body.description || '')); }
     const prompt = firstText(body.prompt, body.promptTemplate);
+    if (prompt !== undefined && !prompt) {
+      error(res, ErrorCodes.PARAM_ERROR, '模板提示词不能为空');
+      return;
+    }
+    const title = firstText(body.title, body.name);
+    if (title !== undefined) { sets.push('title = ?'); values.push(resolveTemplateTitle(title, prompt ?? existing.prompt)); }
+    if (body.description !== undefined) { sets.push('description = ?'); values.push(String(body.description || '')); }
     if (prompt !== undefined) { sets.push('prompt = ?'); values.push(prompt); }
     if (body.negativePrompt !== undefined || body.negative_prompt !== undefined) {
       sets.push('negative_prompt = ?');
@@ -204,6 +221,10 @@ router.put('/templates/:id(\\d+)', adminAuthMiddleware, async (req: Request, res
       sets.push('sort_order = ?');
       values.push(Number(body.sortOrder ?? body.sort_order ?? 0));
     }
+    if (body.usageCount !== undefined || body.usage_count !== undefined) {
+      sets.push('usage_count = ?');
+      values.push(Math.max(0, Math.floor(Number(body.usageCount ?? body.usage_count ?? 0) || 0)));
+    }
     if (body.status !== undefined) {
       const statusPatch = normalizeTemplateStatus(body.status);
       sets.push('status = ?', 'review_status = ?', 'is_enabled = ?', 'visibility = ?');
@@ -226,9 +247,9 @@ router.put('/templates/:id(\\d+)', adminAuthMiddleware, async (req: Request, res
 router.delete('/templates/:id(\\d+)', adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
     await query(
-      `UPDATE templates
+      `UPDATE templates t
           SET status = 'offline', review_status = 'approved', is_enabled = 0, deleted_at = NOW(3), updated_at = NOW(3)
-        WHERE id = ? AND source = 'official' AND deleted_at IS NULL`,
+        WHERE t.id = ? AND ${adminManageableTemplateWhere('t')} AND t.deleted_at IS NULL`,
       [Number(req.params.id)],
     );
     success(res, { deleted: true });
@@ -247,9 +268,9 @@ router.delete('/templates/batch', adminAuthMiddleware, async (req: Request, res:
     }
     const placeholders = ids.map(() => '?').join(',');
     const [result] = await query<any>(
-      `UPDATE templates
+      `UPDATE templates t
           SET status = 'offline', review_status = 'approved', is_enabled = 0, deleted_at = NOW(3), updated_at = NOW(3)
-        WHERE id IN (${placeholders}) AND source = 'official' AND deleted_at IS NULL`,
+        WHERE t.id IN (${placeholders}) AND ${adminManageableTemplateWhere('t')} AND t.deleted_at IS NULL`,
       ids,
     );
     success(res, { deleted: true, count: Number(result?.affectedRows || 0) });
@@ -267,17 +288,30 @@ router.put('/templates/batch/display-config', adminAuthMiddleware, async (req: R
       return;
     }
     const displayConfig = normalizeDisplayConfig(req.body?.displayConfig ?? req.body?.display_config);
+    const mergeDisplayConfig = req.body?.mergeDisplayConfig === true || req.body?.merge_display_config === true;
     if (!displayConfig) {
       error(res, ErrorCodes.PARAM_ERROR, '请选择至少一个展示位置');
       return;
     }
     const isRecommended = Object.values(displayConfig).some((item: any) => item?.pinned) ? 1 : 0;
     const placeholders = ids.map(() => '?').join(',');
+    const nextDisplayConfig = JSON.stringify(displayConfig);
     const [result] = await query<any>(
-      `UPDATE templates
-          SET display_config = ?, is_recommended = ?, updated_at = NOW(3)
-        WHERE id IN (${placeholders}) AND source = 'official' AND deleted_at IS NULL`,
-      [JSON.stringify(displayConfig), isRecommended, ...ids],
+      mergeDisplayConfig
+        ? `UPDATE templates t
+             SET display_config = CASE
+                   WHEN JSON_VALID(display_config) THEN JSON_MERGE_PATCH(display_config, ?)
+                   ELSE ?
+                 END,
+                 is_recommended = CASE WHEN ? = 1 THEN 1 ELSE is_recommended END,
+                 updated_at = NOW(3)
+           WHERE t.id IN (${placeholders}) AND ${adminManageableTemplateWhere('t')} AND t.deleted_at IS NULL`
+        : `UPDATE templates t
+             SET display_config = ?, is_recommended = ?, updated_at = NOW(3)
+           WHERE t.id IN (${placeholders}) AND ${adminManageableTemplateWhere('t')} AND t.deleted_at IS NULL`,
+      mergeDisplayConfig
+        ? [nextDisplayConfig, nextDisplayConfig, isRecommended, ...ids]
+        : [nextDisplayConfig, isRecommended, ...ids],
     );
     success(res, { updated: true, count: Number(result?.affectedRows || 0) });
   } catch (err: any) {
@@ -285,6 +319,13 @@ router.put('/templates/batch/display-config', adminAuthMiddleware, async (req: R
     error(res, ErrorCodes.SERVER_ERROR, '批量设置展示位置失败');
   }
 });
+
+function adminManageableTemplateWhere(alias: string) {
+  if (alias === 't') {
+    return "(t.source = 'official' OR (t.source = 'user' AND t.review_status = 'approved'))";
+  }
+  return `(${alias}.source = 'official' OR (${alias}.source = 'user' AND ${alias}.review_status = 'approved'))`;
+}
 
 function normalizeAdminTemplateBody(body: any) {
   const templateType = normalizeTemplateType(body.templateType ?? body.template_type);
@@ -301,7 +342,7 @@ function normalizeAdminTemplateBody(body: any) {
   if (style) paramsJson.style = style;
   if (duration) paramsJson.duration = durationToDisplay(duration);
   return {
-    title: String(body.title || body.name || '').trim(),
+    title: resolveTemplateTitle(body.title || body.name, body.prompt || body.promptTemplate || body.prompt_template),
     description: String(body.description || '').trim(),
     templateType,
     targetFeature,
@@ -318,11 +359,19 @@ function normalizeAdminTemplateBody(body: any) {
     categoryId: toNullableId(body.categoryId ?? body.category_id),
     tagsJson: normalizeTemplateTags(body.tags ?? body.tagsJson ?? body.tags_json),
     sortOrder: Number(body.sortOrder ?? body.sort_order ?? 0),
+    usageCount: Math.max(0, Math.floor(Number(body.usageCount ?? body.usage_count ?? 0) || 0)),
     isRecommended: body.isRecommended ?? body.is_recommended ? 1 : 0,
     isHot: body.isHot ?? body.is_hot ? 1 : 0,
     statusPatch: normalizeTemplateStatus(body.status || 'active'),
     displayConfig,
   };
+}
+
+function resolveTemplateTitle(titleValue: any, promptValue: any): string {
+  const title = String(titleValue || '').trim();
+  if (title) return title.slice(0, 128);
+  const prompt = String(promptValue || '').trim();
+  return (prompt || '未命名模板').slice(0, 128);
 }
 
 function firstText(...values: any[]): string | undefined {

@@ -24,6 +24,10 @@ router.get('/me', authMiddleware, async (req: Request, res: Response) => {
 router.put('/me', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { nickname, avatarUrl, preferences } = req.body;
+    if (preferences?.themeSource !== undefined && !['system', 'light', 'dark'].includes(preferences.themeSource)) {
+      error(res, ErrorCodes.PARAM_ERROR, '主题偏好必须为 system、light 或 dark');
+      return;
+    }
     await updateUserProfile(req.user!.userId, { nickname, avatarUrl, preferences });
     const user = await getUserById(req.user!.userId);
     success(res, user);

@@ -23,9 +23,11 @@ interface TextModelBinding {
   modelType: string;
   apiModelName: string;
   upstreamModelCode: string;
+  config: Record<string, any>;
   timeoutSeconds: number;
   providerId: number;
   providerName: string;
+  providerKey: string;
   providerType: string;
   providerApiBaseUrl: string;
   providerApiKey: string;
@@ -51,11 +53,44 @@ export interface PromptOptimizeResult {
 }
 
 const TEXT_FEATURE_CAPABILITIES: Record<TextFeatureKey, string[]> = {
-  prompt_optimize: ['text_chat', 'prompt_optimize'],
+  prompt_optimize: ['text_chat', 'text_generation', 'prompt_optimize'],
   script_generate: ['text_chat', 'script_generate'],
   prompt_generate: ['text_chat', 'prompt_generate'],
   storyboard_generate: ['text_chat', 'storyboard_generate'],
 };
+
+const TEXT_FEATURE_MODEL_CACHE_TTL_MS = 60_000;
+const textFeatureModelCache = new Map<TextFeatureKey, {
+  value: { config: TextFeatureConfig; model: TextModelBinding };
+  expiresAt: number;
+}>();
+
+const PROMPT_OPTIMIZE_CONTEXT_KEYS = [
+  'feature',
+  'mode',
+  'scene',
+  'brand',
+  'sellingPoint',
+  'style',
+  'sizeMode',
+  'ratio',
+  'resolutionPreset',
+  'resolution',
+  'imageCount',
+  'duration',
+  'audioMode',
+  'preserveAudio',
+  'hasReferenceImage',
+  'hasReferenceVideo',
+  'hasReferenceAudio',
+  'hasFirstFrame',
+  'hasLastFrame',
+  'hasSourceVideo',
+  'editTool',
+  'referenceMode',
+  'tierName',
+  'tierDescription',
+] as const;
 
 export async function getTextFeatureConfig(featureKey: TextFeatureKey): Promise<TextFeatureConfig> {
   const enabled = await SettingsService.getBoolean(featureConfigKey(featureKey, 'enabled'), false);
@@ -75,14 +110,25 @@ export function featureConfigKey(featureKey: TextFeatureKey, field: 'enabled' | 
   return `ai.${featureKey}.${field}`;
 }
 
+export function clearTextFeatureModelCache(featureKey?: TextFeatureKey): void {
+  if (featureKey) {
+    textFeatureModelCache.delete(featureKey);
+    return;
+  }
+  textFeatureModelCache.clear();
+}
+
 export async function resolveTextFeatureModel(featureKey: TextFeatureKey): Promise<{ config: TextFeatureConfig; model: TextModelBinding }> {
+  const cached = textFeatureModelCache.get(featureKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
   const config = await getTextFeatureConfig(featureKey);
   if (!config.enabled) throw featureError(`${featureLabel(featureKey)}未启用，请先在后台开启。`);
   if (!config.modelId) throw featureError(`${featureLabel(featureKey)}未绑定默认文本模型，请先在后台配置。`);
 
   const model = await queryOne<any>(
     `SELECT m.id, m.name, m.display_name, m.model_type, m.api_model_name, m.upstream_model_code,
-            m.timeout_seconds, p.id AS provider_id, p.name AS provider_name, p.provider_type,
+            m.config, m.timeout_seconds, p.id AS provider_id, p.name AS provider_name, p.provider_key, p.provider_type,
             p.api_base_url AS provider_api_base_url, p.api_key AS provider_api_key
        FROM ai_models m
        JOIN ai_model_providers p ON p.id = m.provider_id
@@ -99,9 +145,11 @@ export async function resolveTextFeatureModel(featureKey: TextFeatureKey): Promi
     modelType: model.model_type,
     apiModelName: model.api_model_name,
     upstreamModelCode: model.upstream_model_code || '',
+    config: parseJsonObjectOrEmpty(model.config),
     timeoutSeconds: model.timeout_seconds || 120,
     providerId: model.provider_id,
     providerName: model.provider_name,
+    providerKey: model.provider_key || '',
     providerType: model.provider_type,
     providerApiBaseUrl: model.provider_api_base_url,
     providerApiKey: decryptApiKey(model.provider_api_key || ''),
@@ -120,7 +168,9 @@ export async function resolveTextFeatureModel(featureKey: TextFeatureKey): Promi
     throw featureError(`${binding.displayName} 缺少真实模型名，请先填写模型调用 code。`);
   }
 
-  return { config, model: binding };
+  const resolved = { config, model: binding };
+  textFeatureModelCache.set(featureKey, { value: resolved, expiresAt: Date.now() + TEXT_FEATURE_MODEL_CACHE_TTL_MS });
+  return resolved;
 }
 
 export async function optimizePrompt(input: PromptOptimizeInput): Promise<PromptOptimizeResult> {
@@ -145,7 +195,7 @@ export async function optimizePrompt(input: PromptOptimizeInput): Promise<Prompt
     }
 
     const systemPrompt = await buildPromptOptimizeSystemPrompt();
-    const userPrompt = buildPromptOptimizeUserPrompt(originalPrompt, input);
+    const userPrompt = buildPromptOptimizeModelInput(originalPrompt, input);
     const content = await callTextModel(model, systemPrompt, userPrompt);
     const parsed = parsePromptOptimizeResponse(content, originalPrompt);
 
@@ -166,41 +216,100 @@ export async function optimizePrompt(input: PromptOptimizeInput): Promise<Prompt
   }
 }
 
-async function buildPromptOptimizeSystemPrompt(): Promise<string> {
-  const configuredPrompt = await resolveSystemPromptByFeature('prompt_optimize');
-  const basePrompt = [
-    '你是一个面向 AI 生图和生视频的提示词优化引擎。',
-    '只优化表达，不改变用户原始意图，不添加敏感、侵权或真实人物仿冒内容。',
+export function buildDefaultPromptOptimizeSystemPrompt(): string {
+  return [
+    '你是一个面向 AI 生图和生视频的智能提示词深度补全引擎。',
+    '目标：把用户的短提示词补全为可直接生成的完整提示词，而不是只做同义改写或增加十几个字。',
+    '必须保留用户原始主体、动作、风格、限制和真实意图；不要把主题改成另一个方向。',
+    '补全要完整但克制，优先补齐必要生成要素，避免堆砌无关形容词。',
+    '通用补全维度：主体细节、环境背景、构图镜头、光影色彩、材质质感、氛围、质量要求。',
+    '生图场景：强调画面构图、镜头焦段、视觉风格、细节密度、清晰度。',
+    '生视频场景：强调主体动作、镜头运动、时间节奏、画面连续性、时长适配。',
+    '图生图、图片编辑、图生视频和视频编辑场景：保持参考素材主体一致，只补充需要变化或增强的部分。',
+    '不要添加敏感、侵权、真实人物仿冒、违法或与原输入冲突的内容。',
     '请严格返回 JSON，不要返回 Markdown。',
     'JSON 字段必须包含 optimized_prompt，可选 negative_prompt、style_suggestions。',
   ].join('\n');
-  return [basePrompt, configuredPrompt].filter(Boolean).join('\n\n');
 }
 
-function buildPromptOptimizeUserPrompt(originalPrompt: string, input: PromptOptimizeInput): string {
+async function buildPromptOptimizeSystemPrompt(): Promise<string> {
+  const configuredPrompt = await resolveSystemPromptByFeature('prompt_optimize');
+  return [buildDefaultPromptOptimizeSystemPrompt(), configuredPrompt].filter(Boolean).join('\n\n');
+}
+
+export function buildPromptOptimizeModelInput(originalPrompt: string, input: PromptOptimizeInput): string {
   return JSON.stringify({
     original_prompt: originalPrompt,
     scene: input.scene || 'image_create',
     style: input.style || '',
     ratio: input.ratio || '',
-    usage: input.usage || '',
+    usage: input.usage || 'deep_completion',
     negative_prompt: input.negativePrompt || '',
-    context: input.context || {},
+    context: normalizePromptOptimizeContext(input.context),
   }, null, 2);
+}
+
+export function normalizePromptOptimizeContext(context?: Record<string, any>): Record<string, unknown> {
+  const normalized: Record<string, unknown> = {};
+  if (!context || typeof context !== 'object' || Array.isArray(context)) return normalized;
+
+  for (const key of PROMPT_OPTIMIZE_CONTEXT_KEYS) {
+    const value = context[key];
+    if (value !== undefined && value !== null && value !== '') {
+      normalized[key] = value;
+    }
+  }
+
+  Object.assign(normalized, summarizePromptOptimizeAssets(context.inputAssets));
+  return normalized;
+}
+
+function summarizePromptOptimizeAssets(inputAssets: any): Record<string, unknown> {
+  if (!Array.isArray(inputAssets) || inputAssets.length === 0) return {};
+
+  let referenceImageCount = 0;
+  let referenceVideoCount = 0;
+  let referenceAudioCount = 0;
+  for (const asset of inputAssets) {
+    const type = String(asset?.mediaType || asset?.type || asset?.kind || asset?.mimeType || '').toLowerCase();
+    if (type.includes('image')) referenceImageCount += 1;
+    if (type.includes('video')) referenceVideoCount += 1;
+    if (type.includes('audio')) referenceAudioCount += 1;
+  }
+
+  const summary: Record<string, unknown> = {};
+  if (referenceImageCount > 0) {
+    summary.hasReferenceImage = true;
+    summary.referenceImageCount = referenceImageCount;
+  }
+  if (referenceVideoCount > 0) {
+    summary.hasReferenceVideo = true;
+    summary.referenceVideoCount = referenceVideoCount;
+  }
+  if (referenceAudioCount > 0) {
+    summary.hasReferenceAudio = true;
+    summary.referenceAudioCount = referenceAudioCount;
+  }
+  return summary;
 }
 
 async function callTextModel(model: TextModelBinding, systemPrompt: string, userPrompt: string): Promise<string> {
   const url = resolveChatCompletionUrl(model.providerApiBaseUrl, model.providerType);
   const modelCode = model.upstreamModelCode || model.apiModelName || model.name;
-  const response = await axios.post(url, {
+  const defaultParams = parseJsonObjectOrEmpty(model.config?.default_params || model.config?.defaultParams);
+  const body: Record<string, any> = {
     model: modelCode,
     messages: [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
     ],
-    temperature: 0.4,
+    temperature: numericOrDefault(defaultParams.temperature, 0.6),
     stream: false,
-  }, {
+  };
+  copyDefined(body, 'max_tokens', defaultParams.max_tokens ?? defaultParams.maxTokens ?? 700);
+  copyDefined(body, 'top_p', defaultParams.top_p ?? defaultParams.topP);
+  copyDefined(body, 'response_format', defaultParams.response_format ?? defaultParams.responseFormat);
+  const response = await axios.post(url, body, {
     headers: {
       Authorization: `Bearer ${model.providerApiKey}`,
       'Content-Type': 'application/json',
@@ -259,6 +368,26 @@ function parseJsonObject(content: string): any | null {
     }
     return null;
   }
+}
+
+function parseJsonObjectOrEmpty(value: any): Record<string, any> {
+  if (!value) return {};
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(String(value));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function numericOrDefault(value: any, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function copyDefined(target: Record<string, any>, key: string, value: any): void {
+  if (value !== undefined && value !== null && value !== '') target[key] = value;
 }
 
 async function chargePromptPoints(userId: number, amount: number, refId: string) {

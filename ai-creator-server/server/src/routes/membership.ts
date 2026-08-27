@@ -10,6 +10,7 @@ import {
 import { success, error } from '../utils/response';
 import { ErrorCodes } from '../types';
 import { SettingsService } from '../services/settings.service';
+import { getCommerceAvailability, PURCHASE_UNAVAILABLE_MESSAGE } from '../services/commerce-availability.service';
 
 const router = Router();
 const MEMBERSHIP_DISABLED_MESSAGE = '会员功能已关闭，请联系管理员';
@@ -17,6 +18,11 @@ const POINTS_EXPIRE_TYPE_DISABLED = 'none';
 
 async function requireMembershipEnabled(_req: Request, res: Response, next: NextFunction) {
   try {
+    const commerce = await getCommerceAvailability();
+    if (!commerce.purchaseEnabled || !commerce.membershipEnabled) {
+      error(res, ErrorCodes.FORBIDDEN, commerce.message || PURCHASE_UNAVAILABLE_MESSAGE);
+      return;
+    }
     const enabled = await SettingsService.getBoolean('membership.enabled', true);
     if (!enabled) {
       error(res, ErrorCodes.FORBIDDEN, MEMBERSHIP_DISABLED_MESSAGE);

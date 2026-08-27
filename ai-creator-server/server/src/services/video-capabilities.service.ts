@@ -13,10 +13,13 @@ export interface VideoCapabilityInput {
   supportedSizeModes?: string[];
   nativeSizes?: string[];
   maxReferenceImages?: number;
+  maxVideoUrls?: number;
+  maxAudioUrls?: number;
   inputMode?: string | null;
   minReferenceImages?: number | null;
   referenceUploadMode?: string | null;
   requiredReference?: boolean | null;
+  advancedParams?: string[] | null;
 }
 
 export interface VideoCapabilityResult {
@@ -28,10 +31,14 @@ export interface VideoCapabilityResult {
   supportedSizeModes: string[];
   nativeSizes: string[];
   inputMode: string;
+  inputMediaTypes: Array<'image' | 'video' | 'audio'>;
   minReferenceImages: number;
   maxReferenceImages: number;
+  maxVideoUrls: number;
+  maxAudioUrls: number;
   referenceUploadMode: 'none' | 'first_frame' | 'first_last' | 'reference_images' | 'source_video';
   requiredReference: boolean;
+  advancedParams: string[];
 }
 
 export function buildVideoCapabilities(input: VideoCapabilityInput): VideoCapabilityResult {
@@ -64,6 +71,7 @@ export function buildVideoCapabilities(input: VideoCapabilityInput): VideoCapabi
     input.audioModes || [],
     config.default_audio_mode || config.defaultAudioMode || defaultParams.audioMode || defaultParams.audio_mode,
   ).map(normalizeAudioMode).filter(Boolean);
+  const advancedParams = normalizeAdvancedParams(config, input.advancedParams);
   const supportedSizeModes = chooseConfigStringList(
     config,
     ['supported_size_modes', 'supportedSizeModes'],
@@ -76,12 +84,21 @@ export function buildVideoCapabilities(input: VideoCapabilityInput): VideoCapabi
   );
   const inputModeOverride = cleanString(input.inputMode);
   const referenceUploadModeOverride = cleanString(input.referenceUploadMode);
+  const mediaParamNames = readConfigStringList(config, [
+    'param_names',
+    'paramNames',
+    'input_keys',
+    'inputKeys',
+  ]).values;
+  const remoteParameters = Array.isArray(config.remote_parameters || config.remoteParameters)
+    ? config.remote_parameters || config.remoteParameters
+    : [];
   const inputMode = normalizeInputMode(
     input.featureKey,
     inputModeOverride || config.input_mode || config.inputMode || config.reference_upload_mode || config.referenceUploadMode,
     modelName,
   );
-  const referenceUploadMode = normalizeReferenceUploadMode(
+  let referenceUploadMode = normalizeReferenceUploadMode(
     input.featureKey,
     referenceUploadModeOverride || config.reference_upload_mode || config.referenceUploadMode,
     inputMode,
@@ -90,6 +107,25 @@ export function buildVideoCapabilities(input: VideoCapabilityInput): VideoCapabi
     ?? normalizeNonNegativeInt(config.min_reference_images ?? config.minReferenceImages, defaultMinReferenceImages(inputMode));
   let maxReferenceImages = normalizePositiveInt(input.maxReferenceImages ?? config.max_reference_images ?? config.maxReferenceImages, defaultMaxReferenceImages(inputMode));
   const requiredReferenceOverride = normalizeNullableBoolean(input.requiredReference);
+  const hasImageParam = hasMediaInputParam(mediaParamNames, remoteParameters, [
+    'image', 'images', 'imageurl', 'imageurls', 'imgurl', 'referenceurl', 'referenceurls', 'referenceimageurls', 'inputreference',
+  ]);
+  const hasVideoParam = hasMediaInputParam(mediaParamNames, remoteParameters, [
+    'video', 'videos', 'videourl', 'videourls', 'referencevideo', 'referencevideos', 'referencevideourl', 'referencevideourls',
+  ]);
+  const hasAudioParam = hasMediaInputParam(mediaParamNames, remoteParameters, [
+    'audio', 'audios', 'audiourl', 'audiourls', 'audiofile', 'audiofiles', 'soundfile', 'soundfiles',
+  ]);
+  if (
+    feature === 'image_to_video'
+    && referenceUploadMode === 'first_frame'
+    && maxReferenceImages > 1
+    && !referenceUploadModeOverride
+    && !config.reference_upload_mode
+    && !config.referenceUploadMode
+  ) {
+    referenceUploadMode = 'reference_images';
+  }
   if (feature === 'image_to_video' && referenceUploadMode === 'first_frame') {
     minReferenceImages = 1;
     maxReferenceImages = 1;
@@ -103,6 +139,21 @@ export function buildVideoCapabilities(input: VideoCapabilityInput): VideoCapabi
     maxReferenceImages = 1;
   }
   const defaultAudioMode = normalizeAudioMode(config.default_audio_mode || config.defaultAudioMode || input.defaultAudioMode || audioModes[0]) || 'silent';
+  const maxVideoUrls = normalizeNonNegativeInt(
+    input.maxVideoUrls ?? config.max_video_urls ?? config.maxVideoUrls,
+    referenceUploadMode === 'source_video' || hasVideoParam ? 1 : 0,
+  );
+  const maxAudioUrls = normalizeNonNegativeInt(
+    input.maxAudioUrls ?? config.max_audio_urls ?? config.maxAudioUrls,
+    hasAudioParam ? 1 : 0,
+  );
+  const imageMediaSupported = (feature !== 'video_create' && referenceUploadMode !== 'none' && maxReferenceImages > 0) || hasImageParam;
+  const videoMediaSupported = maxVideoUrls > 0 || hasVideoParam;
+  const audioMediaSupported = maxAudioUrls > 0 || hasAudioParam;
+  const inputMediaTypes: Array<'image' | 'video' | 'audio'> = [];
+  if (imageMediaSupported) inputMediaTypes.push('image');
+  if (videoMediaSupported) inputMediaTypes.push('video');
+  if (audioMediaSupported) inputMediaTypes.push('audio');
 
   return {
     ratios: uniqueStrings(ratios),
@@ -113,10 +164,14 @@ export function buildVideoCapabilities(input: VideoCapabilityInput): VideoCapabi
     supportedSizeModes: supportedSizeModes.length ? uniqueStrings(supportedSizeModes) : ['ratio'],
     nativeSizes: uniqueStrings(nativeSizes),
     inputMode,
+    inputMediaTypes,
     minReferenceImages,
     maxReferenceImages,
+    maxVideoUrls,
+    maxAudioUrls,
     referenceUploadMode,
     requiredReference: requiredReferenceOverride ?? minReferenceImages > 0,
+    advancedParams,
   };
 }
 
@@ -164,8 +219,60 @@ function normalizeVideoRatio(value: string): string {
   const width = Number(match[1]);
   const height = Number(match[2]);
   if (!width || !height) return '';
-  const divisor = gcd(width, height);
-  return `${width / divisor}:${height / divisor}`;
+  return `${width}:${height}`;
+}
+
+function normalizeAdvancedParams(config: Record<string, any>, fallback?: string[] | null): string[] {
+  const explicit = readConfigStringList(config, [
+    'advanced_params',
+    'advancedParams',
+    'supported_advanced_params',
+    'supportedAdvancedParams',
+  ]);
+  const fromParams = readConfigStringList(config, [
+    'param_names',
+    'paramNames',
+    'input_keys',
+    'inputKeys',
+  ]);
+  const source = explicit.present ? explicit.values : fromParams.present ? fromParams.values : stringArray(fallback);
+  const found = new Set<string>();
+  for (const item of source) {
+    const normalized = normalizeAdvancedParamKey(item);
+    if (normalized) found.add(normalized);
+  }
+  const order = ['seed', 'fps', 'audioUrl'];
+  return order.filter((item) => found.has(item));
+}
+
+function normalizeAdvancedParamKey(value: unknown): string {
+  const key = String(value || '').trim();
+  if (!key) return '';
+  const compact = key.replace(/[-_\s]/g, '').toLowerCase();
+  if (compact === 'seed') return 'seed';
+  if (compact === 'fps' || compact === 'framerate') return 'fps';
+  if (compact === 'audiourl' || compact === 'audiourls') return 'audioUrl';
+  return '';
+}
+
+function hasMediaParam(values: string[], compactKeys: string[]): boolean {
+  const allowed = new Set(compactKeys);
+  return values.some((item) => allowed.has(String(item || '').replace(/[-_\s]/g, '').toLowerCase()));
+}
+
+function hasMediaInputParam(values: string[], remoteParameters: any[], compactKeys: string[]): boolean {
+  if (!remoteParameters.length) return hasMediaParam(values, compactKeys);
+  const allowed = new Set(compactKeys);
+  return remoteParameters.some((item) => {
+    if (!item || typeof item !== 'object') return false;
+    const name = [item.name, item.key, item.field, item.mapsTo]
+      .map((value) => String(value || '').replace(/[-_\s]/g, '').toLowerCase())
+      .find((value) => allowed.has(value));
+    if (!name) return false;
+    const type = String(item.type || item.valueType || item.value_type || '').trim().toLowerCase();
+    if (type === 'switch' || type === 'boolean' || type === 'checkbox') return false;
+    return true;
+  });
 }
 
 function normalizeDurationLabel(value: string): string {
@@ -276,8 +383,4 @@ function uniqueStrings(values: string[]): string[] {
 
 function normalizeObject(value: any): Record<string, any> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
-}
-
-function gcd(a: number, b: number): number {
-  return b === 0 ? a : gcd(b, a % b);
 }

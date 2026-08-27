@@ -8,6 +8,7 @@ import {
   getOrderDetail,
   listOrders,
 } from '../services/payment-order.service';
+import { ensurePurchaseEnabled } from '../services/commerce-availability.service';
 
 const router = Router();
 
@@ -23,6 +24,7 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
       error(res, ErrorCodes.PARAM_ERROR, '商品 ID 无效');
       return;
     }
+    await ensurePurchaseEnabled();
     const result = await createOrder({
       userId: req.user!.userId,
       orderType,

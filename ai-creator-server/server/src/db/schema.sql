@@ -4,6 +4,10 @@
 CREATE DATABASE IF NOT EXISTS ai_creator CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE ai_creator;
 
+-- model_tiers web display extension is maintained by migration
+-- 20260630_001_web_model_display.sql:
+--   web_visible, web_display_name, web_sort_order
+
 CREATE TABLE IF NOT EXISTS users (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   openid VARCHAR(64) NULL,
@@ -22,6 +26,7 @@ CREATE TABLE IF NOT EXISTS users (
   deleted_at DATETIME(3) NULL,
   UNIQUE INDEX uk_openid (openid),
   UNIQUE INDEX uk_phone (phone),
+  UNIQUE INDEX uk_email (email),
   INDEX idx_unionid (unionid),
   INDEX idx_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -91,6 +96,43 @@ CREATE TABLE IF NOT EXISTS user_assets (
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   UNIQUE INDEX uk_user_id (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS user_free_image_quotas (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT UNSIGNED NOT NULL,
+  quota_date DATE NOT NULL,
+  used_today INT NOT NULL DEFAULT 0,
+  reserved_today INT NOT NULL DEFAULT 0,
+  used_total INT NOT NULL DEFAULT 0,
+  reserved_total INT NOT NULL DEFAULT 0,
+  daily_limit_snapshot INT NOT NULL DEFAULT 0,
+  total_limit_snapshot INT NOT NULL DEFAULT 0,
+  version INT NOT NULL DEFAULT 1,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  UNIQUE INDEX uk_user_id (user_id),
+  INDEX idx_quota_date (quota_date),
+  INDEX idx_updated_at (updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS free_image_quota_logs (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT UNSIGNED NOT NULL,
+  task_id BIGINT UNSIGNED NULL,
+  event_type VARCHAR(16) NOT NULL,
+  image_count INT NOT NULL DEFAULT 0,
+  quota_date DATE NOT NULL,
+  daily_limit_snapshot INT NOT NULL DEFAULT 0,
+  total_limit_snapshot INT NOT NULL DEFAULT 0,
+  daily_remaining_after INT NOT NULL DEFAULT 0,
+  total_remaining_after INT NOT NULL DEFAULT 0,
+  remark VARCHAR(255) NOT NULL DEFAULT '',
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  UNIQUE INDEX uk_task_event (task_id, event_type),
+  INDEX idx_user_date (user_id, quota_date, created_at),
+  INDEX idx_task_event (task_id, event_type),
+  INDEX idx_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS invite_relations (

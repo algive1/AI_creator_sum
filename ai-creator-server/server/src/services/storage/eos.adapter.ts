@@ -2,7 +2,7 @@
 // 移动云 EOS 存储适配器 (S3 兼容)
 
 import * as crypto from 'crypto';
-import { IStorageAdapter, UploadResult, CredentialOptions, CredentialResult } from './adapter.interface';
+import { IStorageAdapter, UploadResult, CredentialOptions, CredentialResult, UploadOptions } from './adapter.interface';
 
 interface EosConfig {
   accessKey: string;
@@ -105,7 +105,7 @@ export class EosAdapter implements IStorageAdapter {
     return getConfig();
   }
 
-  async upload(key: string, body: Buffer, contentType: string): Promise<UploadResult> {
+  async upload(key: string, body: Buffer, contentType: string, _options?: UploadOptions): Promise<UploadResult> {
     const cfg = this.cfg;
     const host = new URL(cfg.endpoint).host;
     const signResult = awsSignRequest(cfg, 'PUT', key, body, contentType);
@@ -139,7 +139,7 @@ export class EosAdapter implements IStorageAdapter {
     };
   }
 
-  async uploadLarge(key: string, stream: NodeJS.ReadableStream, contentType: string, _size: number): Promise<UploadResult> {
+  async uploadLarge(key: string, stream: NodeJS.ReadableStream, contentType: string, _size: number, _options?: UploadOptions): Promise<UploadResult> {
     const cfg = this.cfg;
     const host = new URL(cfg.endpoint).host;
     const signResult = awsSignRequest(cfg, 'PUT', key, null, contentType);

@@ -176,6 +176,11 @@ function normalizePriceParams(params: Record<string, any>): Record<string, any> 
   }
   if (!out.quality && out.resolution) out.quality = out.resolution;
   if (!out.resolution && out.quality) out.resolution = out.quality;
+  const resolutionPreset = out.resolutionPreset || out.resolution_preset;
+  if (resolutionPreset && resolutionPreset !== 'auto') {
+    out.quality = resolutionPreset;
+    out.resolution = resolutionPreset;
+  }
   if (!out.duration && out.durationSeconds) out.duration = normalizeDuration(out.durationSeconds);
   return out;
 }
@@ -185,7 +190,7 @@ function normalizeConditionValue(key: string, value: any): any {
   if (key === 'duration' || key === 'durationRaw' || key === 'durationText') return normalizeDuration(value);
   if (key === 'durationSeconds') return parseDurationSeconds(value);
   if (key === 'audioMode') return normalizeAudioMode(value);
-  if (['quality', 'resolution', 'mode', 'generationMode', 'generation_mode', 'version'].includes(key)) {
+  if (['quality', 'resolution', 'resolutionPreset', 'resolution_preset', 'mode', 'generationMode', 'generation_mode', 'version'].includes(key)) {
     return String(value || '').trim().toLowerCase();
   }
   if (typeof value === 'string') return value.trim();

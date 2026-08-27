@@ -21,6 +21,8 @@ export class OpenAICompatibleAdapter implements IProviderAdapter {
   readonly providerType = 'openai_compatible';
 
   async submitTask(params: SubmitTaskParams): Promise<SubmitTaskResult> {
+    if (params.taskType.includes('text') || isTextTask(params.taskType)) return this.submitTextTask(params);
+
     const { baseUrl, apiKey, timeout } = params.providerConfig;
     const isVideo = params.taskType.includes('video');
     // 解析 request_template 中的可选配置
@@ -107,6 +109,53 @@ export class OpenAICompatibleAdapter implements IProviderAdapter {
     };
   }
 
+  private async submitTextTask(params: SubmitTaskParams): Promise<SubmitTaskResult> {
+    const { baseUrl, apiKey, timeout } = params.providerConfig;
+    const template = safeParseJson(params.requestTemplate);
+    const body: any = {
+      model: params.upstreamCode,
+      messages: [
+        ...(params.params.systemPrompt || params.params.system_prompt
+          ? [{ role: 'system', content: String(params.params.systemPrompt || params.params.system_prompt) }]
+          : []),
+        { role: 'user', content: params.prompt },
+      ],
+      temperature: numberOrDefault(params.params.temperature, template?.temperature ?? 0.4),
+      stream: false,
+    };
+    copyDefined(body, 'max_tokens', params.params.maxTokens ?? params.params.max_tokens ?? template?.max_tokens ?? template?.maxTokens);
+    copyDefined(body, 'top_p', params.params.topP ?? params.params.top_p ?? template?.top_p ?? template?.topP);
+    copyDefined(body, 'response_format', params.params.responseFormat ?? params.params.response_format ?? template?.response_format ?? template?.responseFormat);
+
+    const resp = await axios.post(buildChatCompletionUrl(baseUrl), body, {
+      headers: { Authorization: 'Bearer ' + apiKey, 'Content-Type': 'application/json' },
+      timeout,
+    });
+    const data = resp.data || {};
+    const text = extractTextContent(data);
+    if (!text) {
+      return {
+        type: 'sync',
+        status: 'failed',
+        result: { urls: [], metadata: { raw: data } },
+        error: { code: 'NO_TEXT', message: providerNoResultMessage(data) },
+      };
+    }
+    return {
+      type: 'sync',
+      status: 'completed',
+      result: {
+        urls: [],
+        metadata: {
+          text,
+          content: text,
+          requestId: data.id || data.request_id || data.requestId || '',
+          raw: data,
+        },
+      },
+    };
+  }
+
   async queryTask(providerTaskId: string, config: QueryTaskConfig): Promise<QueryTaskResult> {
     const url = buildQueryTaskUrl(config.queryTaskUrl || '', config.baseUrl, providerTaskId);
     const resp = await axios.get(url, {
@@ -158,6 +207,39 @@ function buildQueryTaskUrl(queryTaskUrl: string, baseUrl: string, providerTaskId
   }
   // 默认用视频端点查询（兼容 Agnes AI /v1/video/generations/{id}）
   return joinBasePath(baseUrl, '/v1/video/generations/' + encoded);
+}
+
+function buildChatCompletionUrl(baseUrl: string): string {
+  const base = String(baseUrl || '').trim().replace(/\/+$/, '');
+  if (/\/chat\/completions$/i.test(base)) return base;
+  return joinBasePath(base, '/chat/completions');
+}
+
+function isTextTask(taskType: string): boolean {
+  return String(taskType || '').toLowerCase().includes('text')
+    || ['prompt_optimize', 'script_generation', 'prompt_generate', 'storyboard_generate'].includes(String(taskType || '').toLowerCase());
+}
+
+function extractTextContent(data: any): string {
+  const value = data?.choices?.[0]?.message?.content
+    || data?.choices?.[0]?.text
+    || data?.output_text
+    || data?.output?.[0]?.content?.[0]?.text
+    || data?.text
+    || data?.content
+    || '';
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function numberOrDefault(value: any, fallback: any): number {
+  const parsed = Number(value);
+  if (Number.isFinite(parsed)) return parsed;
+  const fallbackNumber = Number(fallback);
+  return Number.isFinite(fallbackNumber) ? fallbackNumber : 0.4;
+}
+
+function copyDefined(target: Record<string, any>, key: string, value: any): void {
+  if (value !== undefined && value !== null && value !== '') target[key] = value;
 }
 
 function extractProviderStatus(data: any): string {

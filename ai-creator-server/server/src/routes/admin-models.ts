@@ -10,6 +10,7 @@ import { ErrorCodes } from '../types';
 import { decryptApiKey, encryptApiKey } from '../services/openai-adapter.service';
 import { normalizeCapabilityKey } from '../services/model-capability.service';
 import { getAdminModelList } from '../services/model-list.service';
+import { syncProviderModels, SyncMode } from '../services/model-sync.service';
 
 const router = Router();
 const MAX_PAGE_SIZE = 100;
@@ -200,7 +201,7 @@ router.post('/providers/:id(\\d+)/health-check', adminAuthMiddleware, async (req
 
     try {
       const response = await axios.get(buildProviderHealthUrl(baseUrl, provider.provider_type), {
-        headers: { Authorization: `Bearer ${apiKey}` },
+        headers: buildProviderHealthHeaders(apiKey, provider.provider_type),
         timeout: 10000,
         validateStatus: (s) => s < 500,
       });
@@ -217,7 +218,7 @@ router.post('/providers/:id(\\d+)/health-check', adminAuthMiddleware, async (req
   } catch { error(res, ErrorCodes.SERVER_ERROR, '健康检查失败'); }
 });
 
-// POST /providers/:id/sync — sync models from provider API
+// POST /providers/:id/sync — preview/apply model and capability sync from provider API
 router.post('/providers/:id(\\d+)/sync', adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
     const provider = await queryOne<any>(
@@ -227,104 +228,22 @@ router.post('/providers/:id(\\d+)/sync', adminAuthMiddleware, async (req: Reques
     if (!provider) { error(res, ErrorCodes.NOT_FOUND, '供应商不存在', 404); return; }
 
     const apiKey = decryptApiKey(provider.api_key || '');
-    const baseUrl = String(provider.api_base_url || '').replace(/\/v1\/?$/, '').replace(/\/$/, '');
-    let newModels: Array<{ id: string; name: string }> = [];
-
-    // 巴格格: /v1/frontstage/model-config
-    if (provider.provider_type === 'bagege' || provider.provider_key === 'bagege') {
-      const resp = await axios.get(`${baseUrl}/v1/frontstage/model-config`, {
-        headers: { Authorization: 'Bearer ' + apiKey },
-        timeout: 15000,
-      });
-      const names = resp.data?.displayNames || {};
-      newModels = Object.entries(names).map(([id, name]) => ({ id, name: String(name) }));
-    } else if (provider.provider_type === 'xiaoma' || provider.provider_key === 'xiaoma') {
-      // 小马AI: /v1/skills/models?type=image 和 ?type=video
-      for (const mediaType of ['image', 'video']) {
-        try {
-          const resp = await axios.get(`${baseUrl}/v1/skills/models?type=${mediaType}`, {
-            headers: { Authorization: 'Bearer ' + apiKey },
-            timeout: 15000,
-          });
-          const models = resp.data?.models || resp.data?.data || [];
-          for (const m of models) {
-            const mid = m.name || m.id || '';
-            const display = m.display_name || m.name || mid;
-            if (mid) newModels.push({ id: mid, name: display });
-          }
-        } catch { /* skip failed type */ }
-      }
-    } else if (provider.provider_type === 'apimart') {
-      // APIMart: OpenAI-compatible /v1/models with apimart-specific error handling
-      const resp = await axios.get(`${baseUrl}/v1/models`, {
-        headers: { Authorization: 'Bearer ' + apiKey },
-        timeout: 15000,
-        validateStatus: (s) => s < 500,
-      });
-      if (resp.data?.error) {
-        error(res, ErrorCodes.PARAM_ERROR, 'APIMart API 返回错误：' + (resp.data.error.message || '未知错误'));
-        return;
-      }
-      const data = resp.data?.data || [];
-      newModels = data
-        .filter((m: any) => m.id && m.id !== 'unknown')
-        .map((m: any) => ({ id: m.id, name: m.id }));
-    } else {
-      // OpenAI-compatible: /v1/models
-      try {
-        const resp = await axios.get(`${baseUrl}/v1/models`, {
-          headers: { Authorization: 'Bearer ' + apiKey },
-          timeout: 15000,
-        });
-        const data = resp.data?.data || [];
-        newModels = data
-          .filter((m: any) => m.id && m.id !== 'unknown')
-          .map((m: any) => ({ id: m.id, name: m.id }));
-      } catch {
-        error(res, ErrorCodes.PARAM_ERROR, '该供应商不支持模型同步或 API 不可达');
-        return;
-      }
+    if (!apiKey) {
+      error(res, ErrorCodes.PARAM_ERROR, '供应商未配置 API Key');
+      return;
     }
-
-    if (!newModels.length) {
+    const requestedMode = String(req.body?.mode || 'preview').toLowerCase();
+    const mode: SyncMode = requestedMode === 'apply' ? 'apply' : 'preview';
+    const result = await syncProviderModels({
+      provider,
+      apiKey,
+      mode,
+    });
+    if (!result.totalRemote) {
       error(res, ErrorCodes.PARAM_ERROR, '未从供应商获取到任何模型');
       return;
     }
-
-    // Get existing model IDs for this provider
-    const existing = await query<any>(
-      'SELECT api_model_name FROM ai_models WHERE provider_id = ? AND deleted_at IS NULL',
-      [provider.id],
-    );
-    const existingIds = new Set(existing.map((r: any) => r.api_model_name));
-
-    let added = 0;
-    let skipped = 0;
-    for (const m of newModels) {
-      if (existingIds.has(m.id)) { skipped++; continue; }
-      // Guess model_type from name and tags; default to 'unknown' (admin must verify)
-      const lower = (m.name || '').toLowerCase();
-      let modelType = 'unknown';
-      if (/video|vid|veo|kling|sora|wan|pixverse|grok|seedance|happyhorse|omni|hailuo|minimax|luma|runway|mochi|cogvideox/i.test(lower)) modelType = 'video';
-      else if (/text|chat|llm|tts|audio|speech|whisper|music|suno/i.test(lower)) modelType = 'text';
-      else if (/image|img|dall-e|flux|sd|stable|midjourney/i.test(lower)) modelType = 'image';
-
-      await query(
-        `INSERT IGNORE INTO ai_models (provider_id, name, display_name, model_type, sub_type, api_model_name, upstream_model_code, is_async, timeout_seconds, retry_times, retry_delay_ms, daily_limit, daily_limit_per_user, max_concurrency, priority, points_cost, api_cost_cents, sort_order, config, remark, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, '', ?, ?, 1, 300, 3, 3000, 0, 0, 5, 0, 0, 0, 999, '{}', 'auto-synced', 'active', NOW(3), NOW(3))`,
-        [provider.id, m.name, m.name, modelType, m.id, m.id],
-      );
-      added++;
-    }
-
-    success(res, {
-      providerId: provider.id,
-      providerName: provider.name,
-      totalRemote: newModels.length,
-      added,
-      skipped,
-      message: `同步完成：从供应商获取 ${newModels.length} 个模型，新增 ${added} 个，跳过已存在 ${skipped} 个。`,
-    });
+    success(res, result);
   } catch (err: any) {
     console.error('[admin-models] sync failed:', err?.message);
     error(res, ErrorCodes.SERVER_ERROR, err?.message || '同步模型失败');
@@ -561,7 +480,42 @@ function buildProviderHealthUrl(baseUrl: string, providerType?: string): string 
   if (providerType === 'xiaoma') {
     return base.endsWith('/v1') ? `${base}/models` : `${base}/v1/models`;
   }
+  if (providerType === 'hongniao') {
+    const root = base.replace(/\/v1\/?$/i, '');
+    return `${root || base}/v1/models`;
+  }
   return `${base}/models`;
+}
+
+function buildProviderHealthHeaders(apiKey: string, providerType?: string): Record<string, string> {
+  if (providerType === 'hongniao') return { 'X-API-Key': apiKey };
+  return { Authorization: `Bearer ${apiKey}` };
+}
+
+function xiaomaMediaModelConfig(mediaType: string): Record<string, any> {
+  const type = ['image', 'video', 'audio'].includes(mediaType) ? mediaType : 'unknown';
+  const capabilities = type === 'video'
+    ? ['text_to_video', 'image_to_video']
+    : type === 'image'
+      ? ['text_to_image', 'image_to_image']
+      : type === 'audio'
+        ? ['audio_generation']
+        : [];
+  return {
+    source: 'xiaoma_admin_sync',
+    source_checked_at: new Date().toISOString().slice(0, 10),
+    capabilities,
+    param_names: [],
+    default_params: {},
+    supported_ratios: [],
+    supported_qualities: [],
+    supported_durations: [],
+    endpoints: {
+      create: '/v1/media/generate',
+      query: '/v1/skills/task-status?task_id={task_id}',
+    },
+    api_format: 'xiaoma_media',
+  };
 }
 
 function maskApiKeyForAdmin(encryptedValue?: string): string {

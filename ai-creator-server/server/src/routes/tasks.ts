@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { authMiddleware } from '../middleware/auth';
-import { cancelTask, createImageTask, createVideoTask, getTaskById, getTasksByIds, getTasksList } from '../services/task.service';
+import { cancelTask, createImageTask, createVideoTask, getTaskByClientRequestId, getTaskById, getTasksByIds, getTasksList, retryTask } from '../services/task.service';
+import { createTaskQuote, validateTaskQuote } from '../services/task-quote.service';
 import { generateScript, generatePrompt, generateStoryboard, optimizePrompt } from '../services/ai-feature.service';
 import { success, error } from '../utils/response';
 import { query } from '../utils/db';
@@ -24,6 +25,14 @@ const aiTaskCreateLimiter = rateLimit({
 function positiveInt(value: any, fallback: number): number {
   const parsed = parseInt(String(value || ''), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function idempotencyKey(req: Request): string {
+  return String(req.header('Idempotency-Key') || '').trim();
+}
+
+function requiresDesktopWebContract(req: Request): boolean {
+  return req.user?.clientType === 'web' || req.user?.clientType === 'app';
 }
 
 async function hasSensitiveContent(...values: unknown[]): Promise<{ blocked: boolean; hitWord?: string; promptText?: string }> {
@@ -52,9 +61,10 @@ async function rejectSensitiveContentIfNeeded(res: Response, ...values: unknown[
 
 router.get('/', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const { type, status, keyword, page, pageSize, lastId, ids } = req.query as any;
+    const { type, status, keyword, projectId, page, pageSize, lastId, ids } = req.query as any;
     if (ids) {
       const taskIds = String(ids).split(',').map(item => Number(item.trim())).filter(item => Number.isInteger(item) && item > 0);
+      await Promise.allSettled(taskIds.map(taskId => pollProviderTaskIfDue(taskId, req.user!.userId)));
       success(res, await getTasksByIds(req.user!.userId, taskIds));
       return;
     }
@@ -62,6 +72,7 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
       type,
       status,
       keyword,
+      projectId: projectId ? parseInt(projectId) : undefined,
       page: page ? parseInt(page) : 1,
       pageSize: pageSize ? parseInt(pageSize) : 20,
       lastId: lastId ? parseInt(lastId) : undefined,
@@ -69,6 +80,14 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
     success(res, result);
   } catch {
     error(res, ErrorCodes.SERVER_ERROR, '获取任务列表失败');
+  }
+});
+
+router.post('/quote', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    success(res, await createTaskQuote(req.user!.userId, req.body || {}));
+  } catch (err: any) {
+    error(res, err?.code || ErrorCodes.SERVER_ERROR, err?.message || '获取报价失败', err?.code === 429 ? 429 : 200, err?.data || null);
   }
 });
 
@@ -168,8 +187,21 @@ router.post('/image', authMiddleware, aiTaskCreateLimiter, async (req: Request, 
       resolutionPreset, resolution_preset, sizeKey, size_key,
       postprocessMode, aiOptimize, formData, params, editTool, uploadKeys, referenceKeys,
       maskFileId, mask_file_id, maskImage, maskUrl, mask_url, backgroundFileId, background_file_id, backgroundImage, backgroundUrl, background_url,
-      scene, style, quality, imageType, optimizedPrompt, optimized_prompt, negativePrompt, negative_prompt, platformWatermarkEnabled,
+      scene, style, quality, imageType, optimizedPrompt, optimized_prompt, negativePrompt, negative_prompt, platformWatermarkEnabled, billingSource,
+      projectId, quoteId, inputAssetIds,
     } = req.body;
+    const requestKey = idempotencyKey(req);
+    if (requestKey) {
+      const existing = await getTaskByClientRequestId(req.user!.userId, requestKey);
+      if (existing) {
+        success(res, { ...existing, idempotentReplay: true });
+        return;
+      }
+    }
+    if (requiresDesktopWebContract(req) && (!requestKey || !quoteId)) {
+      error(res, ErrorCodes.PARAM_ERROR, '桌面端和 Web 端生成需要 quoteId 与 Idempotency-Key');
+      return;
+    }
     const finalSubType = subType || 'text2img';
     if (!prompt || typeof prompt !== 'string' || prompt.trim().length === 0) {
       error(res, ErrorCodes.PARAM_ERROR, '请输入提示词');
@@ -205,8 +237,14 @@ router.post('/image', authMiddleware, aiTaskCreateLimiter, async (req: Request, 
       }
     }
 
+    const quote = quoteId ? await validateTaskQuote(req.user!.userId, String(quoteId), 'image', req.body) : null;
     const result = await createImageTask({
       userId: req.user!.userId,
+      projectId: quote?.projectId || (projectId ? Number(projectId) : undefined),
+      clientRequestId: requestKey || undefined,
+      quoteId: quote?.quoteId,
+      quotedPointsCost: quote?.pointsCost,
+      inputAssetIds: Array.isArray(inputAssetIds) ? inputAssetIds : [],
       subType: finalSubType,
       prompt: prompt.trim(),
       featureKey: featureKey || (finalSubType === 'img2img' ? 'image_to_image' : finalSubType === 'edit' ? 'image_edit' : 'image_create'),
@@ -243,10 +281,23 @@ router.post('/image', authMiddleware, aiTaskCreateLimiter, async (req: Request, 
       uploadKeys,
       referenceKeys: Array.isArray(referenceKeys) ? referenceKeys : [],
       platformWatermarkEnabled,
+      billingSource: billingSource === 'points' ? 'points' : 'auto',
     });
     success(res, result);
   } catch (err: any) {
+    const requestKey = idempotencyKey(req);
+    if (requestKey && err?.code === 'ER_DUP_ENTRY') {
+      const existing = await getTaskByClientRequestId(req.user!.userId, requestKey).catch(() => null);
+      if (existing) {
+        success(res, { ...existing, idempotentReplay: true });
+        return;
+      }
+    }
     const code = err.code && err.code < 5000 ? err.code : ErrorCodes.SERVER_ERROR;
+    if (err.data) {
+      error(res, code, err.message || 'Create image task failed', code === ErrorCodes.RATE_LIMITED ? 429 : 200, err.data);
+      return;
+    }
     error(res, code, err.message || '创建图片任务失败', code === ErrorCodes.RATE_LIMITED ? 429 : 200);
   }
 });
@@ -259,7 +310,20 @@ router.post('/video', authMiddleware, aiTaskCreateLimiter, async (req: Request, 
       lastFrameFileId, imageId, referenceImage, videoFileId, videoId, videoUrl, video_url, referenceVideo, referenceVideoUrl, editTool, motionStrength, cameraMove, style,
       quality, resolution, aiOptimize, autoScript, formData, params, uploadKeys, audioMode, preserveAudio, inputAssets,
       optimizedPrompt, optimized_prompt, negativePrompt, negative_prompt,
+      projectId, quoteId, inputAssetIds,
     } = req.body;
+    const requestKey = idempotencyKey(req);
+    if (requestKey) {
+      const existing = await getTaskByClientRequestId(req.user!.userId, requestKey);
+      if (existing) {
+        success(res, { ...existing, idempotentReplay: true });
+        return;
+      }
+    }
+    if (requiresDesktopWebContract(req) && (!requestKey || !quoteId)) {
+      error(res, ErrorCodes.PARAM_ERROR, '桌面端和 Web 端生成需要 quoteId 与 Idempotency-Key');
+      return;
+    }
     if (!prompt || typeof prompt !== 'string' || prompt.trim().length === 0) {
       error(res, ErrorCodes.PARAM_ERROR, '请输入提示词');
       return;
@@ -274,8 +338,14 @@ router.post('/video', authMiddleware, aiTaskCreateLimiter, async (req: Request, 
       return;
     }
 
+    const quote = quoteId ? await validateTaskQuote(req.user!.userId, String(quoteId), 'video', req.body) : null;
     const result = await createVideoTask({
       userId: req.user!.userId,
+      projectId: quote?.projectId || (projectId ? Number(projectId) : undefined),
+      clientRequestId: requestKey || undefined,
+      quoteId: quote?.quoteId,
+      quotedPointsCost: quote?.pointsCost,
+      inputAssetIds: Array.isArray(inputAssetIds) ? inputAssetIds : [],
       subType,
       videoMode,
       generationType,
@@ -324,8 +394,43 @@ router.post('/video', authMiddleware, aiTaskCreateLimiter, async (req: Request, 
     });
     success(res, result);
   } catch (err: any) {
+    const requestKey = idempotencyKey(req);
+    if (requestKey && err?.code === 'ER_DUP_ENTRY') {
+      const existing = await getTaskByClientRequestId(req.user!.userId, requestKey).catch(() => null);
+      if (existing) {
+        success(res, { ...existing, idempotentReplay: true });
+        return;
+      }
+    }
     const code = err.code && err.code < 5000 ? err.code : ErrorCodes.SERVER_ERROR;
     error(res, code, err.message || '创建视频任务失败', code === ErrorCodes.RATE_LIMITED ? 429 : 200);
+  }
+});
+
+router.post('/:id(\\d+)/retry', authMiddleware, aiTaskCreateLimiter, async (req: Request, res: Response) => {
+  const requestKey = idempotencyKey(req);
+  try {
+    if (requiresDesktopWebContract(req) && !requestKey) {
+      error(res, ErrorCodes.PARAM_ERROR, '重新生成需要 Idempotency-Key');
+      return;
+    }
+    if (requestKey) {
+      const existing = await getTaskByClientRequestId(req.user!.userId, requestKey);
+      if (existing) {
+        success(res, { ...existing, idempotentReplay: true });
+        return;
+      }
+    }
+    success(res, await retryTask(Number(req.params.id), req.user!.userId, requestKey || undefined));
+  } catch (err: any) {
+    if (requestKey && err?.code === 'ER_DUP_ENTRY') {
+      const existing = await getTaskByClientRequestId(req.user!.userId, requestKey).catch(() => null);
+      if (existing) {
+        success(res, { ...existing, idempotentReplay: true });
+        return;
+      }
+    }
+    error(res, err?.code && Number(err.code) < 5000 ? Number(err.code) : ErrorCodes.SERVER_ERROR, err?.message || '重新生成失败');
   }
 });
 

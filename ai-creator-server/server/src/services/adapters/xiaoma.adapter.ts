@@ -1,6 +1,6 @@
 // services/adapters/xiaoma.adapter.ts
 // 小马AI / Lingke API adapter.
-// Media protocol: POST /v1/media/generate -> GET /v1/media/status?task_id={id}
+// Media protocol: POST /v1/media/generate -> GET /v1/skills/task-status?task_id={id}
 // Chat protocol: OpenAI / Gemini / Anthropic compatible pass-through endpoints.
 
 import axios from 'axios';
@@ -9,6 +9,7 @@ import {
   QueryTaskConfig, QueryTaskResult, CancelTaskConfig,
   ParsedResult, CostInfo,
   applyStatusMapping, extractParsedResult, summarizeProviderResponse,
+  joinBasePath,
 } from './adapter.interface';
 import {
   applyGenericImageParams,
@@ -18,13 +19,17 @@ import {
   isNanoBananaModel,
   normalizeImageParams,
 } from './image-param-mapper';
-import { applyXiaomaVideoParams, isXiaomaVideoTaskType } from './xiaoma-video-param-mapper';
+import {
+  applyXiaomaRemoteMediaParams,
+  applyXiaomaVideoParams,
+  isXiaomaVideoTaskType,
+} from './xiaoma-video-param-mapper';
 
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 type JsonObject = Record<string, JsonValue>;
 
 const MEDIA_CREATE_PATH = '/v1/media/generate';
-const MEDIA_STATUS_PATH = '/v1/media/status';
+const MEDIA_STATUS_PATH = '/v1/skills/task-status';
 const CIRCUIT_FAILURE_THRESHOLD = 5;
 const CIRCUIT_COOLDOWN_MS = 30_000;
 
@@ -85,7 +90,7 @@ export class XiaomaAdapter implements IProviderAdapter {
     const body: JsonObject = {
       model: params.upstreamCode,
       prompt: params.prompt,
-      params: normalizeMediaParams(params),
+      params: buildXiaomaMediaParams(params),
     };
 
     const resp = await axios.post<JsonObject>(url, body, {
@@ -269,8 +274,7 @@ export class XiaomaAdapter implements IProviderAdapter {
         },
       };
     }
-    const base = config.queryTaskUrl || config.baseUrl;
-    const url = joinUrl(base, `${MEDIA_STATUS_PATH}?task_id=${encodeURIComponent(providerTaskId)}`);
+    const url = buildXiaomaTaskStatusUrl(config, providerTaskId);
 
     try {
       const resp = await axios.get<JsonObject>(url, {
@@ -344,6 +348,24 @@ export class XiaomaAdapter implements IProviderAdapter {
   }
 }
 
+export function buildXiaomaTaskStatusUrl(config: Pick<QueryTaskConfig, 'baseUrl' | 'queryTaskUrl'>, providerTaskId: string): string {
+  const taskId = encodeURIComponent(providerTaskId);
+  const template = String(config.queryTaskUrl || '').trim();
+  if (template) {
+    const resolved = template.includes('{task_id}')
+      ? template.replace(/\{task_id\}/g, taskId)
+      : appendTaskId(template, taskId);
+    if (/^https?:\/\//i.test(resolved)) return resolved;
+    return joinBasePath(config.baseUrl, resolved);
+  }
+  return joinBasePath(config.baseUrl, `${MEDIA_STATUS_PATH}?task_id=${taskId}`);
+}
+
+function appendTaskId(value: string, taskId: string): string {
+  if (/[?&]task_id=/.test(value)) return value;
+  return `${value}${value.includes('?') ? '&' : '?'}task_id=${taskId}`;
+}
+
 function circuitKeyFor(baseUrl: string): string {
   return String(baseUrl || 'xiaoma').replace(/\/+$/, '').toLowerCase() || 'xiaoma';
 }
@@ -389,7 +411,7 @@ function recordCircuitFailure(key: string): void {
   }
 }
 
-function normalizeMediaParams(params: SubmitTaskParams): JsonObject {
+export function buildXiaomaMediaParams(params: SubmitTaskParams): JsonObject {
   const input = params.params || {};
   const out: JsonObject = {};
   for (const [key, value] of Object.entries(input)) {
@@ -402,24 +424,26 @@ function normalizeMediaParams(params: SubmitTaskParams): JsonObject {
   const model = String(params.upstreamCode || '').toLowerCase();
   if (isXiaomaVideoTaskType(params.taskType)) {
     applyXiaomaVideoParams(out, input, model);
-    return out;
+  } else {
+    const normalized = normalizeImageParams(input);
+    if (isGptImage2Model(model)) {
+      applyGptImage2Params(out, normalized);
+    } else if (isNanoBananaModel(model)) {
+      applyNanoBananaParams(out, normalized, model);
+    } else {
+      applyGenericImageParams(out, normalized);
+      applyXiaomaGenericImageParams(out, normalized);
+    }
   }
-
-  const normalized = normalizeImageParams(input);
-
-  if (isGptImage2Model(model)) {
-    applyGptImage2Params(out, normalized);
-    return out;
-  }
-
-  if (isNanoBananaModel(model)) {
-    applyNanoBananaParams(out, normalized, model);
-    return out;
-  }
-
-  applyGenericImageParams(out, normalized);
-
+  applyXiaomaRemoteMediaParams(out, params.modelConfig);
   return out;
+}
+
+function applyXiaomaGenericImageParams(out: JsonObject, normalized: ReturnType<typeof normalizeImageParams>): void {
+  const ratio = String(normalized.ratio || '').trim();
+  if (ratio && ratio !== 'auto') out.aspect_ratio = ratio;
+  const resolution = String(normalized.resolutionPreset || '').trim();
+  if (resolution && resolution !== 'auto') out.resolution = resolution;
 }
 
 function isInternalParamKey(key: string): boolean {

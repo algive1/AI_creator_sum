@@ -11,6 +11,7 @@ import { BagegeAdapter } from './bagege.adapter';
 import { WellAPIAdapter } from './wellapi.adapter';
 import { ApimartAdapter } from './apimart.adapter';
 import { RunningHubAdapter } from './runninghub.adapter';
+import { HongniaoAdapter } from './hongniao.adapter';
 
 const registry = new Map<string, IProviderAdapter>();
 
@@ -25,6 +26,7 @@ function initRegistry(): void {
   registry.set('wellapi', new WellAPIAdapter());
   registry.set('apimart', new ApimartAdapter());
   registry.set('runninghub', new RunningHubAdapter());
+  registry.set('hongniao', new HongniaoAdapter());
 }
 
 export class AdapterRegistry {

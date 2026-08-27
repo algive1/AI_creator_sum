@@ -102,6 +102,147 @@ router.put('/membership/versions/:id(\\d+)', adminAuthMiddleware, async (req: Re
   }
 });
 
+// GET /membership/versions/:id/rights - get version rights template
+router.get('/membership/versions/:id(\\d+)/rights', adminAuthMiddleware, async (req: Request, res: Response) => {
+  try {
+    const rows = await query<any>(
+      'SELECT id, right_key, right_name, right_value, hint, right_category, icon_url, icon_file_id, sort_order FROM member_version_rights WHERE version_id = ? ORDER BY sort_order',
+      [parseInt(req.params.id)],
+    );
+    success(res, rows.map((r: any) => ({
+      id: r.id,
+      rightKey: r.right_key,
+      rightName: r.right_name,
+      rightValue: r.right_value,
+      hint: r.hint || '',
+      rightCategory: r.right_category,
+      iconUrl: r.icon_url || '',
+      iconFileId: r.icon_file_id ? Number(r.icon_file_id) : null,
+      sortOrder: r.sort_order,
+    })));
+  } catch { error(res, ErrorCodes.SERVER_ERROR, '获取版本权益模板失败'); }
+});
+
+// PUT /membership/versions/:id/rights - replace version rights template
+router.put('/membership/versions/:id(\\d+)/rights', adminAuthMiddleware, async (req: Request, res: Response) => {
+  const versionId = parseInt(req.params.id);
+  const { rights } = req.body;
+  if (!Array.isArray(rights)) { error(res, ErrorCodes.PARAM_ERROR, 'rights 必须是数组'); return; }
+  const conn = await getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.execute('DELETE FROM member_version_rights WHERE version_id = ?', [versionId]);
+    for (const rt of rights) {
+      await conn.execute(
+        `INSERT INTO member_version_rights (version_id, right_key, right_name, right_value, hint, right_category, icon_url, icon_file_id, sort_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [versionId, rt.rightKey, rt.rightName, rt.rightValue || '', rt.hint || '', rt.rightCategory || 'general', rt.iconUrl || '', rt.iconFileId || null, rt.sortOrder || 0],
+      );
+    }
+    // Sync: add any missing rights to all plans in this version
+    const plans = await conn.execute('SELECT id FROM member_plans WHERE version_id = ?', [versionId]);
+    for (const plan of (plans as any)[0]) {
+      for (const rt of rights) {
+        await conn.execute(
+          `INSERT IGNORE INTO member_plan_rights (plan_id, right_key, right_name, right_value, right_category, icon_url, icon_file_id, sort_order, enabled)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+          [plan.id, rt.rightKey, rt.rightName, rt.rightValue || '', rt.rightCategory || 'general', rt.iconUrl || '', rt.iconFileId || null, rt.sortOrder || 0],
+        );
+      }
+    }
+    await conn.commit();
+    success(res, { updated: true, count: rights.length });
+  } catch (e: any) {
+    await conn.rollback();
+    error(res, ErrorCodes.SERVER_ERROR, '更新版本权益模板失败: ' + (e.message || ''));
+  } finally {
+    conn.release();
+  }
+});
+
+// GET /membership/versions/:id/rights-with-plans — version rights template + all plan overrides
+router.get('/membership/versions/:id(\\d+)/rights-with-plans', adminAuthMiddleware, async (req: Request, res: Response) => {
+  try {
+    const versionId = parseInt(req.params.id);
+    const rights = await query<any>(
+      `SELECT id, right_key, right_name, right_value, hint, right_category, icon_url, icon_file_id, sort_order
+         FROM member_version_rights WHERE version_id = ? ORDER BY sort_order`,
+      [versionId],
+    );
+    const plans = await query<any>(
+      `SELECT id, name, plan_key, duration_type, duration_days, sort_order
+         FROM member_plans WHERE version_id = ? AND status = 'active' ORDER BY sort_order`,
+      [versionId],
+    );
+    // Load per-plan overrides for all rights
+    const planRights = await query<any>(
+      `SELECT plan_id, right_key, right_value, enabled, sort_order
+         FROM member_plan_rights WHERE plan_id IN (SELECT id FROM member_plans WHERE version_id = ?)`,
+      [versionId],
+    );
+    // Index overrides by plan_id:right_key
+    const overrideMap: Record<string, any> = {};
+    for (const pr of planRights) {
+      overrideMap[`${pr.plan_id}:${pr.right_key}`] = pr;
+    }
+    success(res, {
+      rights: rights.map((r: any) => ({
+        id: r.id,
+        rightKey: r.right_key,
+        rightName: r.right_name,
+        rightValue: r.right_value,
+        hint: r.hint || '',
+        rightCategory: r.right_category,
+        iconUrl: r.icon_url || '',
+        iconFileId: r.icon_file_id ? Number(r.icon_file_id) : null,
+        sortOrder: r.sort_order,
+      })),
+      plans: plans.map((p: any) => ({
+        id: p.id,
+        name: p.name,
+        planKey: p.plan_key,
+        durationType: p.duration_type,
+        durationDays: p.duration_days,
+        sortOrder: p.sort_order,
+      })),
+      overrides: planRights.map((pr: any) => ({
+        planId: pr.plan_id,
+        rightKey: pr.right_key,
+        rightValue: pr.right_value,
+        enabled: pr.enabled === 1,
+      })),
+    });
+  } catch { error(res, ErrorCodes.SERVER_ERROR, '获取版本权益配置失败'); }
+});
+
+// PUT /membership/plans/batch-rights — batch save plan right overrides (one right across multiple plans)
+router.put('/membership/plans/batch-rights', adminAuthMiddleware, async (req: Request, res: Response) => {
+  const { planOverrides } = req.body;
+  if (!Array.isArray(planOverrides)) { error(res, ErrorCodes.PARAM_ERROR, 'planOverrides 必须是数组'); return; }
+  const conn = await getConnection();
+  try {
+    await conn.beginTransaction();
+    for (const item of planOverrides) {
+      if (!item.rightKey) continue;
+      for (const po of (item.plans || [])) {
+        await conn.execute(
+          `INSERT INTO member_plan_rights (plan_id, right_key, right_name, right_value, right_category, icon_url, icon_file_id, sort_order, enabled)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE right_value = VALUES(right_value), enabled = VALUES(enabled), sort_order = VALUES(sort_order)`,
+          [po.planId, item.rightKey, item.rightName || item.rightKey, po.rightValue || item.rightValue || '', item.rightCategory || 'general', item.iconUrl || '', item.iconFileId || null, item.sortOrder || 0, po.enabled !== false ? 1 : 0],
+        );
+      }
+    }
+    await conn.commit();
+    success(res, { updated: true, count: planOverrides.length });
+  } catch (e: any) {
+    await conn.rollback();
+    error(res, ErrorCodes.SERVER_ERROR, '批量更新权益失败: ' + (e.message || ''));
+  } finally {
+    conn.release();
+  }
+});
+
 // GET /membership/plans - list all plans with version name
 router.get('/membership/plans', adminAuthMiddleware, async (_req: Request, res: Response) => {
   try {
@@ -132,13 +273,28 @@ router.get('/membership/plans', adminAuthMiddleware, async (_req: Request, res: 
   } catch { error(res, ErrorCodes.SERVER_ERROR, '获取会员套餐失败'); }
 });
 
-// GET /membership/plans/:id - plan detail with rights + point rules
+// GET /membership/plans/:id - plan detail with merged version rights
 router.get('/membership/plans/:id(\\d+)', adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id);
     const plan = await queryOne<any>('SELECT * FROM member_plans WHERE id = ?', [id]);
     if (!plan) { error(res, ErrorCodes.NOT_FOUND, '会员套餐不存在', 404); return; }
-    const rights = await query<any>('SELECT * FROM member_plan_rights WHERE plan_id = ? ORDER BY sort_order', [id]);
+
+    // Merge version rights template with plan-level overrides
+    const merged = await query<any>(
+      `SELECT vr.right_key, vr.right_name, vr.right_value AS default_value, vr.hint, vr.right_category,
+              COALESCE(pr.right_value, vr.right_value) AS right_value,
+              COALESCE(pr.icon_url, vr.icon_url) AS icon_url,
+              COALESCE(pr.icon_file_id, vr.icon_file_id) AS icon_file_id,
+              COALESCE(pr.sort_order, vr.sort_order) AS sort_order,
+              COALESCE(pr.enabled, 1) AS enabled,
+              pr.id AS plan_right_id
+         FROM member_version_rights vr
+         LEFT JOIN member_plan_rights pr ON pr.plan_id = ? AND pr.right_key COLLATE utf8mb4_unicode_ci = vr.right_key COLLATE utf8mb4_unicode_ci
+        WHERE vr.version_id = ?
+        ORDER BY sort_order`,
+      [id, plan.version_id],
+    );
     const pointRule = await queryOne<any>('SELECT * FROM member_plan_point_rules WHERE plan_id = ?', [id]);
     const featureDiscounts = await getPlanFeatureDiscounts(id);
     success(res, {
@@ -155,15 +311,17 @@ router.get('/membership/plans/:id(\\d+)', adminAuthMiddleware, async (req: Reque
       highlightFeatures: typeof plan.highlight_features === 'string' ? JSON.parse(plan.highlight_features) : plan.highlight_features,
       sortOrder: plan.sort_order,
       status: plan.status,
-      rights: await Promise.all(rights.map(async (r: any) => ({
-        id: r.id,
+      rights: await Promise.all(merged.map(async (r: any) => ({
         rightKey: r.right_key,
         rightName: r.right_name,
         rightValue: r.right_value,
+        defaultRightValue: r.default_value || '',
+        hint: r.hint || '',
         rightCategory: r.right_category,
         iconUrl: await normalizePublicIconUrl(r.icon_url || ''),
         iconFileId: r.icon_file_id ? Number(r.icon_file_id) : null,
         sortOrder: r.sort_order,
+        enabled: r.enabled === 1,
       }))),
       pointRule: pointRule ? {
         id: pointRule.id,
@@ -230,9 +388,10 @@ router.post('/membership/plans', adminAuthMiddleware, async (req: Request, res: 
 router.put('/membership/plans/:id(\\d+)', adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id);
-    const { name, durationType, durationDays, price, originalPrice, tag, description, sortOrder, status } = req.body;
+    const { name, versionId, durationType, durationDays, price, originalPrice, tag, description, sortOrder, status } = req.body;
     const sets: string[] = []; const vals: any[] = [];
     if (name !== undefined) { sets.push('name = ?'); vals.push(name); }
+    if (versionId !== undefined) { sets.push('version_id = ?'); vals.push(versionId); }
     if (durationType) { sets.push('duration_type = ?'); vals.push(durationType); }
     if (durationDays !== undefined) { sets.push('duration_days = ?'); vals.push(durationDays); }
     if (price !== undefined) { sets.push('price = ?'); vals.push(price); }
@@ -248,7 +407,7 @@ router.put('/membership/plans/:id(\\d+)', adminAuthMiddleware, async (req: Reque
   } catch { error(res, ErrorCodes.SERVER_ERROR, '更新会员套餐失败'); }
 });
 
-// PUT /membership/plans/:id/rights - replace all rights for a plan
+// PUT /membership/plans/:id/rights - save per-plan right overrides (enabled + override value)
 router.put('/membership/plans/:id(\\d+)/rights', adminAuthMiddleware, async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   const { rights } = req.body;
@@ -257,29 +416,33 @@ router.put('/membership/plans/:id(\\d+)/rights', adminAuthMiddleware, async (req
   const conn = await getConnection();
   try {
     await conn.beginTransaction();
-    await conn.execute('DELETE FROM member_plan_rights WHERE plan_id = ?', [id]);
     for (const rt of rights) {
+      if (!rt.rightKey) continue;
       await conn.execute(
-        `INSERT INTO member_plan_rights
-         (plan_id, right_key, right_name, right_value, right_category, icon_url, icon_file_id, sort_order)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO member_plan_rights (plan_id, right_key, right_name, right_value, right_category, icon_url, icon_file_id, sort_order, enabled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           right_value = VALUES(right_value),
+           enabled = VALUES(enabled),
+           sort_order = VALUES(sort_order)`,
         [
           id,
           rt.rightKey,
-          rt.rightName,
-          rt.rightValue,
+          rt.rightName || rt.rightKey,
+          rt.rightValue || '',
           rt.rightCategory || 'general',
           rt.iconUrl || '',
           rt.iconFileId || null,
           rt.sortOrder || 0,
+          rt.enabled !== false ? 1 : 0,
         ],
       );
     }
     await conn.commit();
     success(res, { updated: true, count: rights.length });
-  } catch {
+  } catch (e: any) {
     await conn.rollback();
-    error(res, ErrorCodes.SERVER_ERROR, '更新会员权益失败');
+    error(res, ErrorCodes.SERVER_ERROR, '更新会员权益失败: ' + (e.message || ''));
   } finally {
     conn.release();
   }

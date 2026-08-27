@@ -10,6 +10,7 @@ import { decryptApiKey, encryptApiKey } from '../services/openai-adapter.service
 import { AdapterRegistry } from '../services/adapters/adapter.registry';
 import { getModelFeaturesList, modelSupportsFeature, normalizeCapabilityKey } from '../services/model-capability.service';
 import { buildImageSizeCapabilities, findImageSizeOption, normalizeRatioPreset, normalizeResolutionPreset } from '../services/image-size-options.service';
+import { repairTierCapabilitiesFromPrimaryModels, syncTierCapabilitiesFromPrimaryModel } from '../services/tier-capability-sync.service';
 
 const router = Router();
 const MAX_PAGE_SIZE = 100;
@@ -113,6 +114,55 @@ function mapRealModelRow(r: any) {
     lastTestAt: r.last_test_at || null,
     lastTestMessage: r.last_test_message || '',
   };
+}
+
+const HONGNIAO_ADMIN_CONFIG_KEYS = new Set([
+  'capabilities',
+  'model_source',
+  'description',
+  'is_primary',
+  'fallback_priority',
+  'max_polling_minutes',
+  'supported_ratios',
+  'supported_qualities',
+  'supported_durations',
+  'supported_audio_modes',
+  'supported_size_modes',
+  'input_mode',
+  'reference_upload_mode',
+  'max_images',
+  'min_reference_images',
+  'max_reference_images',
+  'max_audio_urls',
+  'max_video_urls',
+  'default_size_key',
+  'default_params',
+]);
+
+function isHongniaoProviderRow(row: any): boolean {
+  const providerType = String(row?.provider_type || '').toLowerCase();
+  const providerKey = String(row?.provider_key || '').toLowerCase();
+  return providerType === 'hongniao' || providerKey === 'hongniao';
+}
+
+function sanitizeHongniaoAdminConfigPatch(input: any): Record<string, any> {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return {};
+  const output: Record<string, any> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (!HONGNIAO_ADMIN_CONFIG_KEYS.has(key)) continue;
+    if (key === 'default_params') {
+      output.default_params = sanitizeHongniaoDefaultParams(value);
+      continue;
+    }
+    output[key] = value;
+  }
+  return output;
+}
+
+function sanitizeHongniaoDefaultParams(value: any): Record<string, any> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const allowed = new Set(['aspectRatio', 'aspect_ratio', 'resolution', 'seconds', 'duration', 'quality', 'size', 'n']);
+  return Object.fromEntries(Object.entries(value).filter(([key]) => allowed.has(key)));
 }
 
 function positiveModelId(value: any): number {
@@ -262,9 +312,11 @@ router.get('/model-tiers', adminAuthMiddleware, async (req: Request, res: Respon
         tierName: r.tier_name, tierKey: r.tier_key, description: r.description, tag: r.tag,
         iconUrl: r.icon_url || '', iconFileId: r.icon_file_id || null, pointsCost: r.points_cost, isDefault: !!r.is_default,
         isRecommended: !!r.is_recommended, sortOrder: r.sort_order, status: r.status,
+        webVisible: r.web_visible === undefined || r.web_visible === null ? true : !!r.web_visible,
+        webDisplayName: r.web_display_name || '',
+        webSortOrder: r.web_sort_order || 0,
         pricingMode: r.pricing_mode || 'fixed',
         pricingRules: parseJson(r.pricing_rules, null),
-        qualityMultipliers: typeof r.quality_multipliers === 'string' ? JSON.parse(r.quality_multipliers) : (r.quality_multipliers || {}),
         bindings: binds,
         capabilities: cap ? {
           supportedRatios: parseJson(cap.supported_ratios, []),
@@ -304,15 +356,15 @@ router.get('/model-tiers', adminAuthMiddleware, async (req: Request, res: Respon
 // POST /model-tiers
 router.post('/model-tiers', adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
-    const { featureId, tierName, tierKey, description, tag, pointsCost, isDefault, isRecommended, sortOrder, iconFileId, qualityMultipliers, pricingMode, pricingRules } = req.body;
+    const { featureId, tierName, tierKey, description, tag, pointsCost, isDefault, isRecommended, sortOrder, iconFileId, pricingMode, pricingRules, webVisible, webDisplayName, webSortOrder } = req.body;
     if (!featureId || !tierName || !tierKey || pointsCost === undefined) { error(res, ErrorCodes.PARAM_ERROR, '缺少必要参数'); return; }
     const conn = await getConnection();
     try {
       await conn.beginTransaction();
       const normalizedPricingRules = normalizeTierPricingRules(pricingRules);
       const [r] = await conn.execute(
-        'INSERT INTO model_tiers (feature_id, tier_name, tier_key, description, tag, icon_file_id, points_cost, pricing_mode, pricing_rules, is_default, is_recommended, sort_order, status, quality_multipliers) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [featureId, tierName, tierKey, description || '', tag || '', iconFileId || null, pointsCost, normalizeTierPricingMode(pricingMode), normalizedPricingRules === undefined ? null : JSON.stringify(normalizedPricingRules), isDefault ? 1 : 0, isRecommended ? 1 : 0, sortOrder || 0, 'active', JSON.stringify(qualityMultipliers || {})]
+        'INSERT INTO model_tiers (feature_id, tier_name, tier_key, description, tag, icon_file_id, points_cost, pricing_mode, pricing_rules, is_default, is_recommended, sort_order, web_visible, web_display_name, web_sort_order, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [featureId, tierName, tierKey, description || '', tag || '', iconFileId || null, pointsCost, normalizeTierPricingMode(pricingMode), normalizedPricingRules === undefined ? null : JSON.stringify(normalizedPricingRules), isDefault ? 1 : 0, isRecommended ? 1 : 0, sortOrder || 0, webVisible === false ? 0 : 1, String(webDisplayName || '').trim(), Math.max(0, Number(webSortOrder || 0)), 'active']
       );
       const tierId = (r as any).insertId;
       await conn.execute(
@@ -334,7 +386,7 @@ router.post('/model-tiers', adminAuthMiddleware, async (req: Request, res: Respo
 router.put('/model-tiers/:id(\\d+)', adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id);
-    const { tierName, description, tag, pointsCost, isDefault, isRecommended, sortOrder, status, iconFileId, qualityMultipliers, pricingMode, pricingRules } = req.body;
+    const { tierName, description, tag, pointsCost, isDefault, isRecommended, sortOrder, status, iconFileId, pricingMode, pricingRules, webVisible, webDisplayName, webSortOrder } = req.body;
     const sets: string[] = []; const vals: any[] = [];
     if (tierName !== undefined) { sets.push('tier_name = ?'); vals.push(tierName); }
     if (description !== undefined) { sets.push('description = ?'); vals.push(description); }
@@ -343,9 +395,11 @@ router.put('/model-tiers/:id(\\d+)', adminAuthMiddleware, async (req: Request, r
     if (isDefault !== undefined) { sets.push('is_default = ?'); vals.push(isDefault ? 1 : 0); }
     if (isRecommended !== undefined) { sets.push('is_recommended = ?'); vals.push(isRecommended ? 1 : 0); }
     if (sortOrder !== undefined) { sets.push('sort_order = ?'); vals.push(sortOrder); }
+    if (webVisible !== undefined) { sets.push('web_visible = ?'); vals.push(webVisible === false ? 0 : 1); }
+    if (webDisplayName !== undefined) { sets.push('web_display_name = ?'); vals.push(String(webDisplayName || '').trim()); }
+    if (webSortOrder !== undefined) { sets.push('web_sort_order = ?'); vals.push(Math.max(0, Number(webSortOrder || 0))); }
     if (status) { sets.push('status = ?'); vals.push(status); }
     if (iconFileId !== undefined) { sets.push('icon_file_id = ?'); vals.push(iconFileId || null); }
-    if (qualityMultipliers !== undefined) { sets.push('quality_multipliers = ?'); vals.push(JSON.stringify(qualityMultipliers || {})); }
     if (pricingMode !== undefined) { sets.push('pricing_mode = ?'); vals.push(normalizeTierPricingMode(pricingMode)); }
     if (pricingRules !== undefined) {
       const normalizedPricingRules = normalizeTierPricingRules(pricingRules);
@@ -425,6 +479,8 @@ router.put('/model-tiers/:id(\\d+)/bindings', adminAuthMiddleware, async (req: R
       await conn.execute('INSERT INTO tier_model_bindings (tier_id, model_id, binding_type, fallback_order, failover_on_error, failover_on_timeout, failover_on_rate_limit) VALUES (?, ?, ?, ?, ?, ?, ?)',
         [tierId, b.modelId, b.bindingType, b.fallbackOrder, b.failoverOnError ? 1 : 0, b.failoverOnTimeout ? 1 : 0, b.failoverOnRateLimit ? 1 : 0]);
     }
+    const primary = normalizedBindings.find((binding) => binding.bindingType === 'primary');
+    if (primary) await syncTierCapabilitiesFromPrimaryModel(conn, tierId, primary.modelId);
     await conn.commit();
     const tier = await queryOne<any>(
       `SELECT t.id, mf.feature_key
@@ -433,12 +489,26 @@ router.put('/model-tiers/:id(\\d+)/bindings', adminAuthMiddleware, async (req: R
         WHERE t.id = ?`,
       [tierId],
     );
-    success(res, { updated: true, bindings: tier ? await getTierBindings(tier.id, tier.feature_key) : [] });
+    success(res, { updated: true, capabilitiesSynced: Boolean(normalizedBindings.find((binding) => binding.bindingType === 'primary')), bindings: tier ? await getTierBindings(tier.id, tier.feature_key) : [] });
   } catch {
     await conn.rollback();
     error(res, ErrorCodes.SERVER_ERROR, '保存绑定失败');
   } finally {
     conn.release();
+  }
+});
+
+// POST /model-tiers/repair-capabilities
+router.post('/model-tiers/repair-capabilities', adminAuthMiddleware, async (_req: Request, res: Response) => {
+  try {
+    const results = await repairTierCapabilitiesFromPrimaryModels();
+    success(res, {
+      repaired: results.filter((item) => item.synced).length,
+      skipped: results.filter((item) => !item.synced).length,
+      results,
+    });
+  } catch (e: any) {
+    error(res, ErrorCodes.SERVER_ERROR, e?.message || '淇妗ｄ綅鑳藉姏澶辫触');
   }
 });
 
@@ -739,9 +809,18 @@ router.put('/real-models/:id(\\d+)', adminAuthMiddleware, async (req: Request, r
     if (pointsCost !== undefined) { sets.push('points_cost = ?'); vals.push(pointsCost); }
     if (apiCostCents !== undefined) { sets.push('api_cost_cents = ?'); vals.push(Number(apiCostCents || 0)); }
     if (req.body.config !== undefined) {
-      const existingModel = await queryOne<any>('SELECT config FROM ai_models WHERE id = ? AND deleted_at IS NULL', [id]);
+      const existingModel = await queryOne<any>(
+        `SELECT m.config, p.provider_type, p.provider_key
+           FROM ai_models m
+           LEFT JOIN ai_model_providers p ON p.id = m.provider_id
+          WHERE m.id = ? AND m.deleted_at IS NULL`,
+        [id],
+      );
       const existingConfig = parseJson(existingModel?.config, {});
-      const merged = { ...existingConfig, ...req.body.config };
+      const incomingConfig = isHongniaoProviderRow(existingModel)
+        ? sanitizeHongniaoAdminConfigPatch(req.body.config)
+        : req.body.config;
+      const merged = { ...existingConfig, ...incomingConfig };
       sets.push('config = ?');
       vals.push(JSON.stringify(merged));
     }
@@ -877,7 +956,7 @@ async function runRealModelGenerationTest(model: any, body: any) {
   }
   const modelConfig = parseJson(model.config, {});
   const params = modelType === 'video'
-    ? { duration: body.duration || '3s', ratio: body.ratio || '16:9', quality: body.quality || 'standard' }
+    ? resolveVideoTestParams(modelConfig, body)
     : modelType === 'text'
       ? {
           apiFormat: String(modelConfig.api_format || modelConfig.apiFormat || 'openai'),
@@ -955,6 +1034,37 @@ async function runRealModelGenerationTest(model: any, body: any) {
   };
 }
 
+function resolveVideoTestParams(modelConfig: Record<string, any>, body: any) {
+  const defaultParams = normalizePlainObject(modelConfig.default_params || modelConfig.defaultParams);
+  const seconds = body.seconds || defaultParams.seconds;
+  const duration = body.duration || defaultParams.duration || (seconds ? `${seconds}s` : '3s');
+  const ratio = body.ratio
+    || body.aspectRatio
+    || body.aspect_ratio
+    || defaultParams.aspectRatio
+    || defaultParams.aspect_ratio
+    || defaultParams.ratio
+    || '16:9';
+  return {
+    duration,
+    durationRaw: body.durationRaw || body.duration_raw || seconds || defaultParams.durationRaw || defaultParams.duration_raw,
+    durationSeconds: body.durationSeconds || body.duration_seconds || seconds || defaultParams.durationSeconds || defaultParams.duration_seconds,
+    seconds,
+    ratio,
+    aspectRatio: ratio,
+    aspect_ratio: ratio,
+    quality: body.quality || defaultParams.quality || defaultParams.resolution || 'standard',
+    audioUrl: body.audioUrl || body.audio_url || defaultParams.audioUrl || defaultParams.audio_url,
+    audio_url: body.audio_url || body.audioUrl || defaultParams.audio_url || defaultParams.audioUrl,
+    videoUrl: body.videoUrl || body.video_url || defaultParams.videoUrl || defaultParams.video_url,
+    video_url: body.video_url || body.videoUrl || defaultParams.video_url || defaultParams.videoUrl,
+  };
+}
+
+function normalizePlainObject(value: any): Record<string, any> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
 function buildImageTestParams(model: any, modelConfig: Record<string, any>, body: any) {
   const sizeCaps = buildImageSizeCapabilities({
     modelName: model.name,
@@ -995,12 +1105,15 @@ function resolveTestTaskType(model: any, body: any): string {
     const aliases: Record<string, string> = {
       text2video: 'text_to_video',
       txt2video: 'text_to_video',
+      video_create: 'text_to_video',
       img2video: 'image_to_video',
       image2video: 'image_to_video',
       first_last_frame: 'first_last_frame_video',
+      video_edit: 'video_edit',
+      edit_video: 'video_edit',
     };
     const normalized = aliases[subType] || subType;
-    return ['image_to_video', 'first_last_frame_video', 'text_to_video'].includes(normalized) ? normalized : 'text_to_video';
+    return ['image_to_video', 'first_last_frame_video', 'text_to_video', 'video_edit'].includes(normalized) ? normalized : 'text_to_video';
   }
   if (model.model_type === 'text') {
     const aliases: Record<string, string> = {

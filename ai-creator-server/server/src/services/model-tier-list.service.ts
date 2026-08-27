@@ -5,8 +5,15 @@ import { modelSupportsFeature } from './model-capability.service';
 import { buildImageSizeCapabilities } from './image-size-options.service';
 import { buildVideoCapabilities } from './video-capabilities.service';
 import { resolveTierPricing } from './tier-pricing.service';
+import { isGptImage2FreeQuotaModel } from './free-image-quota.service';
 
-export async function getModelTierList(featureKey: string, userId?: number) {
+type ModelTierListOptions = {
+  clientType?: string;
+};
+
+export async function getModelTierList(featureKey: string, userId?: number, options: ModelTierListOptions = {}) {
+  const clientType = String(options.clientType || '').trim().toLowerCase();
+  const webClient = clientType === 'web';
   const feature = await queryOne<any>(
     'SELECT id, feature_key, feature_name FROM model_features WHERE feature_key = ? AND status = ?',
     [featureKey, 'active'],
@@ -41,7 +48,7 @@ export async function getModelTierList(featureKey: string, userId?: number) {
   const modelByTierId = new Map<number, any>();
   if (tierIds.length > 0) {
     const bindings = await query<any>(
-      `SELECT b.tier_id, m.id AS model_id, m.model_type, m.name, m.api_model_name,
+      `SELECT b.tier_id, m.id AS model_id, m.model_type, m.name, m.display_name, m.api_model_name,
               m.upstream_model_code, m.config, p.provider_type
          FROM tier_model_bindings b
          JOIN ai_models m ON m.id = b.model_id AND m.status = 'active' AND m.deleted_at IS NULL
@@ -59,7 +66,15 @@ export async function getModelTierList(featureKey: string, userId?: number) {
       }
     }
   }
-  const visibleTiers = tiers.filter(t => visibleTierIds.has(Number(t.id)));
+  const visibleTiers = tiers
+    .filter(t => visibleTierIds.has(Number(t.id)))
+    .filter(t => !webClient || webVisibleOf(t))
+    .sort((a, b) => {
+      if (!webClient) return Number(a.sort_order || 0) - Number(b.sort_order || 0);
+      return webSortOrderOf(a) - webSortOrderOf(b)
+        || Number(a.sort_order || 0) - Number(b.sort_order || 0)
+        || Number(a.id || 0) - Number(b.id || 0);
+    });
 
   // 批量加载所有层级的 capabilities，避免 N+1 查询
   const visibleIds = visibleTiers.map(t => t.id);
@@ -77,6 +92,7 @@ export async function getModelTierList(featureKey: string, userId?: number) {
   const list = [];
   for (const tier of visibleTiers) {
     const cap = capByTierId.get(tier.id);
+    const webDisplayName = String(tier.web_display_name || '').trim();
     const discountPercent = Number((discount as any).discountPercent || 100);
     const pricingResult = resolveTierPricing({
       basePointsCost: Math.max(0, Number(tier.points_cost || 0)),
@@ -103,11 +119,14 @@ export async function getModelTierList(featureKey: string, userId?: number) {
       postprocessModes: parseJson(cap.postprocess_modes, []),
       maxImages: cap.max_images,
       maxReferenceImages: cap.max_reference_images || 4,
+      maxVideoUrls: cap.max_video_urls === null || cap.max_video_urls === undefined ? undefined : Number(cap.max_video_urls),
+      maxAudioUrls: cap.max_audio_urls === null || cap.max_audio_urls === undefined ? undefined : Number(cap.max_audio_urls),
       inputMode: cap.input_mode || null,
       minReferenceImages: cap.min_reference_images ?? null,
       referenceUploadMode: cap.reference_upload_mode || null,
       requiredReference: cap.required_reference === null || cap.required_reference === undefined ? null : !!cap.required_reference,
       maxDurationSeconds: cap.max_duration_seconds,
+      advancedParams: [],
     } : null;
     const model = modelByTierId.get(Number(tier.id));
     const sizeCaps = baseCapabilities && isImageFeature(feature.feature_key)
@@ -139,10 +158,13 @@ export async function getModelTierList(featureKey: string, userId?: number) {
           supportedSizeModes: baseCapabilities.supportedSizeModes,
           nativeSizes: baseCapabilities.nativeSizes,
           maxReferenceImages: baseCapabilities.maxReferenceImages,
+          maxVideoUrls: baseCapabilities.maxVideoUrls,
+          maxAudioUrls: baseCapabilities.maxAudioUrls,
           inputMode: baseCapabilities.inputMode,
           minReferenceImages: baseCapabilities.minReferenceImages,
           referenceUploadMode: baseCapabilities.referenceUploadMode,
           requiredReference: baseCapabilities.requiredReference,
+          advancedParams: baseCapabilities.advancedParams,
         })
       : null;
     list.push({
@@ -150,6 +172,21 @@ export async function getModelTierList(featureKey: string, userId?: number) {
       tierId: tier.id,
       tierName: tier.tier_name,
       tierKey: tier.tier_key,
+      modelId: model?.model_id || null,
+      modelName: model?.display_name || model?.name || model?.api_model_name || '',
+      freeImageQuotaModelEligible: isGptImage2FreeQuotaModel({
+        name: model?.name,
+        displayName: model?.display_name,
+        apiModelName: model?.api_model_name,
+        upstreamModelCode: model?.upstream_model_code,
+        providerType: model?.provider_type,
+      }),
+      webDisplayName: webDisplayName,
+      webVisible: webVisibleOf(tier),
+      webSortOrder: webSortOrderOf(tier),
+      apiModelName: model?.api_model_name || '',
+      upstreamModelCode: model?.upstream_model_code || '',
+      providerType: model?.provider_type || '',
       description: tier.description || '',
       tag: tier.tag || '',
       iconUrl: tier.icon_url || tier.icon_fallback_url || '',
@@ -179,11 +216,15 @@ export async function getModelTierList(featureKey: string, userId?: number) {
           defaultAudioMode: videoCaps.defaultAudioMode,
           supportedSizeModes: videoCaps.supportedSizeModes,
           nativeSizes: videoCaps.nativeSizes,
+          inputMediaTypes: videoCaps.inputMediaTypes,
           maxReferenceImages: videoCaps.maxReferenceImages,
+          maxVideoUrls: videoCaps.maxVideoUrls,
+          maxAudioUrls: videoCaps.maxAudioUrls,
           inputMode: videoCaps.inputMode,
           minReferenceImages: videoCaps.minReferenceImages,
           referenceUploadMode: videoCaps.referenceUploadMode,
           requiredReference: videoCaps.requiredReference,
+          advancedParams: videoCaps.advancedParams,
         } : {}),
       } : null,
     });
@@ -204,4 +245,14 @@ function isImageFeature(featureKey: string): boolean {
 
 function isVideoFeature(featureKey: string): boolean {
   return ['video_create', 'image_to_video', 'first_last_frame_video', 'video_edit'].includes(featureKey);
+}
+
+function webVisibleOf(tier: any): boolean {
+  if (tier?.web_visible === undefined || tier?.web_visible === null) return true;
+  return Number(tier.web_visible) !== 0;
+}
+
+function webSortOrderOf(tier: any): number {
+  const explicit = Number(tier?.web_sort_order || 0);
+  return Number.isFinite(explicit) && explicit > 0 ? explicit : Number(tier?.sort_order || 0);
 }

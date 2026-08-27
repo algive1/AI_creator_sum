@@ -8,9 +8,9 @@ import { success, error } from '../utils/response';
 import { ErrorCodes, JwtPayload } from '../types';
 import { StorageService } from '../services/storage/storage.service';
 import { preloadStorageConfigs } from '../services/storage/storage-config-loader';
-import { validateMimeType, validateFileSize, validateMagicBytes, getImageDimensions } from '../services/storage/upload-validator';
+import { DEFAULT_ALLOWED_MIME, validateMimeType, validateFileSize, validateMagicBytes, getImageDimensions } from '../services/storage/upload-validator';
 import { FileCategory, FileVisibility, genFileNo } from '../services/storage/adapter.interface';
-import { getLocalBaseUrl, getLocalStaticMountPath, getLocalUploadDir } from '../services/storage/local-paths';
+import { getLocalBaseUrl, getLocalStaticMountPath, getLocalUploadDir, resolveLocalFilePath } from '../services/storage/local-paths';
 import { hasComplianceConfirmation } from './compliance';
 import * as crypto from 'crypto';
 import fs from 'fs';
@@ -18,15 +18,19 @@ import os from 'os';
 import path from 'path';
 import axios from 'axios';
 import sharp from 'sharp';
-import multer from 'multer';
 import { translateError } from '../utils/error-translator';
+import { publicRequestBaseUrl } from '../utils/public-base-url';
+import { cleanupTempUpload, createDiskUpload, md5File, readUploadForImageMetadata, readUploadForValidation } from '../services/storage/upload-temp-file';
+import { pipeRemoteFileResponse, rangeRequestHeaders, streamLocalFileWithRange } from '../utils/file-stream-response';
+import { buildUploadResponse } from '../services/storage/upload-response';
 
 const router = Router();
 const MAX_IMAGE_FILE_SIZE = positiveInt(process.env.UPLOAD_MAX_FILE_SIZE, 10 * 1024 * 1024);
 const MAX_VIDEO_FILE_SIZE = positiveInt(process.env.UPLOAD_MAX_VIDEO_SIZE, 200 * 1024 * 1024);
-const MAX_UPLOAD_FILE_SIZE = Math.max(MAX_IMAGE_FILE_SIZE, MAX_VIDEO_FILE_SIZE);
+const MAX_AUDIO_FILE_SIZE = positiveInt(process.env.UPLOAD_MAX_AUDIO_SIZE, 50 * 1024 * 1024);
+const MAX_UPLOAD_FILE_SIZE = Math.max(MAX_IMAGE_FILE_SIZE, MAX_VIDEO_FILE_SIZE, MAX_AUDIO_FILE_SIZE);
 const FILE_CONTENT_PROXY_TIMEOUT_MS = positiveInt(process.env.FILE_CONTENT_PROXY_TIMEOUT_MS, 120000);
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_UPLOAD_FILE_SIZE } });
+const upload = createDiskUpload(MAX_UPLOAD_FILE_SIZE);
 const STORAGE_KEY_PATTERN = /^[a-z_]+\/\d{4}-\d{2}\/[a-zA-Z0-9_-]{8,16}\.[a-z0-9]{2,10}$/i;
 
 function positiveInt(value: unknown, fallback: number): number {
@@ -35,13 +39,14 @@ function positiveInt(value: unknown, fallback: number): number {
 }
 
 function maxFileSizeForMime(mimeType: string): number {
-  return String(mimeType || '').startsWith('video/') ? MAX_VIDEO_FILE_SIZE : MAX_IMAGE_FILE_SIZE;
+  const text = String(mimeType || '');
+  if (text.startsWith('video/')) return MAX_VIDEO_FILE_SIZE;
+  if (text.startsWith('audio/')) return MAX_AUDIO_FILE_SIZE;
+  return MAX_IMAGE_FILE_SIZE;
 }
 
 function requestBaseUrl(req: Request): string {
-  const configured = String(process.env.APP_PUBLIC_URL || process.env.PUBLIC_API_DOMAIN || process.env.SITE_API_DOMAIN || '').trim().replace(/\/+$/, '');
-  if (/^https?:\/\//i.test(configured)) return configured;
-  return `${req.protocol}://${req.get('host') || ''}`.replace(/\/+$/, '');
+  return publicRequestBaseUrl(req);
 }
 
 function fileContentUrl(req: Request, fileNo: string): string {
@@ -50,8 +55,16 @@ function fileContentUrl(req: Request, fileNo: string): string {
 
 function fileDeliveryUrl(req: Request, file: { file_no?: string; fileNo?: string; visibility?: string; cdn_url?: string; cdnUrl?: string; access_url?: string; accessUrl?: string }): string {
   const fileNo = String(file.file_no || file.fileNo || '');
-  if (file.visibility === 'private' && fileNo) return fileContentUrl(req, fileNo);
+  if (fileNo) return fileContentUrl(req, fileNo);
   return String(file.cdn_url || file.cdnUrl || file.access_url || file.accessUrl || '');
+}
+
+function storageSourceUrl(req: Request, file: any): string {
+  const adapter = StorageService.getActiveAdapter();
+  const raw = file.provider === adapter.provider && file.storage_key
+    ? adapter.getAccessUrl(file.storage_key)
+    : (file.cdn_url || file.access_url || '');
+  return absoluteSourceUrl(req, raw);
 }
 
 function assertFileOwner(file: any, userId: number): boolean {
@@ -65,7 +78,7 @@ function absoluteSourceUrl(req: Request, url: string): string {
 }
 
 function getFileCategory(value: string): FileCategory {
-  const valid: FileCategory[] = ['avatar', 'ref_image', 'ref_video', 'template_cover', 'ai_output', 'ai_video', 'general'];
+  const valid: FileCategory[] = ['avatar', 'ref_image', 'ref_video', 'ref_audio', 'template_cover', 'ai_output', 'ai_video', 'general'];
   return valid.includes(value as FileCategory) ? (value as FileCategory) : 'general';
 }
 function getVisibility(value: string | undefined): FileVisibility {
@@ -116,6 +129,7 @@ async function confirmUploadedStorageObject(params: {
   etag?: string;
   fileSize?: number;
   mimeType?: string;
+  durationMs?: number;
   uploadMode: string;
   req: Request;
 }) {
@@ -145,6 +159,7 @@ async function confirmUploadedStorageObject(params: {
   const fileSize = normalizePositiveInt(params.fileSize) || Number(file.file_size || 0);
   const mimeType = String(params.mimeType || file.mime_type || '');
   const etag = String(params.etag || file.etag || '');
+  const durationMs = normalizePositiveInt(params.durationMs);
   const accessUrl = file.access_url || adapter.getAccessUrl(storageKey);
   const cdnUrl = file.cdn_url || adapter.getCdnUrl(storageKey);
   const mimeCheck = validateMimeType(mimeType);
@@ -153,7 +168,7 @@ async function confirmUploadedStorageObject(params: {
     err.code = 4002;
     throw err;
   }
-  const sizeCheck = validateFileSize(fileSize, mimeType, { image: MAX_IMAGE_FILE_SIZE, video: MAX_VIDEO_FILE_SIZE });
+  const sizeCheck = validateFileSize(fileSize, mimeType, { image: MAX_IMAGE_FILE_SIZE, video: MAX_VIDEO_FILE_SIZE, audio: MAX_AUDIO_FILE_SIZE });
   if (!sizeCheck.valid) {
     const err: any = new Error(sizeCheck.reason || '文件大小超过限制');
     err.code = 4001;
@@ -173,7 +188,7 @@ async function confirmUploadedStorageObject(params: {
       `INSERT INTO file_upload_logs
        (file_id, user_id, upload_mode, file_size, mime_type, duration_ms, source_ip, user_agent, status, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'success', NOW(3))`,
-      [file.id, logUserId, uploadMode, fileSize, mimeType, 0, req.ip || '', (req.headers['user-agent'] || '').substring(0, 500)],
+      [file.id, logUserId, uploadMode, fileSize, mimeType, durationMs, req.ip || '', (req.headers['user-agent'] || '').substring(0, 500)],
     );
   }
 
@@ -194,16 +209,20 @@ router.get('/upload-config', authMiddleware, async (_req: Request, res: Response
     const provider = StorageService.getActiveProvider();
     StorageService.getActiveAdapter();
     success(res, {
-      uploadMode: process.env.UPLOAD_MODE === 'direct_client' ? 'direct_client' : 'server_relay',
+      uploadMode: provider === 'local' ? 'server_relay' : 'direct_client',
       storageProvider: provider,
       supportedStorageProviders: StorageService.getSupportedProviders(),
+      directUploadProviders: ['qiniu_kodo', 'tencent_cos'],
+      fallbackUploadUrl: '/api/v1/files/upload',
       staticBaseUrl: provider === 'local' ? getLocalBaseUrl() : '',
       staticMountPath: provider === 'local' ? getLocalStaticMountPath() : '',
       localUploadDir: provider === 'local' ? getLocalUploadDir() : '',
       maxFileSize: MAX_UPLOAD_FILE_SIZE,
       maxImageSize: MAX_IMAGE_FILE_SIZE,
       maxVideoSize: MAX_VIDEO_FILE_SIZE,
-      allowedMimeTypes: ['image/png','image/jpeg','image/webp','image/gif','image/svg+xml','video/mp4','video/quicktime','video/webm','video/x-msvideo'],
+      maxAudioSize: MAX_AUDIO_FILE_SIZE,
+      allowedMimeTypes: Object.values(DEFAULT_ALLOWED_MIME).flat(),
+      allowedAudioMimeTypes: DEFAULT_ALLOWED_MIME.audio,
       maxConcurrent: 3,
     });
   } catch (err: any) {
@@ -221,7 +240,7 @@ router.get('/credential', authMiddleware, async (req: Request, res: Response) =>
     if (isNaN(size) || size <= 0) { error(res, ErrorCodes.PARAM_ERROR, 'fileSize 无效'); return; }
     const mimeCheck = validateMimeType(contentType);
     if (!mimeCheck.valid) { error(res, 4002, mimeCheck.reason || '不支持的文件类型'); return; }
-    const sizeCheck = validateFileSize(size, contentType, { image: MAX_IMAGE_FILE_SIZE, video: MAX_VIDEO_FILE_SIZE });
+    const sizeCheck = validateFileSize(size, contentType, { image: MAX_IMAGE_FILE_SIZE, video: MAX_VIDEO_FILE_SIZE, audio: MAX_AUDIO_FILE_SIZE });
     if (!sizeCheck.valid) { error(res, 4001, sizeCheck.reason || '文件大小超过限制'); return; }
     await preloadStorageConfigs();
     const adapter = StorageService.getActiveAdapter();
@@ -250,7 +269,7 @@ router.get('/credential', authMiddleware, async (req: Request, res: Response) =>
 router.post('/upload', authMiddleware, (req: Request, res: Response) => {
     upload.single('file')(req, res, async (err: any) => {
     if (err) {
-      if (err.code === 'LIMIT_FILE_SIZE') return error(res, 4001, `文件大小超出限制，图片最大 ${Math.round(MAX_IMAGE_FILE_SIZE / 1024 / 1024)}MB，视频最大 ${Math.round(MAX_VIDEO_FILE_SIZE / 1024 / 1024)}MB`);
+      if (err.code === 'LIMIT_FILE_SIZE') return error(res, 4001, `文件大小超出限制，图片最大 ${Math.round(MAX_IMAGE_FILE_SIZE / 1024 / 1024)}MB，视频最大 ${Math.round(MAX_VIDEO_FILE_SIZE / 1024 / 1024)}MB，音频最大 ${Math.round(MAX_AUDIO_FILE_SIZE / 1024 / 1024)}MB`);
       return error(res, ErrorCodes.PARAM_ERROR, err.message || '上传失败');
     }
     const conn = await getConnection();
@@ -264,20 +283,57 @@ router.post('/upload', authMiddleware, (req: Request, res: Response) => {
 
       const mimeCheck = validateMimeType(file.mimetype);
       if (!mimeCheck.valid) return error(res, 4002, mimeCheck.reason!);
-      const sizeCheck = validateFileSize(file.size, file.mimetype, { image: MAX_IMAGE_FILE_SIZE, video: MAX_VIDEO_FILE_SIZE });
+      const sizeCheck = validateFileSize(file.size, file.mimetype, { image: MAX_IMAGE_FILE_SIZE, video: MAX_VIDEO_FILE_SIZE, audio: MAX_AUDIO_FILE_SIZE });
       if (!sizeCheck.valid) return error(res, 4001, sizeCheck.reason!);
-      const magicCheck = validateMagicBytes(file.buffer, file.mimetype);
+      const validationBuffer = await readUploadForValidation(file);
+      const magicCheck = validateMagicBytes(validationBuffer, file.mimetype);
       if (!magicCheck.valid) return error(res, 4002, magicCheck.reason!);
+      const md5Hash = await md5File(file.path);
+
+      const existingFile = await queryOne<any>(
+        `SELECT id, file_no, cdn_url, access_url, mime_type, file_size, width, height
+           FROM files
+          WHERE user_id = ?
+            AND md5_hash = ?
+            AND file_category = ?
+            AND visibility = ?
+            AND mime_type = ?
+            AND file_size = ?
+            AND is_deleted = 0
+          ORDER BY id DESC
+          LIMIT 1`,
+        [userId, md5Hash, category, visibility, file.mimetype, file.size],
+      );
+      if (existingFile) {
+        return success(res, buildUploadResponse({
+          reqBaseUrl: requestBaseUrl(req),
+          fileId: Number(existingFile.id || 0),
+          fileNo: String(existingFile.file_no || ''),
+          cdnUrl: existingFile.cdn_url || '',
+          accessUrl: existingFile.access_url || '',
+          mimeType: existingFile.mime_type || file.mimetype,
+          fileSize: Number(existingFile.file_size || file.size || 0),
+          width: Number(existingFile.width || 0),
+          height: Number(existingFile.height || 0),
+          reused: true,
+        }));
+      }
 
       await preloadStorageConfigs();
       const adapter = StorageService.getActiveAdapter();
       const storageKey = StorageService.genStorageKey(category, file.originalname);
       const uploadStart = Date.now();
-      const uploadResult = await adapter.upload(storageKey, file.buffer, file.mimetype);
+      const uploadResult = await adapter.uploadLarge(
+        storageKey,
+        fs.createReadStream(file.path),
+        file.mimetype,
+        file.size,
+        { publicRead: visibility === 'public' },
+      );
       const publicUrl = uploadResult.cdnUrl || uploadResult.url || '';
 
-      const dims = getImageDimensions(file.buffer);
-      const md5Hash = crypto.createHash('md5').update(file.buffer).digest('hex');
+      const imageMetadataBuffer = file.mimetype.startsWith('image/') ? await readUploadForImageMetadata(file) : null;
+      const dims = imageMetadataBuffer ? getImageDimensions(imageMetadataBuffer) : { width: 0, height: 0 };
       const fileNo = genFileNo();
       const insertSql = `INSERT INTO files (file_no, user_id, provider, storage_key, original_name, mime_type, file_size, width, height, duration, md5_hash, etag, access_url, cdn_url, file_category, visibility, ref_type, ref_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(3))`;
       const [insertResult] = await conn.execute(insertSql, [fileNo, userId, adapter.provider, storageKey, file.originalname, file.mimetype, file.size, dims.width, dims.height, 0, md5Hash, uploadResult.etag || '', uploadResult.url, publicUrl, category, visibility, null, null]) as any;
@@ -286,11 +342,23 @@ router.post('/upload', authMiddleware, (req: Request, res: Response) => {
       const durationMs = Date.now() - uploadStart;
       await conn.execute(`INSERT INTO file_upload_logs (file_id, user_id, upload_mode, file_size, mime_type, duration_ms, source_ip, user_agent, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'success', NOW(3))`, [fileId, userId, 'server_relay', file.size, file.mimetype, durationMs, req.ip || '', (req.headers['user-agent'] || '').substring(0, 500)]);
 
-      return success(res, { fileId, fileNo, url: fileDeliveryUrl(req, { file_no: fileNo, visibility, cdn_url: publicUrl, access_url: uploadResult.url }), mimeType: file.mimetype, fileSize: file.size, width: dims.width, height: dims.height });
+      return success(res, buildUploadResponse({
+        reqBaseUrl: requestBaseUrl(req),
+        fileId,
+        fileNo,
+        cdnUrl: publicUrl,
+        accessUrl: uploadResult.url,
+        mimeType: file.mimetype,
+        fileSize: file.size,
+        width: dims.width,
+        height: dims.height,
+        reused: false,
+      }));
     } catch (uploadErr: any) {
       console.error('文件上传失败:', uploadErr);
       return error(res, storageErrorCode(uploadErr), storageFallbackMessage(uploadErr));
     } finally {
+      await cleanupTempUpload((req as any).file);
       conn.release();
     }
   });
@@ -306,6 +374,7 @@ router.post('/notify', authMiddleware, async (req: Request, res: Response) => {
       etag: String(etag || ''),
       fileSize: normalizePositiveInt(fileSize),
       mimeType: String(mimeType || contentType || ''),
+      durationMs: normalizePositiveInt(req.body.durationMs),
       uploadMode: 'direct_client',
       req,
     });
@@ -530,18 +599,22 @@ router.get('/:fileNo/content', async (req: Request, res: Response) => {
     const file = await queryOne<any>('SELECT * FROM files WHERE file_no = ? AND is_deleted = 0', [req.params.fileNo]);
     if (!file) { error(res, ErrorCodes.FILE_NOT_FOUND, '文件不存在', 404); return; }
     if (!verifyPrivateFileRequest(req, res, file)) return;
-    const sourceUrl = absoluteSourceUrl(req, file.cdn_url || file.access_url || StorageService.getActiveAdapter().getAccessUrl(file.storage_key));
+    const cacheControl = file.visibility === 'private' ? 'private, no-store' : 'public, max-age=31536000';
+    if (file.provider === 'local') {
+      const filePath = resolveLocalFilePath(file.storage_key);
+      if (!fs.existsSync(filePath)) { error(res, ErrorCodes.FILE_NOT_FOUND, 'file not found', 404); return; }
+      streamLocalFileWithRange(req, res, filePath, file.mime_type || 'application/octet-stream', cacheControl);
+      return;
+    }
+    const sourceUrl = storageSourceUrl(req, file);
     if (!sourceUrl) { error(res, ErrorCodes.FILE_STORAGE_ERROR, '文件地址不存在', 404); return; }
     const response = await axios.get(sourceUrl, {
       responseType: 'stream',
       timeout: FILE_CONTENT_PROXY_TIMEOUT_MS,
-      headers: req.headers.authorization ? { Authorization: req.headers.authorization } : undefined,
+      headers: { ...(req.headers.authorization ? { Authorization: req.headers.authorization } : {}), ...(rangeRequestHeaders(req) || {}) },
+      validateStatus: status => (status >= 200 && status < 300) || status === 206,
     });
-    res.setHeader('Content-Type', file.mime_type || response.headers['content-type'] || 'application/octet-stream');
-    const contentLength = response.headers['content-length'];
-    if (typeof contentLength === 'string' || typeof contentLength === 'number') res.setHeader('Content-Length', contentLength);
-    res.setHeader('Cache-Control', file.visibility === 'private' ? 'private, no-store' : 'public, max-age=31536000');
-    response.data.pipe(res);
+    pipeRemoteFileResponse(res, response, file.mime_type || response.headers['content-type'] || 'application/octet-stream', cacheControl);
   } catch (err: any) {
     if (res.headersSent) {
       res.destroy(err);
@@ -614,7 +687,8 @@ async function exportFileWithSanitize(file: any) {
     try {
       const [insertResult] = await conn.execute(
         `INSERT INTO files
-         (file_no, user_id, provider, storage_key, original_name, mime_type, file_size, width, height, duration, md5_hash, etag, access_url, cdn_url, file_category, visibility, ref_type, ref_id, metadata_sanitized, ai_implicit_label_kept, platform_watermark_removed, created_at)` ,
+         (file_no, user_id, provider, storage_key, original_name, mime_type, file_size, width, height, duration, md5_hash, etag, access_url, cdn_url, file_category, visibility, ref_type, ref_id, metadata_sanitized, ai_implicit_label_kept, platform_watermark_removed, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(3))`,
         [
           fileNo,
           file.user_id,

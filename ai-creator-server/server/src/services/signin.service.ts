@@ -167,16 +167,20 @@ function buildModeStatus(params: {
   signedToday: boolean;
   streak: number;
   lastSignedAt: string | null;
+  claimedReward?: number | null;
 }): CheckinModeStatus {
   const currentDay = params.signedToday
     ? Math.max(1, Math.min(params.streak, params.rewards.length || 1))
     : Math.max(1, Math.min(params.streak + 1, params.rewards.length || 1));
+  const claimedReward = Number(params.claimedReward);
   return {
     enabled: params.enabled,
     signedToday: params.signedToday,
     streak: params.streak,
     currentDay,
-    todayReward: params.signedToday ? 0 : rewardForDay(params.rewards, currentDay),
+    todayReward: params.signedToday && Number.isFinite(claimedReward)
+      ? Math.max(0, claimedReward)
+      : rewardForDay(params.rewards, currentDay),
     days: buildDayItems(params.rewards, params.streak, params.signedToday),
     lastSignedAt: params.lastSignedAt,
     canSign: params.enabled && !params.signedToday,
@@ -250,6 +254,7 @@ async function getNormalStatus(userId: number, config: CheckinConfig, dateInfo: 
     signedToday,
     streak,
     lastSignedAt,
+    claimedReward: todayRow?.reward_points,
   });
 }
 
@@ -281,6 +286,7 @@ async function getSuperStatus(userId: number, config: CheckinConfig, dateInfo: A
       signedToday,
       streak,
       lastSignedAt,
+      claimedReward: todayRow?.super_reward_points,
     }),
     adRequired: config.superRequiresAd,
     adCompletedToday,

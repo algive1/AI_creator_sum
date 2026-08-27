@@ -19,6 +19,7 @@ export interface SubmitTaskParams {
     [key: string]: any;
   };
   requestTemplate?: any;
+  modelConfig?: any;
   callbackUrl?: string;
   providerConfig: ProviderConfig;
 }

@@ -17,7 +17,7 @@ export function parseTemplateJson<T>(value: any, fallback: T): T {
 
 export function normalizeTemplateType(value: any): string {
   const text = String(value || '').trim();
-  if (text === 'video' || text === 'manga' || text === 'inspiration') return text;
+  if (text === 'video' || text === 'manga') return text;
   return 'image';
 }
 
@@ -33,9 +33,6 @@ const TEMPLATE_USAGE_TARGET_FEATURES: Record<string, Record<string, string>> = {
     first_last_frame: 'first_last_frame_video',
     video_edit: 'video_edit',
   },
-  inspiration: {
-    generate: 'inspiration',
-  },
 };
 
 const TEMPLATE_USAGE_ALIASES: Record<string, string> = {
@@ -50,13 +47,11 @@ const TEMPLATE_USAGE_ALIASES: Record<string, string> = {
 const DISPLAY_FEATURE_ORDER: Record<string, string[]> = {
   image: ['text_to_image', 'image_to_image', 'image_edit', 'inspiration'],
   video: ['text_to_video', 'image_to_video', 'first_last_frame_video', 'video_edit', 'inspiration'],
-  inspiration: ['inspiration'],
 };
 
 export function targetFeatureForTemplateType(templateType: string): string {
   if (templateType === 'video') return 'text_to_video';
   if (templateType === 'manga') return 'comic_create';
-  if (templateType === 'inspiration') return 'inspiration';
   return 'text_to_image';
 }
 
@@ -181,8 +176,8 @@ export function toLegacyTemplate(row: any, categoryName = '') {
     id: row.id,
     templateId: row.id,
     categoryId: row.category_id,
-    name: row.title,
-    title: row.title,
+    name: row.title || row.prompt || '未命名模板',
+    title: row.title || row.prompt || '未命名模板',
     author: row.source === 'user' ? 'user' : 'official',
     description: row.description || '',
     templateType: row.template_type,

@@ -2,7 +2,8 @@
 // Preloads formal storage.* configs from system_configs into process.env.
 // Storage adapters are synchronous, so process.env is only the runtime carrier.
 
-import { SettingsService } from '../settings.service';
+import { query } from '../../utils/db';
+import { decryptApiKey } from '../openai-adapter.service';
 import { StorageService } from './storage.service';
 
 const STORAGE_ENV_MAP: Record<string, string> = {
@@ -49,40 +50,101 @@ const STORAGE_ENV_MAP: Record<string, string> = {
   'upload.max_video_size': 'UPLOAD_MAX_VIDEO_SIZE',
 };
 
-export async function preloadStorageConfigs(): Promise<void> {
-  const formalStorageConfigured = await hasFormalStorageConfig();
-
-  for (const [configKey, envKey] of Object.entries(STORAGE_ENV_MAP)) {
-    try {
-      const value = await SettingsService.getSystemString(configKey, '');
-      if (value && value.trim() !== '') {
-        if (shouldKeepLocalDevOverride(envKey)) continue;
-        process.env[envKey] = value;
-      } else if (formalStorageConfigured && configKey.startsWith('storage.')) {
-        if (shouldKeepLocalDevOverride(envKey)) continue;
-        delete process.env[envKey];
-      }
-    } catch {
-      if (formalStorageConfigured && configKey.startsWith('storage.')) {
-        if (shouldKeepLocalDevOverride(envKey)) continue;
-        delete process.env[envKey];
-      }
-    }
-  }
-  StorageService.resetAdapter();
-  console.log('[StorageConfig] Preloaded storage.* from system_configs');
+interface PreloadStorageConfigOptions {
+  force?: boolean;
 }
 
-async function hasFormalStorageConfig(): Promise<boolean> {
-  try {
-    return !!(await SettingsService.getSystemString('storage.provider', '')).trim();
-  } catch {
-    return false;
+interface StorageConfigSnapshot {
+  values: Record<string, string>;
+  formalStorageConfigured: boolean;
+}
+
+const STORAGE_CONFIG_PRELOAD_CACHE_TTL_MS = positiveInt(
+  process.env.STORAGE_CONFIG_PRELOAD_CACHE_TTL_MS,
+  10_000,
+);
+
+let preloadCacheUntil = 0;
+let preloadPromise: Promise<void> | null = null;
+let hasAppliedStorageConfig = false;
+
+export function invalidateStorageConfigCache(): void {
+  preloadCacheUntil = 0;
+}
+
+export async function preloadStorageConfigs({ force = false }: PreloadStorageConfigOptions = {}): Promise<void> {
+  const now = Date.now();
+  if (!force && preloadCacheUntil > now) return;
+  if (!force && preloadPromise) return preloadPromise;
+
+  preloadPromise = preloadStorageConfigsUncached()
+    .then(() => {
+      preloadCacheUntil = Date.now() + STORAGE_CONFIG_PRELOAD_CACHE_TTL_MS;
+    })
+    .finally(() => {
+      preloadPromise = null;
+    });
+
+  return preloadPromise;
+}
+
+async function preloadStorageConfigsUncached(): Promise<void> {
+  const snapshot = await loadStorageConfigSnapshot();
+  const envChanged = applyStorageConfigSnapshot(snapshot);
+  const shouldResetAdapter = !hasAppliedStorageConfig || envChanged;
+  hasAppliedStorageConfig = true;
+
+  if (shouldResetAdapter) {
+    StorageService.resetAdapter();
   }
+  console.log(`[StorageConfig] Preloaded storage.* from system_configs${shouldResetAdapter ? ' and refreshed adapter' : ' from cacheable snapshot'}`);
+}
+
+function applyStorageConfigSnapshot(snapshot: StorageConfigSnapshot): boolean {
+  let changed = false;
+  for (const [configKey, envKey] of Object.entries(STORAGE_ENV_MAP)) {
+    const value = String(snapshot.values[configKey] || '').trim();
+    if (value) {
+      if (shouldKeepLocalDevOverride(envKey)) continue;
+      if (process.env[envKey] !== value) changed = true;
+      process.env[envKey] = value;
+    } else if (snapshot.formalStorageConfigured && configKey.startsWith('storage.')) {
+      if (shouldKeepLocalDevOverride(envKey)) continue;
+      if (process.env[envKey] !== undefined) changed = true;
+      delete process.env[envKey];
+    }
+  }
+  return changed;
+}
+
+async function loadStorageConfigSnapshot(): Promise<StorageConfigSnapshot> {
+  const keys = Object.keys(STORAGE_ENV_MAP);
+  const placeholders = keys.map(() => '?').join(',');
+  const rows = await query<any>(
+    `SELECT config_key, config_value, is_secret
+       FROM system_configs
+      WHERE config_key IN (${placeholders})`,
+    keys,
+  );
+  const values: Record<string, string> = {};
+  for (const row of rows) {
+    const key = String(row.config_key || '');
+    const raw = row.config_value === undefined || row.config_value === null ? '' : String(row.config_value);
+    values[key] = row.is_secret ? decryptApiKey(raw) : raw;
+  }
+  return {
+    values,
+    formalStorageConfigured: !!String(values['storage.provider'] || '').trim(),
+  };
 }
 
 function shouldKeepLocalDevOverride(envKey: string): boolean {
   if (process.env.NODE_ENV !== 'development') return false;
   if (!['LOCAL_UPLOAD_DIR', 'LOCAL_BASE_URL'].includes(envKey)) return false;
   return !!String(process.env[envKey] || '').trim();
+}
+
+function positiveInt(value: unknown, fallback: number): number {
+  const parsed = Number.parseInt(String(value || '').trim(), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }

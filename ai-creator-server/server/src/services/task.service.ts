@@ -3,16 +3,41 @@ import { getConnection, queryOne, query } from '../utils/db';
 import { selectTierModel, TierModelResult, RealModelInfo, TierCapabilities } from './tier-router.service';
 import { resolveImageSize, SizePlan } from './image-size-resolver.service';
 import { postprocessImage } from './image-postprocess.service';
-import { enqueue } from './task-queue.service';
+import { enqueue, registerDurableTaskProcessor, removeQueuedTask } from './task-queue.service';
 import { AdapterRegistry } from './adapters/adapter.registry';
 import { StorageService } from './storage/storage.service';
 import { resolveTaskSystemPrompt } from './system-prompt.service';
 import { findImageSizeOption, isResolutionPreset, normalizeResolutionPreset } from './image-size-options.service';
+import { planImageOutputSettlement } from './image-output-settlement.service';
+import { splitVideoInputAssets, VideoInputAssetRef } from './video-input-assets.service';
+import { isActiveMember } from './membership.service';
+import { createMediaAssetFromTaskOutput } from './media-asset.service';
+import { persistableProviderResultUrl } from './provider-result-metadata';
+import { assertActiveProject } from './project.service';
+import { decryptApiKey } from './openai-adapter.service';
+import {
+  buildFreeQuotaInsufficientData,
+  FREE_IMAGE_QUOTA_BILLING_SOURCE,
+  FreeImageQuotaConfig,
+  getFreeImageQuotaConfig,
+  isGptImage2FreeQuotaModel,
+  isFreeImageQuotaSnapshot,
+  isFreeImageQuotaTierAllowed,
+  POINTS_BILLING_SOURCE,
+  releaseFreeImageQuotaForTaskTx,
+  reserveFreeImageQuotaForTaskTx,
+  settleFreeImageQuotaForTaskTx,
+} from './free-image-quota.service';
 
 const TASK_STEPS = ['准备任务', '提交模型', '生成结果', '保存文件'];
 const MAX_PROMPT_LENGTH = 2000;
 const QUEUE_FULL_MESSAGE = '任务队列繁忙，请稍后重试';
 const RECOVERY_LOCK_MINUTES = 2;
+
+registerDurableTaskProcessor(async taskId => {
+  const payload = await buildRecoveredTaskPayload(taskId);
+  await processTask(payload);
+});
 const ALLOWED_PARAM_KEYS = new Set([
   'ratio',
   'sizeMode',
@@ -73,8 +98,13 @@ const ALLOWED_VIDEO_PARAM_KEYS = new Set([
   'audio_url',
   'audioFileId',
   'audio_file_id',
+  'audioUrls',
+  'audio_urls',
   'referenceVideo',
   'referenceVideoUrl',
+  'videoUrls',
+  'video_urls',
+  'images',
   'uploadKeys',
   'editTool',
   'negativePrompt',
@@ -88,11 +118,19 @@ interface PreparedTask {
   taskId: number;
   taskNo: string;
   pointsCost: number;
-  pointsRemaining: number;
+  pointsRemaining: number | null;
+  billingSource: typeof POINTS_BILLING_SOURCE | typeof FREE_IMAGE_QUOTA_BILLING_SOURCE;
+  freeQuotaReservedImages?: number;
 }
 
 interface CreateImageTaskParams {
   userId: number;
+  projectId?: number;
+  clientRequestId?: string;
+  quoteId?: string;
+  quotedPointsCost?: number;
+  sourceTaskId?: number;
+  inputAssetIds?: number[];
   subType: string;
   prompt: string;
   optimizedPrompt?: string;
@@ -116,6 +154,7 @@ interface CreateImageTaskParams {
   referenceKeys?: string[];
   modelId?: number;
   platformWatermarkEnabled?: boolean;
+  billingSource?: 'auto' | 'points';
 }
 
 function imageFeatureKeyForSubType(subType: string): string {
@@ -135,6 +174,7 @@ export async function createImageTask(input: CreateImageTaskParams) {
   const featureKey = input.featureKey || imageFeatureKeyForSubType(input.subType || 'text2img');
   const tierKeyOrId = input.tierId || input.tierKey;
   if (!tierKeyOrId) throw paramError('缺少 tierKey 或 tierId');
+  const projectId = await assertActiveProject(input.userId, input.projectId);
 
   const mergedParams = filterImageParams(input.params || {});
   normalizeImageResolutionParams(mergedParams, input);
@@ -174,6 +214,14 @@ export async function createImageTask(input: CreateImageTaskParams) {
   const imageCount = normalizeImageCount(mergedParams.imageCount, tierResult.capabilities.maxImages);
   mergedParams.imageCount = imageCount;
   const pricedTierResult = applyImageCountPricing(tierResult, imageCount);
+  const freeQuotaPlan = await buildImageFreeQuotaPlan({
+    userId: input.userId,
+    imageCount,
+    pointsCost: pricedTierResult.pointsCost,
+    billingSource: input.billingSource,
+    tierKey: tierResult.tierKey,
+    primaryModel: tierResult.primaryModel,
+  });
 
   const sizePlan = resolveImageSize({
     prompt: input.prompt,
@@ -205,6 +253,12 @@ export async function createImageTask(input: CreateImageTaskParams) {
 
   const prepared = await createTierTask({
     userId: input.userId,
+    projectId,
+    clientRequestId: input.clientRequestId,
+    quoteId: input.quoteId,
+    quotedPointsCost: input.quotedPointsCost,
+    sourceTaskId: input.sourceTaskId,
+    inputAssetIds: input.inputAssetIds,
     taskType: 'image',
     subType: input.subType || 'text2img',
     title: input.formData?.brand || input.formData?.scene || 'AI 生图任务',
@@ -216,9 +270,11 @@ export async function createImageTask(input: CreateImageTaskParams) {
     params: { ...mergedParams, referenceImages: referenceMetadata, uploadKeys: imageReferences.urls },
     editTool: input.editTool || null,
     tierResult: pricedTierResult,
+    billingSource: freeQuotaPlan ? FREE_IMAGE_QUOTA_BILLING_SOURCE : POINTS_BILLING_SOURCE,
+    freeQuota: freeQuotaPlan || undefined,
   });
 
-  const queued = enqueue(prepared.taskId, {
+  const queued = await enqueue(prepared.taskId, {
     taskId: prepared.taskId,
     input: {
       ...input,
@@ -229,6 +285,7 @@ export async function createImageTask(input: CreateImageTaskParams) {
     },
     tierResult,
     pointsCost: prepared.pointsCost,
+    billingSource: prepared.billingSource,
     taskType: 'image',
   }, processTask);
   if (!queued) {
@@ -245,6 +302,8 @@ export async function createImageTask(input: CreateImageTaskParams) {
     memberDiscountPercent: tierResult.memberDiscountPercent,
     memberDiscountApplied: tierResult.memberDiscountApplied,
     pointsRemaining: prepared.pointsRemaining,
+    billingSource: prepared.billingSource,
+    freeQuotaReservedImages: prepared.freeQuotaReservedImages || 0,
     estimatedSeconds: 15,
     tierKey: tierResult.tierKey,
     sizePlan,
@@ -252,8 +311,47 @@ export async function createImageTask(input: CreateImageTaskParams) {
   };
 }
 
+async function buildImageFreeQuotaPlan(input: {
+  userId: number;
+  imageCount: number;
+  pointsCost: number;
+  billingSource?: 'auto' | 'points';
+  tierKey?: string;
+  primaryModel?: RealModelInfo | null;
+}): Promise<{
+  requestedImages: number;
+  pointsCost: number;
+  config: FreeImageQuotaConfig;
+  insufficientData: Record<string, unknown>;
+} | null> {
+  if (input.billingSource === POINTS_BILLING_SOURCE) return null;
+  const config = await getFreeImageQuotaConfig();
+  if (!config.enabled || config.dailyLimit <= 0 || config.totalLimit <= 0) return null;
+  if (!isGptImage2FreeQuotaModel(input.primaryModel)) return null;
+  if (!isFreeImageQuotaTierAllowed(config.allowedTierKeys, input.tierKey)) return null;
+  if (await isActiveMember(input.userId)) return null;
+  return {
+    requestedImages: Math.max(1, Math.floor(Number(input.imageCount) || 1)),
+    pointsCost: Math.max(0, Math.floor(Number(input.pointsCost) || 0)),
+    config,
+    insufficientData: await buildFreeQuotaInsufficientData({
+      userId: input.userId,
+      requestedImages: input.imageCount,
+      dailyRemaining: 0,
+      totalRemaining: 0,
+      pointsCost: input.pointsCost,
+    }),
+  };
+}
+
 export async function createVideoTask(input: {
   userId: number;
+  projectId?: number;
+  clientRequestId?: string;
+  quoteId?: string;
+  quotedPointsCost?: number;
+  sourceTaskId?: number;
+  inputAssetIds?: number[];
   subType?: string;
   videoMode?: string;
   generationType?: string;
@@ -302,6 +400,7 @@ export async function createVideoTask(input: {
   const featureKey = input.featureKey || videoFeatureKeyForMode(videoMode);
   const tierKeyOrId = input.tierId || input.tierKey;
   if (!tierKeyOrId) throw paramError('缺少 tierKey 或 tierId');
+  const projectId = await assertActiveProject(input.userId, input.projectId);
   const params = filterVideoParams({
     ...(input.params || {}),
     ratio: input.ratio ?? input.params?.ratio,
@@ -334,6 +433,16 @@ export async function createVideoTask(input: {
     inputAssets: input.inputAssets ?? input.params?.inputAssets,
     referenceMode: input.referenceMode ?? input.params?.referenceMode,
   });
+  const splitAssets = splitVideoInputAssets(params.inputAssets);
+  const imageAssetRefs = splitAssets.imageRefs.map(videoAssetToReferenceValue).filter(Boolean);
+  const videoAssetRefs = splitAssets.videoRefs.map(videoAssetToReferenceValue).filter(Boolean);
+  const audioAssetRefs = splitAssets.audioRefs.map(videoAssetToReferenceValue).filter(Boolean);
+  if (imageAssetRefs.length && videoMode === 'image_to_video') {
+    params.uploadKeys = imageAssetRefs.concat(Array.isArray(params.uploadKeys) ? params.uploadKeys : params.uploadKeys ? [params.uploadKeys] : []);
+  }
+  if (videoAssetRefs.length && videoMode === 'video_edit' && !params.videoFileId && !params.videoId && !params.videoUrl && !params.video_url) {
+    params.uploadKeys = videoAssetRefs.concat(Array.isArray(params.uploadKeys) ? params.uploadKeys : params.uploadKeys ? [params.uploadKeys] : []);
+  }
   const requestedRatio = String(params.ratio || '').trim();
   const adaptiveRatio = requestedRatio.toLowerCase() === 'adaptive';
 
@@ -343,9 +452,11 @@ export async function createVideoTask(input: {
     duration: params.duration,
     quality: params.resolution || params.quality,
     cameraMove: params.cameraMove,
-    audioMode: params.audioMode,
-    referenceImageCount: videoMode === 'image_to_video' ? countImageReferences(params.uploadKeys) : undefined,
-  });
+      audioMode: params.audioMode,
+      referenceImageCount: videoMode === 'image_to_video' ? countImageReferences(params.uploadKeys) : undefined,
+      videoUrlCount: countVideoReferences(params, videoAssetRefs),
+      audioUrlCount: countAudioReferences(params, audioAssetRefs),
+    });
 
   const sizePlan = resolveImageSize({
     prompt: input.prompt,
@@ -372,6 +483,23 @@ export async function createVideoTask(input: {
   params.videoMode = videoMode;
 
   const referenceImages = await resolveVideoReferenceImages(input.userId, videoMode, params);
+  const inputMedia = await resolveVideoInputAssetReferences(input.userId, splitAssets);
+  if (inputMedia.videoUrls.length) {
+    params.videoUrls = uniqueStrings([...(params.videoUrls || []), ...inputMedia.videoUrls]);
+    params.video_urls = params.videoUrls;
+    params.videoUrl = params.videoUrl || params.videoUrls[0];
+    params.video_url = params.video_url || params.videoUrls[0];
+  }
+  if (inputMedia.audioUrls.length) {
+    params.audioUrls = uniqueStrings([...(params.audioUrls || []), ...inputMedia.audioUrls]);
+    params.audio_urls = params.audioUrls;
+    params.audioUrl = params.audioUrl || params.audioUrls[0];
+    params.audio_url = params.audio_url || params.audioUrls[0];
+  }
+  if (inputMedia.imageUrls.length) {
+    referenceImages.urls = uniqueStrings([...referenceImages.urls, ...inputMedia.imageUrls]);
+    referenceImages.metadata.push(...inputMedia.metadata.filter((item) => item.role === 'reference_image'));
+  }
   if (referenceImages.warnings.length) {
     params.sizeWarnings = [...(params.sizeWarnings || []), ...referenceImages.warnings];
   }
@@ -387,6 +515,12 @@ export async function createVideoTask(input: {
 
   const prepared = await createTierTask({
     userId: input.userId,
+    projectId,
+    clientRequestId: input.clientRequestId,
+    quoteId: input.quoteId,
+    quotedPointsCost: input.quotedPointsCost,
+    sourceTaskId: input.sourceTaskId,
+    inputAssetIds: input.inputAssetIds,
     taskType: 'video',
     subType: videoMode,
     title: input.formData?.brand || 'AI 视频任务',
@@ -400,7 +534,7 @@ export async function createVideoTask(input: {
     tierResult,
   });
 
-  const queued = enqueue(prepared.taskId, {
+  const queued = await enqueue(prepared.taskId, {
     taskId: prepared.taskId,
     input: { ...input, subType: videoMode, optimizedPrompt: optimizedPrompt || null, params, sizePlan, uploadKeys: referenceImages.urls },
     tierResult,
@@ -432,6 +566,12 @@ export async function createVideoTask(input: {
 
 async function createTierTask(input: {
   userId: number;
+  projectId: number;
+  clientRequestId?: string;
+  quoteId?: string;
+  quotedPointsCost?: number;
+  sourceTaskId?: number;
+  inputAssetIds?: number[];
   taskType: 'image' | 'video' | 'manga' | 'storyboard';
   subType: string;
   title: string;
@@ -443,103 +583,18 @@ async function createTierTask(input: {
   params: any;
   editTool: string | null;
   tierResult: TierModelResult;
+  billingSource?: typeof POINTS_BILLING_SOURCE | typeof FREE_IMAGE_QUOTA_BILLING_SOURCE;
+  freeQuota?: {
+    requestedImages: number;
+    pointsCost: number;
+    config: FreeImageQuotaConfig;
+    insufficientData: Record<string, unknown>;
+  };
 }): Promise<PreparedTask> {
   const conn = await getConnection();
   try {
     await conn.beginTransaction();
-
-    const [accRows] = await conn.execute(
-      'SELECT balance, frozen_balance, version FROM point_accounts WHERE user_id = ? FOR UPDATE',
-      [input.userId],
-    ) as any;
-    const account = accRows?.[0];
-    if (!account) throw Object.assign(new Error('积分账户不存在'), { code: 1005 });
-    if (account.balance < input.tierResult.pointsCost) throw Object.assign(new Error('积分余额不足'), { code: 1002 });
-
-    const pointsCost = input.tierResult.pointsCost;
-    const balanceBefore = account.balance;
-    const balanceAfter = balanceBefore - pointsCost;
-    const frozenBefore = account.frozen_balance || 0;
-    const frozenAfter = frozenBefore + pointsCost;
-
-    const [updateResult] = await conn.execute(
-      `UPDATE point_accounts
-          SET balance = ?, frozen_balance = frozen_balance + ?, version = version + 1, updated_at = NOW(3)
-        WHERE user_id = ? AND version = ?`,
-      [balanceAfter, pointsCost, input.userId, account.version],
-    );
-    if ((updateResult as any).affectedRows === 0) throw Object.assign(new Error('积分账户并发更新失败，请重试'), { code: 429 });
-
-    const taskNo = generateTaskNo();
-    const [taskResult] = await conn.execute(
-      `INSERT INTO ai_tasks
-       (task_no, user_id, task_type, tier_id, sub_type, model_id, title, status, progress, points_cost,
-        price_snapshot, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, NOW(3), NOW(3))`,
-      [
-        taskNo,
-        input.userId,
-        input.taskType,
-        input.tierResult.tierId,
-        input.subType,
-        input.tierResult.primaryModel.id,
-        input.title,
-        pointsCost,
-        JSON.stringify({
-          tierId: input.tierResult.tierId,
-          tierKey: input.tierResult.tierKey,
-          tierName: input.tierResult.tierName,
-          featureKey: input.tierResult.featureKey,
-          unitBasePointsCost: input.tierResult.unitBasePointsCost ?? input.tierResult.basePointsCost,
-          unitPointsCost: input.tierResult.unitPointsCost ?? pointsCost,
-          imageCount: input.tierResult.imageCount || input.params?.imageCount || 1,
-          basePointsCost: input.tierResult.basePointsCost,
-          pointsCost,
-          totalPointsCost: pointsCost,
-          memberDiscountPercent: input.tierResult.memberDiscountPercent,
-          memberDiscountApplied: input.tierResult.memberDiscountApplied,
-          pricingMode: input.tierResult.pricingMode || 'fixed',
-          pricing: input.tierResult.pricingSnapshot || null,
-          resolutionPreset: input.params?.resolutionPreset || '',
-        }),
-      ],
-    );
-    const taskId = (taskResult as any).insertId;
-
-    await conn.execute(
-      `INSERT INTO ai_task_inputs
-       (task_id, prompt, optimized_prompt, negative_prompt, system_prompt, form_data, params, edit_tool, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(3))`,
-      [
-        taskId,
-        input.prompt,
-        input.optimizedPrompt || null,
-        input.negativePrompt || '',
-        input.systemPrompt,
-        JSON.stringify(input.formData || {}),
-        JSON.stringify(input.params || {}),
-        input.editTool,
-      ],
-    );
-
-    await conn.execute(
-      `INSERT INTO point_logs
-       (user_id, type, amount, balance_before, balance_after, frozen_before, frozen_after, source, ref_type, ref_id, title, created_at)
-       VALUES (?, 'freeze', ?, ?, ?, ?, ?, 'task_spend', 'ai_task_freeze', ?, ?, NOW(3))`,
-      [input.userId, -pointsCost, balanceBefore, balanceAfter, frozenBefore, frozenAfter, String(taskId), `${getTaskLabel(input.taskType)}任务冻结`],
-    );
-    await conn.execute('INSERT INTO ai_task_logs (task_id, event, message, created_at) VALUES (?, ?, ?, NOW(3))', [taskId, 'created', '任务已创建']);
-    await conn.execute('UPDATE user_assets SET points_balance = ?, updated_at = NOW(3) WHERE user_id = ?', [balanceAfter, input.userId]);
-
-    // 在事务内标记为 queued，避免 COMMIT 后崩溃导致积分已冻结但任务永不被处理
-    await conn.execute(
-      "UPDATE ai_tasks SET status = 'queued', queued_at = NOW(3), updated_at = NOW(3) WHERE id = ? AND status = 'pending'",
-      [taskId],
-    );
-    await conn.execute('INSERT INTO ai_task_logs (task_id, event, message, created_at) VALUES (?, ?, ?, NOW(3))', [taskId, 'queued', 'Task queued.']);
-
-    await conn.commit();
-    return { taskId, taskNo, pointsCost, pointsRemaining: balanceAfter };
+    return await createTierTaskWithBilling(conn, input);
   } catch (err) {
     await conn.rollback();
     throw err;
@@ -548,8 +603,173 @@ async function createTierTask(input: {
   }
 }
 
+async function createTierTaskWithBilling(conn: any, input: any): Promise<PreparedTask> {
+  const useFreeQuota = input.billingSource === FREE_IMAGE_QUOTA_BILLING_SOURCE && !!input.freeQuota;
+  const billingSource = useFreeQuota ? FREE_IMAGE_QUOTA_BILLING_SOURCE : POINTS_BILLING_SOURCE;
+  const requestedPointsCost = Math.max(0, Math.floor(Number(input.tierResult.pointsCost) || 0));
+  if (Number.isFinite(Number(input.quotedPointsCost)) && Number(input.quotedPointsCost) !== requestedPointsCost) {
+    throw paramError('模型价格已变化，请重新获取报价');
+  }
+  const pointsCost = useFreeQuota ? 0 : requestedPointsCost;
+  let pointsRemaining: number | null = null;
+  let balanceBefore = 0;
+  let balanceAfter = 0;
+  let frozenBefore = 0;
+  let frozenAfter = 0;
+
+  if (!useFreeQuota) {
+    const [accRows] = await conn.execute(
+      'SELECT balance, frozen_balance, version FROM point_accounts WHERE user_id = ? FOR UPDATE',
+      [input.userId],
+    ) as any;
+    const account = accRows?.[0];
+    if (!account) throw Object.assign(new Error('积分账户不存在'), { code: 1005 });
+    if (account.balance < requestedPointsCost) throw Object.assign(new Error('积分余额不足'), { code: 1002 });
+
+    balanceBefore = Number(account.balance || 0);
+    balanceAfter = balanceBefore - requestedPointsCost;
+    frozenBefore = Number(account.frozen_balance || 0);
+    frozenAfter = frozenBefore + requestedPointsCost;
+
+    const [updateResult] = await conn.execute(
+      `UPDATE point_accounts
+          SET balance = ?, frozen_balance = frozen_balance + ?, version = version + 1, updated_at = NOW(3)
+        WHERE user_id = ? AND version = ?`,
+      [balanceAfter, requestedPointsCost, input.userId, account.version],
+    );
+    if ((updateResult as any).affectedRows === 0) throw Object.assign(new Error('积分账户并发更新失败，请重试'), { code: 429 });
+    pointsRemaining = balanceAfter;
+  } else {
+    const [balanceRows] = await conn.execute('SELECT balance FROM point_accounts WHERE user_id = ?', [input.userId]) as any;
+    pointsRemaining = Number.isFinite(Number(balanceRows?.[0]?.balance)) ? Number(balanceRows[0].balance) : null;
+  }
+
+  const taskNo = generateTaskNo();
+  const clientRequestId = normalizeClientRequestId(input.clientRequestId);
+  const [taskResult] = await conn.execute(
+    `INSERT INTO ai_tasks
+     (task_no, client_request_id, user_id, project_id, source_task_id, task_type, tier_id, sub_type, model_id, title, status, progress, points_cost,
+      price_snapshot, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, NOW(3), NOW(3))`,
+    [
+      taskNo,
+      clientRequestId,
+      input.userId,
+      input.projectId,
+      input.sourceTaskId || null,
+      input.taskType,
+      input.tierResult.tierId,
+      input.subType,
+      input.tierResult.primaryModel.id,
+      input.title,
+      pointsCost,
+      JSON.stringify({
+        billingSource,
+        tierId: input.tierResult.tierId,
+        tierKey: input.tierResult.tierKey,
+        tierName: input.tierResult.tierName,
+        featureKey: input.tierResult.featureKey,
+        unitBasePointsCost: input.tierResult.unitBasePointsCost ?? input.tierResult.basePointsCost,
+        unitPointsCost: input.tierResult.unitPointsCost ?? requestedPointsCost,
+        imageCount: input.tierResult.imageCount || input.params?.imageCount || 1,
+        basePointsCost: input.tierResult.basePointsCost,
+        pointsCost,
+        requestedPointsCost,
+        totalPointsCost: pointsCost,
+        freeQuotaReservedImages: useFreeQuota ? input.freeQuota?.requestedImages || 0 : 0,
+        memberDiscountPercent: input.tierResult.memberDiscountPercent,
+        memberDiscountApplied: input.tierResult.memberDiscountApplied,
+        pricingMode: input.tierResult.pricingMode || 'fixed',
+        pricing: input.tierResult.pricingSnapshot || null,
+        resolutionPreset: input.params?.resolutionPreset || '',
+      }),
+    ],
+  );
+  const taskId = (taskResult as any).insertId;
+
+  if (input.quoteId) {
+    const [quoteResult] = await conn.execute(
+      `UPDATE task_quotes SET consumed_task_id = ?
+        WHERE id = ? AND user_id = ? AND consumed_task_id IS NULL AND expires_at > NOW(3)`,
+      [taskId, input.quoteId, input.userId],
+    ) as any;
+    if (Number(quoteResult?.affectedRows || 0) === 0) throw paramError('报价已失效或已使用，请重新获取');
+  }
+
+  if (useFreeQuota) {
+    await reserveFreeImageQuotaForTaskTx(conn, {
+      userId: input.userId,
+      taskId,
+      requestedImages: input.freeQuota.requestedImages,
+      pointsCost: input.freeQuota.pointsCost,
+      config: input.freeQuota.config,
+      insufficientData: input.freeQuota.insufficientData,
+    });
+  }
+
+  await conn.execute(
+    `INSERT INTO ai_task_inputs
+     (task_id, prompt, optimized_prompt, negative_prompt, system_prompt, form_data, params, edit_tool, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(3))`,
+    [
+      taskId,
+      input.prompt,
+      input.optimizedPrompt || null,
+      input.negativePrompt || '',
+      input.systemPrompt,
+      JSON.stringify(input.formData || {}),
+      JSON.stringify(input.params || {}),
+      input.editTool,
+    ],
+  );
+
+  const inputAssetIds = [...new Set((Array.isArray(input.inputAssetIds) ? input.inputAssetIds : [])
+    .map(Number).filter((id: number) => Number.isInteger(id) && id > 0))].slice(0, 20);
+  if (inputAssetIds.length) {
+    const [assetRows] = await conn.execute(
+      `SELECT id FROM media_assets WHERE user_id = ? AND status = 'active' AND id IN (${inputAssetIds.map(() => '?').join(',')})`,
+      [input.userId, ...inputAssetIds],
+    ) as any;
+    if (assetRows.length !== inputAssetIds.length) throw paramError('部分输入资产不存在或已进入回收站');
+    for (let index = 0; index < inputAssetIds.length; index++) {
+      await conn.execute(
+        `INSERT IGNORE INTO task_asset_inputs (task_id, asset_id, input_role, sort_order, created_at)
+         VALUES (?, ?, 'reference', ?, NOW(3))`,
+        [taskId, inputAssetIds[index], index],
+      );
+    }
+  }
+
+  if (!useFreeQuota) {
+    await conn.execute(
+      `INSERT INTO point_logs
+       (user_id, type, amount, balance_before, balance_after, frozen_before, frozen_after, source, ref_type, ref_id, title, created_at)
+       VALUES (?, 'freeze', ?, ?, ?, ?, ?, 'task_spend', 'ai_task_freeze', ?, ?, NOW(3))`,
+      [input.userId, -requestedPointsCost, balanceBefore, balanceAfter, frozenBefore, frozenAfter, String(taskId), `${getTaskLabel(input.taskType)}任务冻结`],
+    );
+    await conn.execute('UPDATE user_assets SET points_balance = ?, updated_at = NOW(3) WHERE user_id = ?', [balanceAfter, input.userId]);
+  }
+
+  await conn.execute('INSERT INTO ai_task_logs (task_id, event, message, created_at) VALUES (?, ?, ?, NOW(3))', [taskId, 'created', 'Task created.']);
+  await conn.execute(
+    "UPDATE ai_tasks SET status = 'queued', queued_at = NOW(3), updated_at = NOW(3) WHERE id = ? AND status = 'pending'",
+    [taskId],
+  );
+  await conn.execute('INSERT INTO ai_task_logs (task_id, event, message, created_at) VALUES (?, ?, ?, NOW(3))', [taskId, 'queued', 'Task queued.']);
+
+  await conn.commit();
+  return {
+    taskId,
+    taskNo,
+    pointsCost,
+    pointsRemaining,
+    billingSource,
+    freeQuotaReservedImages: useFreeQuota ? input.freeQuota?.requestedImages || 0 : 0,
+  };
+}
+
 async function processTask(data: any): Promise<void> {
-  const { taskId, input, tierResult, pointsCost, taskType } = data;
+  const { taskId, input, tierResult, pointsCost, taskType, billingSource } = data;
   const savedOutputs: SavedTaskOutput[] = [];
   const taskStartedAt = Date.now();
   try {
@@ -575,17 +795,38 @@ async function processTask(data: any): Promise<void> {
       params: buildProviderParams(taskType, input, tierResult),
     });
 
+    const latestTask = await queryOne<any>('SELECT status FROM ai_tasks WHERE id = ?', [taskId]);
+    if (latestTask?.status !== 'processing') {
+      await addTaskLog(taskId, 'processing_stopped', '任务已取消或结束，停止保存模型结果').catch(() => undefined);
+      return;
+    }
+
     if (submit.asyncPending) {
       return;
     }
 
     const urls = submit.result?.urls || [];
-    const expectedImageCount = taskType === 'image' ? normalizeImageCount(input.params?.imageCount, tierResult.capabilities.maxImages || 1) : 0;
+    const settlement = taskType === 'image'
+      ? planImageOutputSettlement({
+          urls,
+          expectedImageCount: normalizeImageCount(input.params?.imageCount, tierResult.capabilities.maxImages || 1),
+          frozenPointsCost: pointsCost,
+          unitPointsCost: tierResult.unitPointsCost,
+        })
+      : {
+          outputUrls: urls,
+          expectedImageCount: urls.length,
+          actualImageCount: urls.length,
+          pointsCost,
+          partial: false,
+          shouldFail: false,
+    };
     if (urls.length === 0) throw new Error(taskType === 'video' ? '模型未返回视频结果' : '模型未返回图片结果');
-    if (expectedImageCount > 0 && urls.length < expectedImageCount) {
-      throw new Error(`模型返回图片数量不足，期望 ${expectedImageCount} 张，实际 ${urls.length} 张`);
+    if (settlement.shouldFail) throw new Error(taskType === 'video' ? '模型未返回视频结果' : '模型未返回图片结果');
+    if (settlement.partial) {
+      await addTaskLog(taskId, 'partial_outputs', `Provider returned partial image outputs: ${settlement.actualImageCount}/${settlement.expectedImageCount}`);
     }
-    const outputUrls = expectedImageCount > 0 ? urls.slice(0, expectedImageCount) : urls;
+    const outputUrls = settlement.outputUrls;
     for (let i = 0; i < outputUrls.length; i++) {
       const savedOutput = await saveTaskOutputWithRetry({
         taskId,
@@ -603,11 +844,20 @@ async function processTask(data: any): Promise<void> {
 
     await finalizeTaskSuccess({
       taskId,
-      pointsCost,
+      pointsCost: settlement.pointsCost,
+      requestedPointsCost: pointsCost,
+      actualImageCount: settlement.actualImageCount,
       actualModelId: submit.model.id,
-      costSnapshot: submit.cost || {},
+      costSnapshot: {
+        ...(submit.cost || {}),
+        ...(taskType === 'image' ? {
+          expectedImageCount: settlement.expectedImageCount,
+          actualImageCount: settlement.actualImageCount,
+          partialOutputs: settlement.partial,
+        } : {}),
+      },
     });
-    console.log(`[Task #${taskId}] completed, totalTime=${((Date.now() - taskStartedAt) / 1000).toFixed(1)}s, cost=${pointsCost} points`);
+    console.log(`[Task #${taskId}] completed, totalTime=${((Date.now() - taskStartedAt) / 1000).toFixed(1)}s, cost=${settlement.pointsCost} points`);
     await addTaskLog(taskId, 'completed', '任务已完成');
   } catch (err: any) {
     const message = (err.message || '任务执行失败').substring(0, 500);
@@ -618,7 +868,11 @@ async function processTask(data: any): Promise<void> {
     }
     try {
       await finalizeTaskFailure(taskId, pointsCost, message);
-      await addTaskLog(taskId, 'points_refunded', '任务失败，积分已退回');
+      await addTaskLog(
+        taskId,
+        billingSource === FREE_IMAGE_QUOTA_BILLING_SOURCE ? 'free_quota_released' : 'points_refunded',
+        billingSource === FREE_IMAGE_QUOTA_BILLING_SOURCE ? 'Free quota released after task failure.' : '任务失败，积分已退回',
+      );
     } catch (refundErr: any) {
       await addTaskLog(taskId, 'refund_failed', `任务失败但退款处理失败：${(refundErr.message || refundErr).toString().substring(0, 400)}`);
     }
@@ -658,8 +912,12 @@ function buildProviderParams(taskType: string, input: any, tierResult: TierModel
       style: input.params?.style,
       videoUrl: input.params?.videoUrl || input.params?.video_url,
       video_url: input.params?.video_url || input.params?.videoUrl,
+      videoUrls: input.params?.videoUrls || input.params?.video_urls,
+      video_urls: input.params?.video_urls || input.params?.videoUrls,
       audioUrl: input.params?.audioUrl || input.params?.audio_url,
       audio_url: input.params?.audio_url || input.params?.audioUrl,
+      audioUrls: input.params?.audioUrls || input.params?.audio_urls,
+      audio_urls: input.params?.audio_urls || input.params?.audioUrls,
       audioFileId: input.params?.audioFileId || input.params?.audio_file_id,
       audio_file_id: input.params?.audio_file_id || input.params?.audioFileId,
       editTool: input.params?.editTool,
@@ -718,6 +976,8 @@ async function submitWithFallback(options: {
       try {
         const adapter = AdapterRegistry.get(model.providerType || 'openai');
         if (!adapter) throw new Error('未找到模型适配器：' + (model.providerType || 'unknown'));
+        const currentTask = await queryOne<any>('SELECT status FROM ai_tasks WHERE id = ?', [options.taskId]);
+        if (currentTask?.status !== 'processing') throw Object.assign(new Error('Task is no longer processing'), { code: 'TASK_TERMINAL' });
         const result = await adapter.submitTask({
           upstreamCode: model.upstreamModelCode || model.apiModelName || model.name,
           taskType: options.taskType,
@@ -725,6 +985,7 @@ async function submitWithFallback(options: {
           images: options.images,
           params: options.params,
           requestTemplate: model.requestTemplate,
+          modelConfig: model.config,
           providerConfig: {
             baseUrl: model.providerApiBaseUrl || '',
             apiKey: model.providerApiKey || '',
@@ -753,7 +1014,12 @@ async function submitWithFallback(options: {
               ],
             );
             if (!updateResult || Number((updateResult as any).affectedRows || 0) === 0) {
-              throw new Error('Task is no longer processing');
+              await adapter.cancelTask(providerTaskId, {
+                baseUrl: model.providerApiBaseUrl || '',
+                apiKey: model.providerApiKey || '',
+                timeout: 30000,
+              }).catch(() => false);
+              throw Object.assign(new Error('Task is no longer processing'), { code: 'TASK_TERMINAL' });
             }
             const elapsed = Date.now() - startedAt;
             await query(
@@ -786,6 +1052,7 @@ async function submitWithFallback(options: {
         await addTaskLog(options.taskId, 'model_call_success', `${model.name} 调用成功，耗时 ${Date.now() - startedAt}ms`);
         return { ...result, model };
       } catch (err: any) {
+        if (err?.code === 'TASK_TERMINAL') throw err;
         lastError = err;
         await query(
           `INSERT INTO ai_model_call_logs
@@ -838,8 +1105,10 @@ export async function saveTaskOutputWithRetry(input: SaveTaskOutputInput): Promi
 
 export async function saveTaskOutput(input: SaveTaskOutputInput): Promise<SavedTaskOutput> {
   let storageKey: string;
+  const providerResultUrl = persistableProviderResultUrl(input.url);
   const metadata = {
     ...(input.metadata || {}),
+    ...(providerResultUrl ? { providerResultUrl } : {}),
     targetWidth: input.sizePlan?.targetWidth,
     targetHeight: input.sizePlan?.targetHeight,
     nativeSize: input.sizePlan?.nativeSize,
@@ -913,6 +1182,7 @@ export async function saveTaskOutput(input: SaveTaskOutputInput): Promise<SavedT
     throw err;
   }
 
+  let outputId = 0;
   try {
     const thumbnailKey = String(
       metadata.thumbnail_key || metadata.thumbnailKey || metadata.thumbnailUrl || metadata.thumbnail || '',
@@ -938,14 +1208,27 @@ export async function saveTaskOutput(input: SaveTaskOutputInput): Promise<SavedT
         JSON.stringify(metadata),
       ],
     );
+    outputId = Number((result as any)?.insertId || 0);
+    if (!outputId) throw new Error('任务输出记录创建失败');
+    const asset = await createMediaAssetFromTaskOutput({
+      taskId: input.taskId,
+      userId: input.userId,
+      outputId,
+      fileNo: String(transfer.fileNo || ''),
+      mediaType: input.outputType,
+      name: input.outputType === 'video' ? `视频${input.index + 1}` : `图片${input.index + 1}`,
+      metadata,
+    });
+    if (!asset?.id) throw new Error('项目资产记录创建失败');
+    await addTaskLog(input.taskId, 'asset_created', `输出 ${input.index + 1} 已进入项目资产库`).catch(() => undefined);
     return {
-      outputId: Number((result as any)?.insertId || 0),
+      outputId,
       fileNo: String(transfer.fileNo || ''),
       storageKey,
     };
   } catch (err) {
     await cleanupSavedTaskOutputs(input.taskId, [{
-      outputId: 0,
+      outputId,
       fileNo: String(transfer.fileNo || ''),
       storageKey,
     }]).catch(cleanupErr =>
@@ -961,6 +1244,10 @@ export async function cleanupSavedTaskOutputs(taskId: number, outputs: SavedTask
   const storageKeys = [...new Set(outputs.map(item => String(item.storageKey || '').trim()).filter(Boolean))];
 
   if (outputIds.length > 0) {
+    await query(
+      `DELETE FROM media_assets WHERE source_output_id IN (${outputIds.map(() => '?').join(',')})`,
+      outputIds,
+    );
     await query(
       `DELETE FROM ai_task_outputs WHERE task_id = ? AND id IN (${outputIds.map(() => '?').join(',')})`,
       [taskId, ...outputIds],
@@ -1020,43 +1307,96 @@ function isInlineBase64Output(source: string): boolean {
   return /^[A-Za-z0-9+/]+={0,2}$/.test(text);
 }
 
-export async function finalizeTaskSuccess(input: { taskId: number; pointsCost: number; actualModelId: number; costSnapshot: any }): Promise<void> {
+export async function finalizeTaskSuccess(input: { taskId: number; pointsCost: number; actualModelId: number; costSnapshot: any; requestedPointsCost?: number; actualImageCount?: number }): Promise<void> {
   const conn = await getConnection();
   try {
     await conn.beginTransaction();
-    const [taskRows] = await conn.execute('SELECT user_id, status FROM ai_tasks WHERE id = ? FOR UPDATE', [input.taskId]) as any;
+    const [taskRows] = await conn.execute('SELECT user_id, status, price_snapshot FROM ai_tasks WHERE id = ? FOR UPDATE', [input.taskId]) as any;
     const task = taskRows?.[0];
     if (!task?.user_id) { await conn.rollback(); return; }
     if (['completed', 'failed', 'cancelled'].includes(task.status)) { await conn.rollback(); return; }
+
+    if (isFreeImageQuotaSnapshot(task.price_snapshot)) {
+      await settleFreeImageQuotaForTaskTx(conn, input.taskId, input.actualImageCount || 0);
+      await conn.execute(
+        `UPDATE ai_tasks
+            SET status = 'completed', progress = 100, actual_model_id = ?, actual_points_cost = 0,
+                cost_snapshot = ?,
+                provider_status = COALESCE(provider_status, 'completed'),
+                provider_status_message = COALESCE(provider_status_message, '任务已完成'),
+                next_poll_at = NULL, processing_lock_until = NULL,
+                completed_at = NOW(3), updated_at = NOW(3)
+          WHERE id = ?`,
+        [input.actualModelId, JSON.stringify({
+          ...(input.costSnapshot || {}),
+          billingSource: FREE_IMAGE_QUOTA_BILLING_SOURCE,
+          requestedPointsCost: Number(input.requestedPointsCost || 0),
+          actualImageCount: Number(input.actualImageCount || 0),
+          refundedPointsCost: 0,
+        }), input.taskId],
+      );
+      await conn.execute('UPDATE user_assets SET total_creations = total_creations + 1, updated_at = NOW(3) WHERE user_id = ?', [task.user_id]);
+      await conn.execute('INSERT INTO ai_task_logs (task_id, event, message, created_at) VALUES (?, ?, ?, NOW(3))', [input.taskId, 'completed', '任务已完成']);
+
+      if (input.actualModelId) {
+        const [costRows] = await conn.execute('SELECT api_cost_cents, provider_id FROM ai_models WHERE id = ?', [input.actualModelId]) as any;
+        const apiCost = Number(costRows?.[0]?.api_cost_cents || 0);
+        if (apiCost > 0) {
+          await conn.execute(
+            'INSERT INTO ai_task_cost_logs (task_id, model_id, provider_id, call_log_id, user_points_cost, api_cost_cents, api_currency, gross_profit_cents, created_at) VALUES (?, ?, ?, 0, ?, ?, ?, ?, NOW(3))',
+            [input.taskId, input.actualModelId, costRows[0].provider_id, 0, apiCost, 'CNY', -apiCost],
+          );
+        }
+      }
+
+      await conn.commit();
+      return;
+    }
 
     const [accRows] = await conn.execute('SELECT balance, frozen_balance, version FROM point_accounts WHERE user_id = ? FOR UPDATE', [task.user_id]) as any;
     const account = accRows?.[0];
     if (!account) { await conn.rollback(); return; }
     const frozenBefore = account.frozen_balance || 0;
+    const requestedPointsCost = Math.max(input.pointsCost, Number(input.requestedPointsCost || 0));
     const settleAmount = Math.min(input.pointsCost, frozenBefore);
+    const refundAmount = Math.min(Math.max(0, requestedPointsCost - input.pointsCost), Math.max(0, frozenBefore - settleAmount));
 
     await conn.execute(
-      `UPDATE point_accounts SET frozen_balance = GREATEST(frozen_balance - ?, 0), total_spent = total_spent + ?,
+      `UPDATE point_accounts SET balance = balance + ?, frozen_balance = GREATEST(frozen_balance - ?, 0),
+       total_spent = total_spent + ?, total_refunded = total_refunded + ?,
        version = version + 1, updated_at = NOW(3) WHERE user_id = ? AND version = ?`,
-      [settleAmount, input.pointsCost, task.user_id, account.version],
+      [refundAmount, settleAmount + refundAmount, input.pointsCost, refundAmount, task.user_id, account.version],
     );
     await conn.execute(
       `INSERT IGNORE INTO point_logs
        (user_id, type, amount, balance_before, balance_after, frozen_before, frozen_after, source, ref_type, ref_id, title, created_at)
        VALUES (?, 'spend', 0, ?, ?, ?, ?, 'task_spend', 'ai_task_settle', ?, '任务完成扣减冻结积分', NOW(3))`,
-      [task.user_id, account.balance, account.balance, frozenBefore, Math.max(frozenBefore - settleAmount, 0), String(input.taskId)],
+      [task.user_id, account.balance, account.balance + refundAmount, frozenBefore, Math.max(frozenBefore - settleAmount - refundAmount, 0), String(input.taskId)],
     );
+    if (refundAmount > 0) {
+      await conn.execute(
+        `INSERT IGNORE INTO point_logs
+         (user_id, type, amount, balance_before, balance_after, frozen_before, frozen_after, source, ref_type, ref_id, title, created_at)
+         VALUES (?, 'refund', ?, ?, ?, ?, ?, 'task_refund', 'ai_task_partial_refund', ?, '任务部分成功退回积分', NOW(3))`,
+        [task.user_id, refundAmount, account.balance, account.balance + refundAmount, frozenBefore, Math.max(frozenBefore - settleAmount - refundAmount, 0), String(input.taskId)],
+      );
+    }
     await conn.execute(
       `UPDATE ai_tasks
           SET status = 'completed', progress = 100, actual_model_id = ?, actual_points_cost = ?,
-              cost_snapshot = ?, provider_status = COALESCE(provider_status, 'completed'),
+              cost_snapshot = ?, points_refunded = points_refunded + ?,
+              provider_status = COALESCE(provider_status, 'completed'),
               provider_status_message = COALESCE(provider_status_message, '任务已完成'),
               next_poll_at = NULL, processing_lock_until = NULL,
               completed_at = NOW(3), updated_at = NOW(3)
         WHERE id = ?`,
-      [input.actualModelId, input.pointsCost, JSON.stringify(input.costSnapshot || {}), input.taskId],
+      [input.actualModelId, input.pointsCost, JSON.stringify({
+        ...(input.costSnapshot || {}),
+        requestedPointsCost,
+        refundedPointsCost: refundAmount,
+      }), refundAmount, input.taskId],
     );
-    await conn.execute('UPDATE user_assets SET total_creations = total_creations + 1, updated_at = NOW(3) WHERE user_id = ?', [task.user_id]);
+    await conn.execute('UPDATE user_assets SET points_balance = ?, total_creations = total_creations + 1, updated_at = NOW(3) WHERE user_id = ?', [account.balance + refundAmount, task.user_id]);
     await conn.execute('INSERT INTO ai_task_logs (task_id, event, message, created_at) VALUES (?, ?, ?, NOW(3))', [input.taskId, 'completed', '任务已完成']);
 
     if (input.actualModelId) {
@@ -1084,11 +1424,24 @@ export async function finalizeTaskFailure(taskId: number, cost: number, reason: 
     const conn = await getConnection();
     try {
       await conn.beginTransaction();
-      const [taskRows] = await conn.execute('SELECT user_id, points_refunded, status FROM ai_tasks WHERE id = ? FOR UPDATE', [taskId]) as any;
+      const [taskRows] = await conn.execute('SELECT user_id, points_refunded, status, price_snapshot FROM ai_tasks WHERE id = ? FOR UPDATE', [taskId]) as any;
       const task = taskRows?.[0];
       if (!task?.user_id) { await conn.rollback(); return; }
       if (task.status === 'failed' && task.points_refunded > 0) { await conn.rollback(); return; }
       if (['completed', 'cancelled'].includes(task.status)) { await conn.rollback(); return; }
+
+      if (isFreeImageQuotaSnapshot(task.price_snapshot)) {
+        if (task.status === 'failed') { await conn.rollback(); return; }
+        await releaseFreeImageQuotaForTaskTx(conn, taskId, reason);
+        await conn.execute(
+          "UPDATE ai_tasks SET status = 'failed', fail_reason = ?, provider_status = COALESCE(provider_status, 'failed'), provider_status_message = ?, next_poll_at = NULL, processing_lock_until = NULL, failed_at = NOW(3), updated_at = NOW(3) WHERE id = ?",
+          [reason.substring(0, 255), reason.substring(0, 1000), taskId],
+        );
+        await conn.execute('INSERT INTO ai_task_logs (task_id, event, message, created_at) VALUES (?, ?, ?, NOW(3))', [taskId, 'free_quota_released', 'Free quota released after task failure.']);
+        await conn.execute('INSERT INTO ai_task_logs (task_id, event, message, created_at) VALUES (?, ?, ?, NOW(3))', [taskId, 'failed', reason.substring(0, 500)]);
+        await conn.commit();
+        return;
+      }
 
       const [accRows] = await conn.execute('SELECT balance, frozen_balance, version FROM point_accounts WHERE user_id = ? FOR UPDATE', [task.user_id]) as any;
       const account = accRows?.[0];
@@ -1131,11 +1484,17 @@ async function finalizeTaskCancelled(taskId: number, userId: number): Promise<Ca
   const conn = await getConnection();
   try {
     await conn.beginTransaction();
-    const [taskRows] = await conn.execute('SELECT user_id, points_cost, points_refunded, status FROM ai_tasks WHERE id = ? AND user_id = ? FOR UPDATE', [taskId, userId]) as any;
+    const [taskRows] = await conn.execute('SELECT user_id, points_cost, points_refunded, status, price_snapshot FROM ai_tasks WHERE id = ? AND user_id = ? FOR UPDATE', [taskId, userId]) as any;
     const task = taskRows?.[0];
     if (!task?.user_id || ['completed', 'failed', 'cancelled'].includes(task.status)) { await conn.rollback(); return 'unavailable'; }
-    // 已在处理中的任务不允许取消（AI 提供商已接受请求，平台需承担成本）
-    if (task.status === 'processing') { await conn.rollback(); return 'processing'; }
+    if (isFreeImageQuotaSnapshot(task.price_snapshot)) {
+      await releaseFreeImageQuotaForTaskTx(conn, taskId, 'Task cancelled');
+      await conn.execute("UPDATE ai_tasks SET status = 'cancelled', canceled_at = NOW(3), updated_at = NOW(3) WHERE id = ?", [taskId]);
+      await conn.execute('INSERT INTO ai_task_logs (task_id, event, message, created_at) VALUES (?, ?, ?, NOW(3))', [taskId, 'free_quota_released', 'Free quota released after task cancellation.']);
+      await conn.execute('INSERT INTO ai_task_logs (task_id, event, message, created_at) VALUES (?, ?, ?, NOW(3))', [taskId, 'cancelled', '任务已取消']);
+      await conn.commit();
+      return 'cancelled';
+    }
     const [accRows] = await conn.execute('SELECT balance, frozen_balance, version FROM point_accounts WHERE user_id = ? FOR UPDATE', [task.user_id]) as any;
     const account = accRows?.[0];
     if (!account) { await conn.rollback(); return 'unavailable'; }
@@ -1166,7 +1525,6 @@ async function finalizeTaskCancelled(taskId: number, userId: number): Promise<Ca
 }
 
 export async function recoverStaleAiTasks(): Promise<{ recovered: number; failed: number }> {
-  const queuedMinutes = positiveInt(process.env.TASK_QUEUE_STALE_QUEUED_MINUTES, 30);
   const processingMinutes = positiveInt(process.env.TASK_QUEUE_STALE_PROCESSING_MINUTES, 30);
   const maxBatch = positiveInt(process.env.TASK_QUEUE_STALE_MAX_BATCH, 100);
 
@@ -1191,14 +1549,6 @@ export async function recoverStaleAiTasks(): Promise<{ recovered: number; failed
   };
 
   for (const task of queuedTasks) {
-    const queuedAt = new Date(task.queued_at || task.created_at).getTime();
-    const ageMinutes = Number.isFinite(queuedAt) ? (Date.now() - queuedAt) / 60000 : queuedMinutes + 1;
-    if (ageMinutes > queuedMinutes) {
-      await addTaskLog(task.id, 'stale_queue_timeout', 'Queued task exceeded restart recovery window.').catch(() => undefined);
-      await failTask(task, 'Queued task exceeded restart recovery window');
-      continue;
-    }
-
     try {
       const claimed = await claimQueuedTaskForRecovery(task.id);
       if (!claimed) {
@@ -1206,7 +1556,7 @@ export async function recoverStaleAiTasks(): Promise<{ recovered: number; failed
         continue;
       }
       const payload = await buildRecoveredTaskPayload(task.id);
-      const queued = enqueue(task.id, payload, processTask);
+      const queued = await enqueue(task.id, payload, processTask);
       if (!queued) {
         await releaseRecoveryLock(task.id);
         await addTaskLog(task.id, 'queue_recovery_queue_full', QUEUE_FULL_MESSAGE).catch(() => undefined);
@@ -1351,7 +1701,7 @@ async function claimQueuedTaskForRecovery(taskId: number): Promise<boolean> {
   const [result] = await query<any>(
     `UPDATE ai_tasks
         SET status = 'queued',
-            queued_at = COALESCE(queued_at, NOW(3)),
+            queued_at = NOW(3),
             processing_lock_until = DATE_ADD(NOW(3), INTERVAL ${RECOVERY_LOCK_MINUTES} MINUTE),
             updated_at = NOW(3)
       WHERE id = ?
@@ -1443,6 +1793,8 @@ export async function getTaskById(taskId: number, userId: number) {
     id: task.id,
     taskId: task.id,
     taskNo: task.task_no,
+    projectId: task.project_id ? Number(task.project_id) : null,
+    sourceTaskId: task.source_task_id ? Number(task.source_task_id) : null,
     title: task.title || '',
     type: task.task_type,
     subType: task.sub_type || '',
@@ -1460,6 +1812,7 @@ export async function getTaskById(taskId: number, userId: number) {
     message: buildTaskMessage(task),
     pointsCost: task.points_cost,
     pointsRefunded: task.points_refunded,
+    billingSource: priceSnapshot.billingSource || POINTS_BILLING_SOURCE,
     duration: params.durationSeconds || params.duration || null,
     ratio: params.ratio || params.sizePlan?.targetRatio || null,
     width: params.sizePlan?.targetWidth || null,
@@ -1477,7 +1830,7 @@ export async function getTaskById(taskId: number, userId: number) {
   };
 }
 
-export async function getTasksList(userId: number, options: { type?: string; status?: string; keyword?: string; page?: number; pageSize?: number; lastId?: number }) {
+export async function getTasksList(userId: number, options: { type?: string; status?: string; keyword?: string; projectId?: number; page?: number; pageSize?: number; lastId?: number }) {
   const page = Math.max(1, options.page || 1);
   const pageSize = Math.min(Math.max(options.pageSize || 20, 1), 100);
   const lastId = Number(options.lastId || 0);
@@ -1488,13 +1841,14 @@ export async function getTasksList(userId: number, options: { type?: string; sta
   if (options.type) { where += ' AND t.task_type = ?'; params.push(options.type); }
   if (options.status) { where += ' AND t.status = ?'; params.push(options.status); }
   if (options.keyword) { where += ' AND (t.title LIKE ? OR i.prompt LIKE ?)'; params.push(`%${options.keyword}%`, `%${options.keyword}%`); }
+  if (options.projectId) { where += ' AND t.project_id = ?'; params.push(options.projectId); }
   if (useCursor) { where += ' AND t.id < ?'; params.push(lastId); }
 
   const conn = await getConnection();
   try {
     const [rows] = await conn.query(
       `SELECT SQL_CALC_FOUND_ROWS
-       t.id, t.task_no, t.task_type, t.sub_type, t.title, t.status, t.progress, t.points_cost, t.points_refunded,
+       t.id, t.task_no, t.project_id, t.source_task_id, t.task_type, t.sub_type, t.title, t.status, t.progress, t.points_cost, t.points_refunded,
        t.price_snapshot, t.fail_reason, t.audit_status, t.audit_reason, t.created_at, t.completed_at,
        i.prompt, i.optimized_prompt, i.negative_prompt, i.form_data, i.params, i.edit_tool,
        o.output_index, o.output_name, o.output_type, o.title as output_title, o.subtitle as output_subtitle,
@@ -1532,7 +1886,7 @@ export async function getTasksByIds(userId: number, ids: number[]) {
   const taskIds = [...new Set(ids.map(id => Number(id)).filter(id => Number.isInteger(id) && id > 0))].slice(0, 50);
   if (!taskIds.length) return { list: [] };
   const rows = await query<any>(
-    `SELECT t.id, t.task_no, t.task_type, t.sub_type, t.title, t.status, t.progress, t.points_cost, t.points_refunded,
+    `SELECT t.id, t.task_no, t.project_id, t.source_task_id, t.task_type, t.sub_type, t.title, t.status, t.progress, t.points_cost, t.points_refunded,
        t.price_snapshot, t.fail_reason, t.audit_status, t.audit_reason, t.created_at, t.completed_at,
        i.prompt, i.optimized_prompt, i.negative_prompt, i.form_data, i.params, i.edit_tool,
        o.output_index, o.output_name, o.output_type, o.title as output_title, o.subtitle as output_subtitle,
@@ -1546,6 +1900,16 @@ export async function getTasksByIds(userId: number, ids: number[]) {
     [userId, ...taskIds],
   );
   return { list: mapTaskListRows(rows) };
+}
+
+export async function getTaskByClientRequestId(userId: number, clientRequestId: string) {
+  const normalized = normalizeClientRequestId(clientRequestId);
+  if (!normalized) return null;
+  const row = await queryOne<any>(
+    'SELECT id FROM ai_tasks WHERE user_id = ? AND client_request_id = ? LIMIT 1',
+    [userId, normalized],
+  );
+  return row?.id ? getTaskById(Number(row.id), userId) : null;
 }
 
 function mapTaskListRows(list: any[]) {
@@ -1574,6 +1938,8 @@ function mapTaskListRows(list: any[]) {
         id: t.id,
         taskId: t.id,
         taskNo: t.task_no,
+        projectId: t.project_id ? Number(t.project_id) : null,
+        sourceTaskId: t.source_task_id ? Number(t.source_task_id) : null,
         title: t.title || '',
         type: t.task_type,
         subType: t.sub_type || '',
@@ -1594,6 +1960,7 @@ function mapTaskListRows(list: any[]) {
         coverUrl: firstOutput?.thumbnail || firstOutput?.image || '',
         pointsCost: t.points_cost,
         pointsRefunded: t.points_refunded,
+        billingSource: priceSnapshot.billingSource || POINTS_BILLING_SOURCE,
         duration: taskParams.durationSeconds || taskParams.duration || null,
         ratio: taskParams.ratio || taskParams.sizePlan?.targetRatio || null,
         width: taskParams.sizePlan?.targetWidth || null,
@@ -1611,11 +1978,83 @@ function mapTaskListRows(list: any[]) {
 }
 
 export async function cancelTask(taskId: number, userId: number): Promise<boolean> {
+  const providerTask = await queryOne<any>(
+    `SELECT t.provider_task_id, p.provider_type, p.api_base_url, p.api_key
+       FROM ai_tasks t
+       LEFT JOIN ai_models m ON m.id = COALESCE(t.actual_model_id, t.model_id)
+       LEFT JOIN ai_model_providers p ON p.id = m.provider_id
+      WHERE t.id = ? AND t.user_id = ?`,
+    [taskId, userId],
+  );
   const result = await finalizeTaskCancelled(taskId, userId);
   if (result === 'processing') {
     throw Object.assign(new Error('任务正在处理中，无法取消'), { code: 4000 });
   }
+  if (result === 'cancelled') {
+    await removeQueuedTask(taskId).catch(() => false);
+    if (providerTask?.provider_task_id) {
+      const adapter = AdapterRegistry.get(providerTask.provider_type || 'openai');
+      if (adapter) {
+        const cancelledUpstream = await adapter.cancelTask(String(providerTask.provider_task_id), {
+          baseUrl: providerTask.api_base_url || '',
+          apiKey: decryptApiKey(providerTask.api_key || ''),
+          timeout: 30000,
+        }).catch(() => false);
+        await addTaskLog(taskId, cancelledUpstream ? 'provider_cancelled' : 'provider_cancel_unavailable', cancelledUpstream ? '供应商任务已取消' : '供应商不支持取消或取消请求失败').catch(() => undefined);
+      }
+    }
+  }
   return result === 'cancelled';
+}
+
+export async function retryTask(taskId: number, userId: number, clientRequestId?: string) {
+  const task = await queryOne<any>('SELECT * FROM ai_tasks WHERE id = ? AND user_id = ?', [taskId, userId]);
+  if (!task) throw Object.assign(new Error('任务不存在'), { code: 404 });
+  if (['pending', 'queued', 'processing'].includes(task.status)) {
+    throw paramError('任务仍在运行，无需重新生成');
+  }
+  const input = await queryOne<any>('SELECT * FROM ai_task_inputs WHERE task_id = ?', [taskId]);
+  if (!input) throw Object.assign(new Error('原任务输入不存在'), { code: 404 });
+  const priceSnapshot = parseJson(task.price_snapshot, {});
+  const params = parseJson(input.params, {});
+  const formData = parseJson(input.form_data, {});
+  const common = {
+    userId,
+    projectId: Number(task.project_id || 0) || undefined,
+    clientRequestId,
+    sourceTaskId: taskId,
+    prompt: String(input.prompt || ''),
+    optimizedPrompt: String(input.optimized_prompt || ''),
+    negativePrompt: String(input.negative_prompt || ''),
+    featureKey: priceSnapshot.featureKey,
+    tierKey: priceSnapshot.tierKey,
+    tierId: priceSnapshot.tierId,
+    formData,
+    params,
+  };
+  if (task.task_type === 'image') {
+    return createImageTask({
+      ...common,
+      subType: task.sub_type || 'text2img',
+      editTool: input.edit_tool || undefined,
+      uploadKeys: params.uploadKeys || [],
+      referenceKeys: [],
+      billingSource: 'points',
+    });
+  }
+  if (task.task_type === 'video') {
+    return createVideoTask({
+      ...common,
+      videoMode: task.sub_type || params.videoMode || 'text_to_video',
+      uploadKeys: params.uploadKeys || [],
+      inputAssets: params.inputAssets || [],
+      duration: params.durationSeconds || params.duration,
+      ratio: params.ratio,
+      audioMode: params.audioMode,
+      preserveAudio: params.preserveAudio,
+    });
+  }
+  throw paramError('该任务类型暂不支持重新生成');
 }
 
 export async function createMangaTask(_input: any) {
@@ -1648,6 +2087,13 @@ function generateTaskNo(): string {
   const date = now.toISOString().split('T')[0].replace(/-/g, '');
   const time = now.toTimeString().split(' ')[0].replace(/:/g, '');
   return `TASK${date}${time}${Math.floor(Math.random() * 9000) + 1000}`;
+}
+
+function normalizeClientRequestId(value: unknown): string | null {
+  const id = String(value || '').trim();
+  if (!id) return null;
+  if (id.length > 80 || !/^[A-Za-z0-9._:-]+$/.test(id)) throw paramError('Idempotency-Key 格式不正确');
+  return id;
 }
 
 function sleep(ms: number) {
@@ -1881,12 +2327,16 @@ async function resolveSingleImageReference(userId: number, item: any): Promise<{
 }
 
 function assertPublicHttpReferenceUrl(url: string): void {
+  assertPublicHttpMediaUrl(url, '参考图');
+}
+
+function assertPublicHttpMediaUrl(url: string, label: string): void {
   const text = String(url || '').trim();
   if (text.startsWith('data:')) {
-    throw paramError('图生图参考图必须是公网可访问的 http/https URL，当前模型不支持 base64/data URL。请先上传图片并使用返回的公网地址。');
+    throw paramError(`${label}必须是公网可访问的 http/https URL，当前模型不支持 base64/data URL。请先上传文件并使用返回的公网地址。`);
   }
   if (!/^https?:\/\//i.test(text)) {
-    throw paramError('参考图 URL 必须以 http 或 https 开头');
+    throw paramError(`${label} URL 必须以 http 或 https 开头`);
   }
   try {
     const parsed = new URL(text);
@@ -1900,11 +2350,11 @@ function assertPublicHttpReferenceUrl(url: string): void {
       || /^192\.168\./.test(host)
       || /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
     ) {
-      throw paramError('参考图必须是第三方模型可访问的公网 URL，不能使用 localhost、内网地址或本地文件地址。');
+      throw paramError(`${label}必须是第三方模型可访问的公网 URL，不能使用 localhost、内网地址或本地文件地址。`);
     }
   } catch (err: any) {
     if (err?.code) throw err;
-    throw paramError('参考图 URL 格式不正确');
+    throw paramError(`${label} URL 格式不正确`);
   }
 }
 
@@ -2155,15 +2605,57 @@ async function resolveVideoReferenceImages(
   return { urls, metadata, warnings };
 }
 
+async function resolveVideoInputAssetReferences(
+  userId: number,
+  splitAssets: {
+    imageRefs: VideoInputAssetRef[];
+    videoRefs: VideoInputAssetRef[];
+    audioRefs: VideoInputAssetRef[];
+  },
+): Promise<{ imageUrls: string[]; videoUrls: string[]; audioUrls: string[]; metadata: any[] }> {
+  const [imageResults, videoResults, audioResults] = await Promise.all([
+    Promise.all(splitAssets.imageRefs.map((item) => resolveSingleImageReference(userId, videoAssetToReferenceValue(item)))),
+    Promise.all(splitAssets.videoRefs.map((item) => resolveSingleVideoReference(userId, videoAssetToReferenceValue(item)))),
+    Promise.all(splitAssets.audioRefs.map((item) => resolveSingleAudioReference(userId, videoAssetToReferenceValue(item)))),
+  ]);
+  const metadata: any[] = [];
+  const imageUrls: string[] = [];
+  const videoUrls: string[] = [];
+  const audioUrls: string[] = [];
+  for (const item of imageResults) {
+    if (!item?.url) continue;
+    imageUrls.push(item.url);
+    metadata.push({ ...item.metadata, role: 'reference_image' });
+  }
+  for (const item of videoResults) {
+    if (!item?.url) continue;
+    videoUrls.push(item.url);
+    metadata.push({ ...item.metadata, role: 'reference_video' });
+  }
+  for (const item of audioResults) {
+    if (!item?.url) continue;
+    audioUrls.push(item.url);
+    metadata.push({ ...item.metadata, role: 'reference_audio' });
+  }
+  return {
+    imageUrls: uniqueStrings(imageUrls),
+    videoUrls: uniqueStrings(videoUrls),
+    audioUrls: uniqueStrings(audioUrls),
+    metadata,
+  };
+}
+
 async function resolveSingleVideoReference(userId: number, item: any): Promise<{ url: string; metadata: any } | null> {
   if (typeof item === 'string' && /^https?:\/\//i.test(item.trim())) {
     const url = item.trim();
+    assertPublicHttpMediaUrl(url, '视频');
     return { url, metadata: { role: 'source_video', url } };
   }
   const fileLookup = extractFileReferenceLookup(item);
   if (!fileLookup) return null;
   const file = await loadFileByReference(fileLookup, userId, 'video/', '视频文件');
   const url = file.cdn_url || file.access_url || storageKeyToUrl(file.storage_key);
+  assertPublicHttpMediaUrl(url, '视频');
   return {
     url,
     metadata: {
@@ -2176,6 +2668,75 @@ async function resolveSingleVideoReference(userId: number, item: any): Promise<{
       height: file.height,
     },
   };
+}
+
+async function resolveSingleAudioReference(userId: number, item: any): Promise<{ url: string; metadata: any } | null> {
+  if (typeof item === 'string' && /^https?:\/\//i.test(item.trim())) {
+    const url = item.trim();
+    assertPublicHttpMediaUrl(url, '音频');
+    return { url, metadata: { role: 'reference_audio', url } };
+  }
+  const fileLookup = extractFileReferenceLookup(item);
+  if (!fileLookup) return null;
+  const file = await loadFileByReference(fileLookup, userId, 'audio/', '音频文件');
+  const url = file.cdn_url || file.access_url || storageKeyToUrl(file.storage_key);
+  if (!url) throw paramError('音频文件缺少可访问地址');
+  assertPublicHttpMediaUrl(url, '音频');
+  return {
+    url,
+    metadata: {
+      role: 'reference_audio',
+      fileId: file.id,
+      fileNo: file.file_no,
+      storageKey: file.storage_key,
+      url,
+    },
+  };
+}
+
+function videoAssetToReferenceValue(asset: VideoInputAssetRef): any {
+  if (asset.url) return asset.url;
+  if (asset.fileId) return asset.fileId;
+  if (asset.fileNo) return asset.fileNo;
+  if (asset.storageKey) return asset.storageKey;
+  if (asset.uploadKey) return asset.uploadKey;
+  return asset;
+}
+
+function countVideoReferences(params: Record<string, any>, assetRefs: any[]): number {
+  return uniqueStrings([
+    ...stringList(params.videoUrls || params.video_urls),
+    ...stringList(params.videoUrl || params.video_url || params.referenceVideo || params.referenceVideoUrl),
+    ...assetRefs.map((item) => referenceFingerprint(item)),
+  ]).length;
+}
+
+function countAudioReferences(params: Record<string, any>, assetRefs: any[]): number {
+  return uniqueStrings([
+    ...stringList(params.audioUrls || params.audio_urls),
+    ...stringList(params.audioUrl || params.audio_url || params.audioFileId || params.audio_file_id),
+    ...assetRefs.map((item) => referenceFingerprint(item)),
+  ]).length;
+}
+
+function stringList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((item) => referenceFingerprint(item)).filter(Boolean);
+  const text = referenceFingerprint(value);
+  return text ? [text] : [];
+}
+
+function referenceFingerprint(value: unknown): string {
+  if (value === undefined || value === null || value === '') return '';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value).trim();
+  if (typeof value !== 'object') return '';
+  const item = value as Record<string, any>;
+  return String(
+    item.url || item.fileNo || item.file_no || item.fileId || item.file_id || item.id || item.storageKey || item.storage_key || item.key || '',
+  ).trim();
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return values.filter((item, index) => Boolean(item) && values.indexOf(item) === index);
 }
 
 async function loadUsableImageFile(fileId: number, userId: number): Promise<any> {

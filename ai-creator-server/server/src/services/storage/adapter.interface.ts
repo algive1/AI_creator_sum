@@ -9,6 +9,10 @@ export interface UploadResult {
   etag?: string;
 }
 
+export interface UploadOptions {
+  publicRead?: boolean;
+}
+
 export interface CredentialOptions {
   storageKey: string;
   contentType: string;
@@ -29,7 +33,7 @@ export interface IStorageAdapter {
   readonly provider: string;
 
   /** 后端中转上传 (Buffer) */
-  upload(key: string, body: Buffer, contentType: string): Promise<UploadResult>;
+  upload(key: string, body: Buffer, contentType: string, options?: UploadOptions): Promise<UploadResult>;
 
   /** 后端中转上传 (Stream, 大文件) */
   uploadLarge(
@@ -37,10 +41,13 @@ export interface IStorageAdapter {
     stream: NodeJS.ReadableStream,
     contentType: string,
     size: number,
+    options?: UploadOptions,
   ): Promise<UploadResult>;
 
   /** 删除对象存储中的文件 */
   delete(key: string): Promise<void>;
+
+  setVisibility?(key: string, visibility: FileVisibility): Promise<void>;
 
   /** 获取原始访问地址 */
   getAccessUrl(key: string): string;
@@ -57,6 +64,7 @@ export type FileCategory =
   | 'avatar'
   | 'ref_image'
   | 'ref_video'
+  | 'ref_audio'
   | 'template_cover'
   | 'ai_output'
   | 'ai_video'

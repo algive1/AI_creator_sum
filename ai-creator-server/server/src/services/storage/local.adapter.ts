@@ -3,7 +3,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import { IStorageAdapter, UploadResult, CredentialOptions, CredentialResult } from "./adapter.interface";
+import { IStorageAdapter, UploadResult, CredentialOptions, CredentialResult, UploadOptions } from "./adapter.interface";
 import { buildLocalFileUrl, ensureLocalUploadDir, resolveLocalFilePath } from "./local-paths";
 
 function ensureDir(dir: string): void {
@@ -15,7 +15,7 @@ function ensureDir(dir: string): void {
 export class LocalAdapter implements IStorageAdapter {
   readonly provider = "local";
 
-  async upload(key: string, body: Buffer, _contentType: string): Promise<UploadResult> {
+  async upload(key: string, body: Buffer, _contentType: string, _options?: UploadOptions): Promise<UploadResult> {
     ensureLocalUploadDir();
     const filePath = resolveLocalFilePath(key);
     ensureDir(path.dirname(filePath));
@@ -29,6 +29,7 @@ export class LocalAdapter implements IStorageAdapter {
     stream: NodeJS.ReadableStream,
     _contentType: string,
     _size: number,
+    _options?: UploadOptions,
   ): Promise<UploadResult> {
     ensureLocalUploadDir();
     const filePath = resolveLocalFilePath(key);

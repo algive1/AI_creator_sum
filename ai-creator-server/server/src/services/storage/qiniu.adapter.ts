@@ -2,8 +2,8 @@
 // 七牛云 Kodo 存储适配器
 
 import * as crypto from 'crypto';
-import { IStorageAdapter, UploadResult, CredentialOptions, CredentialResult } from './adapter.interface';
-import { streamToBuffer } from './stream-helpers';
+import { PassThrough } from 'stream';
+import { IStorageAdapter, UploadResult, CredentialOptions, CredentialResult, UploadOptions } from './adapter.interface';
 
 interface QiniuConfig {
   accessKey: string;
@@ -44,6 +44,10 @@ function btoaSafe(str: string): string {
     .replace(/\//g, '_');
 }
 
+function multipartHeaderValue(value: string): string {
+  return String(value || '').replace(/[\r\n"]/g, '_');
+}
+
 // 七牛云管理 API 签名 (用于 delete 等)
 function qiniuMacToken(cfg: QiniuConfig, method: string, path: string, body: string = ''): string {
   const signingStr = `${method} ${path}\nHost: rs.qiniuapi.com\nContent-Type: application/json\n\n${body}`;
@@ -79,7 +83,7 @@ export class QiniuAdapter implements IStorageAdapter {
     return `${cfg.accessKey}:${sign}:${encodedPutPolicy}`;
   }
 
-  async upload(key: string, body: Buffer, contentType: string): Promise<UploadResult> {
+  async upload(key: string, body: Buffer, contentType: string, _options?: UploadOptions): Promise<UploadResult> {
     const cfg = this.cfg;
     const uploadToken = this.generateUploadToken(key);
     const form = new FormData();
@@ -102,9 +106,46 @@ export class QiniuAdapter implements IStorageAdapter {
     };
   }
 
-  async uploadLarge(key: string, stream: NodeJS.ReadableStream, contentType: string, _size: number): Promise<UploadResult> {
-    const buffer = await streamToBuffer(stream, contentType);
-    return this.upload(key, buffer, contentType);
+  async uploadLarge(key: string, stream: NodeJS.ReadableStream, contentType: string, size: number, _options?: UploadOptions): Promise<UploadResult> {
+    const cfg = this.cfg;
+    const uploadToken = this.generateUploadToken(key);
+    const boundary = `----ai-creator-${crypto.randomBytes(12).toString('hex')}`;
+    const filename = multipartHeaderValue(key.split('/').pop() || 'file');
+    const prelude = Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="token"\r\n\r\n${uploadToken}\r\n` +
+      `--${boundary}\r\nContent-Disposition: form-data; name="key"\r\n\r\n${key}\r\n` +
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${contentType || 'application/octet-stream'}\r\n\r\n`,
+    );
+    const epilogue = Buffer.from(`\r\n--${boundary}--\r\n`);
+    const body = new PassThrough();
+    const respPromise = fetch(this.getUploadHost(), {
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        ...(size > 0 ? { 'Content-Length': String(prelude.length + size + epilogue.length) } : {}),
+      },
+      body: body as any,
+      duplex: 'half',
+    } as any);
+
+    body.write(prelude);
+    stream.once('error', err => body.destroy(err));
+    stream.once('end', () => body.end(epilogue));
+    stream.pipe(body, { end: false });
+
+    const resp = await respPromise;
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Qiniu upload failed: ${resp.status} ${text}`);
+    }
+
+    const result = await resp.json() as any;
+    const cdnHost = cfg.cdnDomain || `https://${cfg.bucket}.qiniucdn.com`;
+    return {
+      url: `${cdnHost}/${key}`,
+      cdnUrl: `${cdnHost.replace(/\/$/, '')}/${key}`,
+      etag: result.etag || result.hash || '',
+    };
   }
 
   async delete(key: string): Promise<void> {

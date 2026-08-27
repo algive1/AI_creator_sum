@@ -226,7 +226,7 @@ const REQUIRED_COLUMNS: Record<string, string[]> = {
   ],
   files: ['metadata_sanitized', 'ai_implicit_label_kept', 'platform_watermark_removed'],
   point_accounts: ['total_refunded'],
-  signin_records: ['normal_signed_at', 'super_signed_at', 'super_streak_day', 'super_reward_points', 'normal_is_makeup'],
+  signin_records: ['normal_signed_at', 'super_signed_at', 'super_streak_day', 'super_reward_points', 'normal_is_makeup', 'updated_at'],
   ad_reward_logs: ['ad_scene', 'expires_at', 'claimed_at'],
   templates: [
     'title',

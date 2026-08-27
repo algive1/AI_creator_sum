@@ -1,9 +1,11 @@
 import { Router, Request, Response } from 'express';
 import { adminAuthMiddleware } from '../middleware/auth';
-import { query } from '../utils/db';
+import { query, queryOne } from '../utils/db';
 import { success, error } from '../utils/response';
 import { parseJson } from '../utils/content-helpers';
 import { ErrorCodes } from '../types';
+import { createTemplateReviewNotification } from '../services/template-notification.service';
+import { clearSystemPromptCache } from '../services/system-prompt.service';
 
 const router = Router();
 
@@ -175,6 +177,7 @@ router.post('/system-prompts', adminAuthMiddleware, async (req: Request, res: Re
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(3), NOW(3))`,
       [promptKey, promptName, promptType || 'system', targetFeature, content, enabled === false ? 0 : 1, version || 'v1', remark || ''],
     );
+    clearSystemPromptCache(targetFeature);
     success(res, { created: true });
   } catch (err: any) {
     error(res, ErrorCodes.SERVER_ERROR, `创建提示词失败: ${err.message || ''}`.trim());
@@ -191,6 +194,7 @@ router.put('/system-prompts/:id(\\d+)', adminAuthMiddleware, async (req: Request
         WHERE id = ?`,
       [promptKey, promptName, promptType || 'system', targetFeature, content, enabled === false ? 0 : 1, version || 'v1', remark || '', Number(req.params.id)],
     );
+    clearSystemPromptCache(targetFeature);
     success(res, { updated: true });
   } catch {
     error(res, ErrorCodes.SERVER_ERROR, '更新提示词失败');
@@ -234,7 +238,7 @@ router.get('/template-reviews', adminAuthMiddleware, async (_req: Request, res: 
     const rows = await query<any>(
       `SELECT * FROM templates
         WHERE source = 'user' AND deleted_at IS NULL
-        ORDER BY FIELD(review_status, 'pending', 'rejected', 'approved'), updated_at DESC, id DESC
+        ORDER BY created_at DESC, id DESC
         LIMIT 200`,
     );
     success(res, { list: rows.map(toTemplate) });
@@ -245,12 +249,23 @@ router.get('/template-reviews', adminAuthMiddleware, async (_req: Request, res: 
 
 router.post('/templates/:id(\\d+)/approve', adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
+    const template = await queryOne<any>(
+      'SELECT id, user_id, source, title FROM templates WHERE id = ? AND deleted_at IS NULL',
+      [Number(req.params.id)],
+    );
     await query(
       `UPDATE templates
           SET status = 'approved', review_status = 'approved', review_reason = '', reviewed_by = ?, reviewed_at = NOW(3), is_enabled = 1, updated_at = NOW(3)
         WHERE id = ?`,
       [req.user!.userId, Number(req.params.id)],
     );
+    if (template?.source === 'user' && Number(template.user_id || 0) > 0) {
+      await createTemplateReviewNotification({
+        userId: Number(template.user_id || 0),
+        templateId: Number(template.id || 0),
+        reviewStatus: 'approved',
+      });
+    }
     await logTemplateReview(Number(req.params.id), 'approve', '', req.user!.userId);
     success(res, { approved: true });
   } catch {

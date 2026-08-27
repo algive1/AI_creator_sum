@@ -61,6 +61,18 @@ export function resolveImageSize(input: ResolveImageSizeInput): ImageSizePlan {
       conflictType = 'custom_overrides_other_size';
       warnings.push('已优先使用手动填写的宽高，提示词或页面选择的比例仅作为参考。');
     }
+  } else if (uiRatio) {
+    source = 'ui_ratio';
+    [width, height] = sizeFromRatio(uiRatio);
+    if (promptPixels && ratioFromSize(promptPixels.width, promptPixels.height) !== uiRatio) {
+      conflict = true;
+      conflictType = 'ui_ratio_overrides_prompt_pixel';
+      warnings.push('页面选择的比例和提示词中的像素尺寸不一致，已优先按页面比例生成。');
+    } else if (promptRatio && promptRatio !== uiRatio) {
+      conflict = true;
+      conflictType = 'ui_ratio_overrides_prompt_ratio';
+      warnings.push(`页面选择的比例和提示词中的 ${promptRatio} 不一致，已优先按页面比例生成。`);
+    }
   } else if (promptPixels) {
     source = 'prompt_pixel';
     width = promptPixels.width;
@@ -79,9 +91,6 @@ export function resolveImageSize(input: ResolveImageSizeInput): ImageSizePlan {
       conflictType = 'prompt_ratio_overrides_ui_ratio';
       warnings.push(`检测到提示词指定 ${promptRatio}，已优先按提示词比例处理。`);
     }
-  } else if (uiRatio) {
-    source = 'ui_ratio';
-    [width, height] = sizeFromRatio(uiRatio);
   } else {
     source = 'default';
     [width, height] = sizeFromRatio(defaultRatio);

@@ -7,6 +7,7 @@ import {
   queryAndSyncWechatOrder,
   startWechatJsapiPayment,
 } from '../services/payment-order.service';
+import { ensurePurchaseEnabled } from '../services/commerce-availability.service';
 
 const router = Router();
 
@@ -17,6 +18,7 @@ router.post('/wechat/jsapi', authMiddleware, async (req: Request, res: Response)
       error(res, ErrorCodes.PARAM_ERROR, '缺少订单号');
       return;
     }
+    await ensurePurchaseEnabled();
     const result = await startWechatJsapiPayment(orderNo, req.user!.userId);
     success(res, result);
   } catch (err: any) {

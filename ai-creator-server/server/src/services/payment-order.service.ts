@@ -15,6 +15,7 @@ import { grantDueMembershipMonthlyPointsTx } from './membership-points.service';
 import { grantInviteMemberPurchaseReward } from './invite.service';
 import { normalizePublicIconUrl } from './member-benefit-icons.service';
 import { ErrorCodes } from '../types';
+import { ensurePurchaseEnabled } from './commerce-availability.service';
 
 export type OrderType = 'points' | 'membership';
 export type FirstPurchaseBonusType = 'none' | 'double' | 'fixed';
@@ -543,6 +544,7 @@ export async function listMemberPlans() {
 }
 
 export async function createOrder(input: CreateOrderInput) {
+  await ensurePurchaseEnabled();
   const orderType = input.orderType === 'points' ? 'points' : 'membership';
   const orderNo = generateOrderNo();
   const timeoutMinutes = await getOrderTimeoutMinutes();

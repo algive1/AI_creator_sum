@@ -176,8 +176,60 @@ export class SettingsService {
   }
 
   static async setGroup(group: string, values: Record<string, string>, isSecret: boolean, adminUserId: number): Promise<void> {
-    for (const [key, value] of Object.entries(values)) {
-      await this.set(key, value, group, adminUserId, { isSecret });
+    const entries = Object.entries(values);
+    if (entries.length === 0) return;
+
+    const conn = await getConnection();
+    const changedKeys: string[] = [];
+    try {
+      await conn.beginTransaction();
+
+      for (const [key, value] of entries) {
+        const [existingRows] = await conn.execute(
+          'SELECT config_value, is_secret, masked_value FROM system_configs WHERE config_key = ?',
+          [key],
+        ) as any;
+        const existing = Array.isArray(existingRows) ? existingRows[0] : null;
+        const secretFlag = existing?.is_secret || isSecret ? 1 : 0;
+        let oldMasked = '';
+        let storeValue = value;
+
+        if (secretFlag) {
+          if (!value || value.trim() === '') continue;
+          storeValue = encryptApiKey(value);
+          const newMasked = this.maskValue(value, key);
+          oldMasked = existing?.masked_value || (existing?.config_value ? '****' : '');
+          await conn.execute(
+            `INSERT INTO system_configs (config_key, config_value, value_type, config_group, is_secret, masked_value, updated_by, created_at, updated_at)
+             VALUES (?, ?, 'string', ?, 1, ?, ?, NOW(3), NOW(3))
+             ON DUPLICATE KEY UPDATE config_value = ?, config_group = ?, is_secret = 1, masked_value = ?, updated_by = ?, updated_at = NOW(3)`,
+            [key, storeValue, group, newMasked, adminUserId, storeValue, group, newMasked, adminUserId],
+          );
+        } else {
+          oldMasked = existing?.config_value || '';
+          await conn.execute(
+            `INSERT INTO system_configs (config_key, config_value, value_type, config_group, is_secret, updated_by, created_at, updated_at)
+             VALUES (?, ?, 'string', ?, 0, ?, NOW(3), NOW(3))
+             ON DUPLICATE KEY UPDATE config_value = ?, config_group = ?, updated_by = ?, updated_at = NOW(3)`,
+            [key, storeValue, group, adminUserId, storeValue, group, adminUserId],
+          );
+        }
+
+        await conn.execute(
+          `INSERT INTO config_change_logs (admin_user_id, config_group, config_key, action, old_value_masked, new_value_masked, created_at)
+           VALUES (?, ?, ?, 'update', ?, ?, NOW(3))`,
+          [adminUserId, group, key, oldMasked.substring(0, 127), secretFlag ? this.maskValue(value, key) : value.substring(0, 127)],
+        );
+        changedKeys.push(key);
+      }
+
+      await conn.commit();
+      for (const key of changedKeys) this.invalidateCacheKeyAndAliases(key);
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
     }
   }
 

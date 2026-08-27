@@ -1,7 +1,9 @@
+import bcrypt from 'bcryptjs';
 import { getConnection, queryOne, query } from '../utils/db';
 import { ensureUserInviteCodeTx } from './invite.service';
 import { normalizePublicIconUrl } from './member-benefit-icons.service';
 import { SettingsService } from './settings.service';
+import { ErrorCodes } from '../types';
 
 const defaultPreferences = {
   defaultRatio: '1:1',
@@ -10,6 +12,7 @@ const defaultPreferences = {
   systemPrompt: '',
   imagePlatformWatermarkEnabled: true,
   imagePlatformWatermarkOffConfirmed: false,
+  themeSource: 'system',
 };
 
 const DISPLAY_ID_MOD = 100000000;
@@ -38,6 +41,143 @@ async function getRegisterBonusPoints() {
   const value = Number.parseInt(raw, 10);
   if (!Number.isFinite(value) || value < 0) return 50;
   return Math.min(value, 1000000);
+}
+
+function normalizeEmail(value: string): string {
+  return String(value || '').trim().toLowerCase();
+}
+
+function normalizeNickname(value: string | undefined, email: string): string {
+  const raw = String(value || '').trim();
+  if (raw) return raw.slice(0, 64);
+  return email.split('@')[0].slice(0, 32) || 'AI Creator';
+}
+
+async function buildUserAuthPayload(user: any, isNewUser: boolean) {
+  const [points] = await query<any>(
+    'SELECT balance, total_earned, total_spent, frozen_balance FROM point_accounts WHERE user_id = ?',
+    [user.id],
+  );
+
+  const [profile] = await query<any>(
+    'SELECT invite_code, invited_by_user_id, preferences FROM user_profiles WHERE user_id = ?',
+    [user.id],
+  );
+
+  return {
+    user: {
+      id: user.id,
+      displayId: formatUserDisplayId(user.id),
+      email: user.email || '',
+      nickname: user.nickname,
+      avatarUrl: user.avatar_url,
+      accountType: user.account_type,
+      status: user.status,
+      isNewUser,
+      inviteCode: profile?.invite_code || '',
+      invitedByUserId: profile?.invited_by_user_id || null,
+      preferences: parsePreferences(profile?.preferences),
+      createdAt: user.created_at,
+    },
+    points: points ? {
+      balance: points.balance,
+      totalEarned: points.total_earned,
+      totalSpent: points.total_spent,
+      frozenBalance: points.frozen_balance,
+    } : { balance: 0, totalEarned: 0, totalSpent: 0, frozenBalance: 0 },
+    membership: {
+      level: 'free',
+      expireAt: null,
+    },
+  };
+}
+
+export async function findOrCreateUserByEmail(params: { email: string; password: string; nickname?: string }) {
+  const email = normalizeEmail(params.email);
+  const nickname = normalizeNickname(params.nickname, email);
+  const passwordHash = await bcrypt.hash(String(params.password || ''), 12);
+  const conn = await getConnection();
+
+  try {
+    await conn.beginTransaction();
+
+    const [existingRows] = await conn.execute(
+      'SELECT id FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1',
+      [email],
+    ) as any;
+    if (existingRows?.[0]) {
+      throw Object.assign(new Error('该邮箱已注册'), { code: ErrorCodes.PARAM_ERROR });
+    }
+
+    const [result] = await conn.execute(
+      `INSERT INTO users (email, password_hash, nickname, avatar_url, account_type, status, last_login_at, created_at, updated_at)
+       VALUES (?, ?, ?, '', 'email', 'normal', NOW(3), NOW(3), NOW(3))`,
+      [email, passwordHash, nickname],
+    ) as any;
+    const userId = Number((result as any).insertId || 0);
+
+    await ensureUserInviteCodeTx(conn, userId);
+    await conn.execute(
+      'UPDATE user_profiles SET preferences = ?, updated_at = NOW(3) WHERE user_id = ?',
+      [JSON.stringify(defaultPreferences), userId],
+    );
+
+    const registerBonus = await getRegisterBonusPoints();
+    await conn.execute(
+      `INSERT INTO point_accounts (user_id, balance, total_earned, total_spent, total_refunded, frozen_balance, version, created_at, updated_at)
+       VALUES (?, ?, ?, 0, 0, 0, 1, NOW(3), NOW(3))`,
+      [userId, registerBonus, registerBonus],
+    );
+
+    await conn.execute(
+      `INSERT INTO point_logs (user_id, type, amount, balance_before, balance_after, source, ref_type, ref_id, title, created_at)
+       VALUES (?, 'earn', ?, 0, ?, 'register', 'user', ?, 'New user bonus', NOW(3))`,
+      [userId, registerBonus, registerBonus, userId.toString()],
+    );
+
+    await conn.execute(
+      `INSERT INTO user_assets (user_id, points_balance, total_points_earned, membership_level, created_at, updated_at)
+       VALUES (?, ?, ?, 'free', NOW(3), NOW(3))`,
+      [userId, registerBonus, registerBonus],
+    );
+
+    const [createdRows] = await conn.execute('SELECT * FROM users WHERE id = ?', [userId]) as any;
+    await conn.commit();
+    return buildUserAuthPayload(createdRows?.[0], true);
+  } catch (error) {
+    await conn.rollback();
+    if (isDuplicateEmailError(error)) {
+      throw Object.assign(new Error('该邮箱已注册'), { code: ErrorCodes.PARAM_ERROR });
+    }
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
+export async function loginUserByEmail(emailValue: string, password: string) {
+  const email = normalizeEmail(emailValue);
+  const user = await queryOne<any>(
+    'SELECT * FROM users WHERE email = ? AND deleted_at IS NULL LIMIT 1',
+    [email],
+  );
+
+  if (!user?.password_hash) {
+    throw Object.assign(new Error('邮箱或密码不正确'), { code: ErrorCodes.PARAM_ERROR });
+  }
+  if (user.status !== 'normal') {
+    throw Object.assign(new Error('账号状态异常，请联系客服'), { code: ErrorCodes.ACCOUNT_BANNED });
+  }
+
+  const passwordMatches = await bcrypt.compare(String(password || ''), user.password_hash);
+  if (!passwordMatches) {
+    throw Object.assign(new Error('邮箱或密码不正确'), { code: ErrorCodes.PARAM_ERROR });
+  }
+
+  await query('UPDATE users SET last_login_at = NOW(3), updated_at = NOW(3) WHERE id = ?', [user.id]);
+  await ensureUserInviteCodeTxWithNewConnection(user.id);
+  const freshUser = await queryOne<any>('SELECT * FROM users WHERE id = ?', [user.id]);
+  return buildUserAuthPayload(freshUser || user, false);
 }
 
 export async function findOrCreateUserByOpenid(openid: string, unionid?: string) {
@@ -216,6 +356,12 @@ function isDuplicateOpenidError(error: any): boolean {
   if (error?.code !== 'ER_DUP_ENTRY' && error?.errno !== 1062) return false;
   const message = String(error?.message || '');
   return message.includes('uk_openid') || message.includes('openid');
+}
+
+function isDuplicateEmailError(error: any): boolean {
+  if (error?.code !== 'ER_DUP_ENTRY' && Number(error?.errno || 0) !== 1062) return false;
+  const message = String(error?.message || '');
+  return message.includes('uk_email') || message.includes('email');
 }
 
 export async function getUserById(userId: number) {

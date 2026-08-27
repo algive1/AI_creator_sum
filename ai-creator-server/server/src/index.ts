@@ -16,11 +16,15 @@ import checkinRoutes from './routes/checkin';
 import pointTaskRoutes from './routes/point-tasks';
 import adsRoutes from './routes/ads';
 import inviteRoutes from './routes/invite';
+import freeImageQuotaRoutes from './routes/free-image-quota';
 import taskRoutes from './routes/tasks';
+import projectRoutes from './routes/projects';
+import assetRoutes from './routes/assets';
 import appHomeRoutes from './routes/app-home';
 import legalRoutes from './routes/legal';
 import announcementRoutes from './routes/announcements';
 import complianceRoutes from './routes/compliance';
+import notificationRoutes from './routes/notifications';
 import publicConfigRoutes from './routes/public-config';
 import templateRoutes from './routes/content-templates';
 import membershipRoutes from './routes/membership';
@@ -41,15 +45,20 @@ import adminPaymentRoutes from './routes/admin-payments';
 import adminConfigCheckRoutes from './routes/admin-config-check';
 import adminBackupRoutes from './routes/admin-backup';
 import adminFileRoutes from './routes/admin-files';
+import adminToolsRoutes from './routes/admin-tools';
 import filesRoutes from './routes/files';
+import toolsRoutes from './routes/tools';
 import { preloadStorageConfigs } from './services/storage/storage-config-loader';
 import { ensureLocalUploadDir, getLocalStaticMountPath } from './services/storage/local-paths';
 import { recoverStaleAiTasks } from './services/task.service';
+import { closeTaskQueue } from './services/task-queue.service';
 import { startVideoPollingScheduler } from './services/video-polling.service';
 import { processExpiredMemberships } from './services/membership.service';
 import { processMembershipMonthlyPointGrants } from './services/membership-points.service';
 import { recoverPendingGrants } from './services/payment-order.service';
 import { recoverOrphanedTextCharges } from './services/ai-feature.service';
+import { recoverStaleFreeImageQuotaReservations } from './services/free-image-quota.service';
+import { cleanupExpiredMediaAssets } from './services/media-asset.service';
 import { buildMemberBenefitIconSvg } from './services/member-benefit-icons.service';
 import { runDailyBackup, shouldRunDailyBackupNow } from './services/backup.service';
 import { cleanupExpiredAdSessions } from './services/ads.service';
@@ -104,7 +113,7 @@ const corsOptionsDelegate: CorsOptionsDelegate<express.Request> = (req, callback
     || configuredCorsOrigins.includes(normalizedOrigin)
     || (config.nodeEnv === 'development' && configuredCorsOrigins.length === 0);
 
-  const options: CorsOptions = allowed ? { origin: true } : { origin: false };
+  const options: CorsOptions = allowed ? { origin: true, credentials: true } : { origin: false };
   callback(null, options);
 };
 
@@ -247,7 +256,10 @@ app.use('/api/v1/checkin', checkinRoutes);
 app.use('/api/v1/point-tasks', pointTaskRoutes);
 app.use('/api/v1/ads', adsRoutes);
 app.use('/api/v1/invite', inviteRoutes);
+app.use('/api/v1/free-image-quota', freeImageQuotaRoutes);
 app.use('/api/v1/tasks', taskUserRateLimiter, taskRoutes);
+app.use('/api/v1/projects', projectRoutes);
+app.use('/api/v1/assets', assetRoutes);
 app.use('/api/v1/app/home', cacheFor(60));
 app.use('/api/v1/app', appHomeRoutes);
 app.use('/api/v1/home', cacheFor(60));
@@ -255,12 +267,14 @@ app.use('/api/v1', appHomeRoutes);
 app.use('/api/v1/legal', legalRoutes);
 app.use('/api/v1/announcements', announcementRoutes);
 app.use('/api/v1/compliance', complianceRoutes);
-app.use('/api/v1/templates', cacheFor(300), templateRoutes);
+app.use('/api/v1/notifications', notificationRoutes);
+app.use('/api/v1/templates', templateRoutes);
 app.use('/api/v1/membership/plans', cacheFor(600, { publicWithAuth: true }));
 app.use('/api/v1/membership', membershipRoutes);
 app.use('/api/v1/shop', shopRoutes);
 app.use('/api/v1/orders', orderRoutes);
 app.use('/api/v1/payments', wechatPaymentRoutes);
+app.use('/api/v1/tools', toolsRoutes);
 app.use('/api/v1/admin', adminOperationLogMiddleware);
 app.use('/api/v1/admin', adminRoutes);
 app.use('/api/v1/admin/models', adminModelRoutes);
@@ -274,6 +288,7 @@ app.use('/api/v1/admin', adminSystemRoutes);
 app.use('/api/v1/admin', adminSystemUpdateRoutes);
 app.use('/api/v1/admin/payments', adminPaymentRoutes);
 app.use('/api/v1/admin/config-check', adminConfigCheckRoutes);
+app.use('/api/v1/admin/tools', adminToolsRoutes);
 app.use('/api/v1/admin', adminBackupRoutes);
 app.use('/api/v1/admin', adminFileRoutes);
 app.use('/api/v1/files', filesRoutes);
@@ -353,32 +368,89 @@ function mountLocalUploads(): void {
 
 mountLocalUploads();
 
-// Serve admin panel static files with update-safe cache headers.
+// Serve frontend static files with update-safe cache headers.
 const adminDist = path.resolve(__dirname, '../../admin-web/dist');
 const adminIndexPath = path.join(adminDist, 'index.html');
-const hashedAdminAssetPattern = /\/assets\/.+-[A-Za-z0-9_-]{8,}\.(?:js|css|mjs)$/;
+const userWebDist = path.resolve(__dirname, '../../user-web/dist');
+const userWebIndexPath = path.join(userWebDist, 'index.html');
+const hashedFrontendAssetPattern = /\/assets\/.+-[A-Za-z0-9_-]{8,}\.(?:js|css|mjs)$/;
+const userWebHosts = parseHostList(process.env.WEB_APP_HOSTS || 'ooa8.com,www.ooa8.com');
+
+function parseHostList(value: string): string[] {
+  return String(value || '')
+    .split(',')
+    .map(item => item.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function requestHostname(req: express.Request): string {
+  const host = String(req.get('host') || '').trim().toLowerCase();
+  if (!host) return '';
+  if (host.startsWith('[')) {
+    const closingIndex = host.indexOf(']');
+    return closingIndex > 0 ? host.slice(1, closingIndex) : host;
+  }
+  return host.split(':')[0];
+}
+
+function isUserWebHost(req: express.Request): boolean {
+  const hostname = requestHostname(req);
+  return hostname ? userWebHosts.includes(hostname) : false;
+}
+
+function setFrontendStaticHeaders(res: express.Response, filePath: string): void {
+  if (filePath.endsWith('.js')) res.setHeader('Content-Type', 'application/javascript');
+  else if (filePath.endsWith('.css')) res.setHeader('Content-Type', 'text/css');
+  else if (filePath.endsWith('.mjs')) res.setHeader('Content-Type', 'application/javascript');
+  if (path.basename(filePath) === 'index.html') {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+  } else if (hashedFrontendAssetPattern.test(filePath.replace(/\\/g, '/'))) {
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+  }
+}
+
+const adminStaticMiddleware = express.static(adminDist, {
+  setHeaders: setFrontendStaticHeaders,
+});
+const userWebStaticMiddleware = express.static(userWebDist, {
+  setHeaders: setFrontendStaticHeaders,
+});
+
+function selectFrontendDist(req: express.Request) {
+  if (isUserWebHost(req)) {
+    return {
+      name: 'user-web',
+      dist: userWebDist,
+      indexPath: userWebIndexPath,
+      staticMiddleware: userWebStaticMiddleware,
+      title: '用户网页端暂不可用',
+      missingDetail: '服务器未找到 user-web/dist/index.html，请先构建用户网页端。',
+    };
+  }
+
+  return {
+    name: 'admin-web',
+    dist: adminDist,
+    indexPath: adminIndexPath,
+    staticMiddleware: adminStaticMiddleware,
+    title: '后台暂不可用',
+    missingDetail: '服务器未找到 admin-web/dist/index.html，请先构建管理后台。',
+  };
+}
 
 app.use((req, res, next) => {
   if (!isBlockedProbeRequest(req)) return next();
   res.status(404).json({ code: 404, message: 'API not found', data: null });
 });
 
-app.use(express.static(adminDist, {
-  setHeaders: (res, filePath) => {
-    if (filePath.endsWith('.js')) res.setHeader('Content-Type', 'application/javascript');
-    else if (filePath.endsWith('.css')) res.setHeader('Content-Type', 'text/css');
-    else if (filePath.endsWith('.mjs')) res.setHeader('Content-Type', 'application/javascript');
-    if (path.basename(filePath) === 'index.html') {
-      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-      res.setHeader('Pragma', 'no-cache');
-      res.setHeader('Expires', '0');
-    } else if (hashedAdminAssetPattern.test(filePath.replace(/\\/g, '/'))) {
-      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-    }
-  }
-}));
+app.use((req, res, next) => {
+  if (req.path.startsWith('/api/') || req.path.startsWith('/health')) return next();
+  return selectFrontendDist(req).staticMiddleware(req, res, next);
+});
 
-function sendMissingAdminDistPage(res: express.Response) {
+function _sendMissingAdminDistPage(res: express.Response) {
   res
     .status(503)
     .setHeader('Cache-Control', 'no-cache, no-store, must-revalidate')
@@ -406,19 +478,48 @@ function sendMissingAdminDistPage(res: express.Response) {
 </html>`);
 }
 
+function sendMissingFrontendDistPage(res: express.Response, frontend: ReturnType<typeof selectFrontendDist>) {
+  res
+    .status(503)
+    .setHeader('Cache-Control', 'no-cache, no-store, must-revalidate')
+    .type('html')
+    .send(`<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>${frontend.title}</title>
+  <style>
+    body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f6f7f9;color:#1f2937}
+    main{max-width:680px;margin:16vh auto;padding:0 24px}
+    h1{font-size:28px;margin:0 0 12px}
+    p{font-size:16px;line-height:1.7;margin:0 0 8px}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>${frontend.title}</h1>
+    <p>${frontend.missingDetail}</p>
+    <p>请重新执行前端构建或安装完整发布包后再访问。</p>
+  </main>
+</body>
+</html>`);
+}
+
 // SPA fallback: only for non-file requests (no extension in path)
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api/') || req.path.startsWith('/health')) return next();
   // Skip static file requests (has file extension)
   if (/(\.[a-z0-9]{1,8})$/i.test(req.path)) return next();
-  if (!fs.existsSync(adminIndexPath)) {
-    sendMissingAdminDistPage(res);
+  const frontend = selectFrontendDist(req);
+  if (!fs.existsSync(frontend.indexPath)) {
+    sendMissingFrontendDistPage(res, frontend);
     return;
   }
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
-  res.sendFile(adminIndexPath);
+  res.sendFile(frontend.indexPath);
 });
 
 app.use((_req, res) => {
@@ -508,6 +609,8 @@ function startInstalledRuntime(): void {
   registerCronHeartbeat('monthly-points', 10 * 60 * 1000, processMembershipMonthlyPointGrants);
   registerCronHeartbeat('daily-backup', 60 * 60 * 1000, runDailyBackup);
   registerCronHeartbeat('ad-cleanup', 60 * 60 * 1000, cleanupExpiredAdSessions);
+  registerCronHeartbeat('free-image-quota-recovery', 60 * 60 * 1000, recoverStaleFreeImageQuotaReservations);
+  registerCronHeartbeat('media-asset-cleanup', 60 * 60 * 1000, cleanupExpiredMediaAssets);
 
   hourlyRuntimeTimer = setInterval(() => {
     shouldRunDailyBackupNow().then(shouldRun => {
@@ -523,6 +626,12 @@ function startInstalledRuntime(): void {
         err => console.error('[Ads] Session cleanup failed:', err?.message || err),
       );
     }
+    wrapCronTask('free-image-quota-recovery', recoverStaleFreeImageQuotaReservations)().catch(
+      err => console.error('[FreeQuota] Reservation recovery failed:', err?.message || err),
+    );
+    wrapCronTask('media-asset-cleanup', cleanupExpiredMediaAssets)().catch(
+      err => console.error('[Assets] Expired asset cleanup failed:', err?.message || err),
+    );
   }, 60 * 60 * 1000);
   hourlyRuntimeTimer.unref?.();
 
@@ -544,6 +653,13 @@ function startInstalledRuntime(): void {
       }
     })
     .catch(err => console.error('[Startup] Stale AI task recovery failed:', err.message));
+  recoverStaleFreeImageQuotaReservations()
+    .then(result => {
+      if (result.released || result.failed) {
+        console.log(`[Startup] Free image quota reservations recovered: ${result.released}, failed: ${result.failed}`);
+      }
+    })
+    .catch(err => console.error('[Startup] Free image quota recovery failed:', err.message));
   recoverPendingGrants()
     .then(result => {
       if (result.recovered > 0 || result.failed > 0) {
@@ -590,6 +706,7 @@ function gracefulShutdown(signal: string) {
   console.log(`[Shutdown] Received ${signal}, gracefully shutting down...`);
   // 给进行中的请求 10 秒排空时间
   setTimeout(async () => {
+    try { await closeTaskQueue(); } catch (e: any) { console.error('[Shutdown] Queue close error:', e.message); }
     try { await endDbPool(); } catch (e: any) { console.error('[Shutdown] DB pool close error:', e.message); }
     console.log('[Shutdown] Done.');
     process.exit(0);

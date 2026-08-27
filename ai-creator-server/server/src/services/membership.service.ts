@@ -160,9 +160,19 @@ export async function getPlanDetail(planId: number) {
   );
   if (!plan) return null;
 
+  // Merge version rights template with plan overrides; only return enabled rights
   const rights = await query<any>(
-    'SELECT right_key, right_name, right_value, right_category, icon_url, icon_file_id FROM member_plan_rights WHERE plan_id = ? ORDER BY sort_order',
-    [planId],
+    `SELECT vr.right_key, vr.right_name,
+            COALESCE(pr.right_value, vr.right_value) AS right_value,
+            vr.hint, vr.right_category,
+            COALESCE(pr.icon_url, vr.icon_url) AS icon_url,
+            COALESCE(pr.icon_file_id, vr.icon_file_id) AS icon_file_id
+       FROM member_version_rights vr
+       LEFT JOIN member_plan_rights pr ON pr.plan_id = ? AND pr.right_key COLLATE utf8mb4_unicode_ci = vr.right_key COLLATE utf8mb4_unicode_ci
+      WHERE vr.version_id = ?
+        AND COALESCE(pr.enabled, 1) = 1
+      ORDER BY COALESCE(pr.sort_order, vr.sort_order)`,
+    [planId, plan.version_id],
   );
   const pointRules = await queryOne<any>('SELECT * FROM member_plan_point_rules WHERE plan_id = ?', [planId]);
   const featureDiscounts = await getPlanFeatureDiscounts(planId);
@@ -265,13 +275,27 @@ export async function getUserMembership(userId: number) {
 
 export async function getMembershipRights(userId: number) {
   const membership = await queryOne<any>(
-    'SELECT plan_id FROM user_memberships WHERE user_id = ? AND status = ? AND expire_at > NOW(3) ORDER BY expire_at DESC LIMIT 1',
+    `SELECT um.plan_id, p.version_id
+       FROM user_memberships um
+       JOIN member_plans p ON p.id = um.plan_id
+      WHERE um.user_id = ? AND um.status = ? AND um.expire_at > NOW(3)
+      ORDER BY um.expire_at DESC LIMIT 1`,
     [userId, 'active'],
   );
   if (!membership) return getDefaultRights();
+  // Merge version rights with plan overrides; only enabled rights
   const rights = await query<any>(
-    'SELECT right_key, right_name, right_value, right_category, icon_url, icon_file_id FROM member_plan_rights WHERE plan_id = ? ORDER BY sort_order',
-    [membership.plan_id],
+    `SELECT vr.right_key, vr.right_name,
+            COALESCE(pr.right_value, vr.right_value) AS right_value,
+            vr.hint, vr.right_category,
+            COALESCE(pr.icon_url, vr.icon_url) AS icon_url,
+            COALESCE(pr.icon_file_id, vr.icon_file_id) AS icon_file_id
+       FROM member_version_rights vr
+       LEFT JOIN member_plan_rights pr ON pr.plan_id = ? AND pr.right_key COLLATE utf8mb4_unicode_ci = vr.right_key COLLATE utf8mb4_unicode_ci
+      WHERE vr.version_id = ?
+        AND COALESCE(pr.enabled, 1) = 1
+      ORDER BY COALESCE(pr.sort_order, vr.sort_order)`,
+    [membership.plan_id, membership.version_id],
   );
   return normalizeRightsWithIcons(rights);
 }

@@ -151,6 +151,7 @@ const REQUIRED_COLUMNS: Record<string, string[]> = {
     'super_streak_day',
     'super_reward_points',
     'normal_is_makeup',
+    'updated_at',
   ],
   ad_reward_logs: [
     'ad_scene',
@@ -1196,10 +1197,21 @@ export async function executeInit(onProgress?: (step: InstallTaskStepKey) => voi
         ['miniapp_help.enabled', 'true', 'boolean', '是否启用小程序使用帮助内容配置', 10],
         ['miniapp_help.title', '使用帮助', 'string', '小程序使用帮助标题', 20],
         ['miniapp_help.content_html', '', 'html', '小程序使用帮助 HTML 富文本内容', 30],
+        ['miniapp_help.items_json', '[]', 'json', '小程序使用帮助多条内容 JSON', 40],
       ];
       for (const [key, value, valueType, description, sortOrder] of miniappHelpConfigs) {
         await conn.execute(
           "INSERT IGNORE INTO system_configs (config_key, config_value, value_type, config_group, is_secret, description, sort_order, created_at, updated_at) VALUES (?, ?, ?, 'miniapp_help', 0, ?, ?, NOW(3), NOW(3))",
+          [key, value, valueType, description, sortOrder],
+        );
+      }
+      const miniappPromptGuideConfigs = [
+        ['miniapp_prompt_guides.enabled', 'true', 'boolean', '是否启用生成页提示词引导配置', 10],
+        ['miniapp_prompt_guides.items_json', '{}', 'json', '按生成模式配置提示词占位文字和帮助弹层文案', 20],
+      ];
+      for (const [key, value, valueType, description, sortOrder] of miniappPromptGuideConfigs) {
+        await conn.execute(
+          "INSERT IGNORE INTO system_configs (config_key, config_value, value_type, config_group, is_secret, description, sort_order, created_at, updated_at) VALUES (?, ?, ?, 'miniapp_prompt_guides', 0, ?, ?, NOW(3), NOW(3))",
           [key, value, valueType, description, sortOrder],
         );
       }

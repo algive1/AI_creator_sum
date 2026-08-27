@@ -22,6 +22,13 @@ const CAPABILITY_ALIASES: Record<string, string> = {
   script_generate: 'script_generate',
   prompt_generate: 'prompt_generate',
   storyboard_generate: 'storyboard_generate',
+  tool_prompt_reverse: 'tool_prompt_reverse',
+  prompt_reverse: 'tool_prompt_reverse',
+  vision_chat: 'vision_chat',
+  image_understanding: 'image_understanding',
+  background_remove: 'background_remove',
+  cutout: 'cutout',
+  tool_cutout: 'tool_cutout',
 };
 
 const FEATURE_REQUIREMENTS: Record<string, { capabilities: string[]; modelTypes: string[] }> = {
@@ -33,6 +40,8 @@ const FEATURE_REQUIREMENTS: Record<string, { capabilities: string[]; modelTypes:
   first_last_frame_video: { capabilities: ['first_last_frame_video'], modelTypes: ['video', 'multimodal'] },
   video_edit: { capabilities: ['video_edit'], modelTypes: ['video', 'multimodal'] },
   prompt_optimize: { capabilities: ['prompt_optimize', 'text_generation', 'text_chat'], modelTypes: ['text', 'multimodal'] },
+  tool_prompt_reverse: { capabilities: ['vision_chat', 'image_understanding', 'text_chat', 'text_generation'], modelTypes: ['text', 'multimodal'] },
+  tool_cutout: { capabilities: ['image_edit', 'background_remove', 'cutout'], modelTypes: ['image', 'multimodal'] },
 };
 
 export function normalizeCapabilityKey(key: string): string {

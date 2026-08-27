@@ -1,3 +1,9 @@
+import {
+  XIAOMA_AUDIO_PARAM_NAMES,
+  XIAOMA_IMAGE_PARAM_NAMES,
+  XIAOMA_VIDEO_PARAM_NAMES,
+} from '../xiaoma-media-parameters';
+
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
 export function applyXiaomaVideoParams(body: Record<string, JsonValue>, input: Record<string, any>, modelName: string): void {
@@ -9,8 +15,11 @@ export function applyXiaomaVideoParams(body: Record<string, JsonValue>, input: R
   const audioMode = normalizeAudioMode(input.audioMode || input.audio_mode);
   const videoMode = String(input.videoMode || '').trim();
   const seed = input.seed ?? body.seed;
-  const audioUrl = trimString(input.audioUrl ?? input.audio_url ?? body.audioUrl ?? body.audio_url);
+  const audioUrls = stringList(input.audioUrls || input.audio_urls || body.audioUrls || body.audio_urls || input.audioUrl || input.audio_url || body.audioUrl || body.audio_url);
+  const videoUrls = stringList(input.videoUrls || input.video_urls || body.videoUrls || body.video_urls || input.videoUrl || input.video_url || body.videoUrl || body.video_url);
+  const audioUrl = audioUrls[0] || trimString(input.audioUrl ?? input.audio_url ?? body.audioUrl ?? body.audio_url);
   const audioFileId = input.audioFileId ?? input.audio_file_id ?? body.audioFileId ?? body.audio_file_id;
+  const preserveAudio = input.preserveAudio ?? input.preserve_audio;
 
   delete body.ratio;
   delete body.aspect_ratio;
@@ -26,12 +35,22 @@ export function applyXiaomaVideoParams(body: Record<string, JsonValue>, input: R
   delete body.preserve_audio;
   delete body.videoMode;
   delete body.audioUrl;
+  delete body.audioUrls;
+  delete body.audio_urls;
+  delete body.videoUrl;
+  delete body.videoUrls;
+  delete body.video_urls;
   delete body.audioFileId;
 
   if (seed !== undefined && seed !== null && String(seed).trim() !== '') {
     body.seed = typeof seed === 'number' ? seed : trimString(seed);
   }
   if (audioUrl) body.audio_url = audioUrl;
+  if (audioUrls.length) body.audio_urls = audioUrls;
+  if (videoUrls.length) {
+    body.video_url = videoUrls[0];
+    body.video_urls = videoUrls;
+  }
   if (audioFileId !== undefined && audioFileId !== null && String(audioFileId).trim() !== '') {
     body.audio_file_id = typeof audioFileId === 'number' ? audioFileId : trimString(audioFileId);
   }
@@ -107,10 +126,34 @@ export function applyXiaomaVideoParams(body: Record<string, JsonValue>, input: R
   }
 
   if (model.includes('happyhorse-video-edit')) {
-    const videoUrl = trimString(input.videoUrl || input.video_url || body.video_url);
-    if (videoUrl) body.video_url = videoUrl;
-    if (duration) body.duration = secondsValue(duration, '5');
+    const videoUrl = trimString(input.video || input.videoUrl || input.video_url || body.video || body.videoUrl || body.video_url);
+    const audioSetting = trimString(input.audioSetting || input.audio_setting || body.audio_setting);
+    delete body.videoUrl;
+    delete body.video_url;
+    delete body.duration;
+    delete body.audio_url;
+    delete body.audio_file_id;
+    if (videoUrl) body.video = videoUrl;
+    if (images.length) body.images = images.slice(0, 5);
     if (resolution) body.resolution = resolution;
+    if (audioSetting) body.audio_setting = audioSetting;
+    else if (preserveAudio !== undefined && preserveAudio !== null && preserveAudio !== '') {
+      body.audio_setting = boolParam(preserveAudio, false) ? 'origin' : 'auto';
+    }
+    return;
+  }
+
+  if (model.includes('kwvideo-v2-quannengcankao')) {
+    const mode = trimString(input.quanNengMode || input.quan_neng_mode || input._quan_neng_mode || body._quan_neng_mode);
+    delete body.images;
+    delete body.audio_file_id;
+    if (images.length) body.image_url = images.slice(0, 9);
+    if (videoUrls.length) body.video_url = videoUrls.slice(0, 3);
+    if (audioUrl) body.audio_url = audioUrl;
+    if (duration) body.duration = duration === 'auto' ? 'auto' : secondsValue(duration, '5');
+    if (ratio) body.aspect_ratio = ratio;
+    if (resolution) body.resolution = resolution;
+    if (mode) body._quan_neng_mode = mode;
     return;
   }
 
@@ -120,7 +163,9 @@ export function applyXiaomaVideoParams(body: Record<string, JsonValue>, input: R
     if (duration) body.duration = duration === 'auto' ? 'auto' : secondsValue(duration, '5');
     if (ratio) body.aspect_ratio = ratio;
     if (resolution) body.resolution = resolution;
-    body.version = trimString(input.version) || '标准';
+    const version = trimString(input.version ?? body.version);
+    if (version) body.version = version;
+    else delete body.version;
     return;
   }
 
@@ -132,6 +177,56 @@ export function applyXiaomaVideoParams(body: Record<string, JsonValue>, input: R
 
 export function isXiaomaVideoTaskType(taskType: unknown): boolean {
   return ['text_to_video', 'image_to_video', 'first_last_frame_video', 'video_edit'].includes(String(taskType || '').trim());
+}
+
+export function applyXiaomaRemoteMediaParams(
+  body: Record<string, JsonValue>,
+  modelConfig: Record<string, any> | undefined,
+): void {
+  const remoteParams = modelConfig?.remote_parameters || modelConfig?.remoteParameters;
+  if (!Array.isArray(remoteParams) || !remoteParams.length) return;
+
+  remapDeclaredMediaParam(body, remoteParams, [...XIAOMA_IMAGE_PARAM_NAMES]);
+  remapDeclaredMediaParam(body, remoteParams, [...XIAOMA_VIDEO_PARAM_NAMES]);
+  remapDeclaredMediaParam(body, remoteParams, [...XIAOMA_AUDIO_PARAM_NAMES]);
+}
+
+function remapDeclaredMediaParam(
+  body: Record<string, JsonValue>,
+  remoteParams: Record<string, any>[],
+  aliases: string[],
+): void {
+  const normalizedAliases = new Set(aliases.map(normalizeParamKey));
+  const target = remoteParams.find((item) => (
+    item && typeof item === 'object'
+    && [item.name, item.key, item.field, item.mapsTo].some((value) => normalizedAliases.has(normalizeParamKey(value)))
+  ));
+  if (!target) return;
+
+  const targetName = trimString(target.name || target.key || target.field || target.mapsTo);
+  if (!targetName) return;
+  const values = uniqueStrings(aliases.flatMap((key) => stringList(body[key])));
+  if (!values.length) return;
+
+  for (const key of aliases) delete body[key];
+  body[targetName] = mediaParamExpectsArray(targetName, target) ? values : values[0];
+}
+
+function mediaParamExpectsArray(name: string, param: Record<string, any>): boolean {
+  const normalizedName = normalizeParamKey(name);
+  if (['images', 'imageurls', 'referenceurls', 'videos', 'videourls', 'referencevideos', 'referencevideourls', 'audios', 'audiourls', 'audiofiles', 'soundfiles'].includes(normalizedName)) {
+    return true;
+  }
+  if (Number(param.maxItems ?? param.max_items ?? 0) > 1) return true;
+  return /array|list/i.test(String(param.type || param.valueType || param.value_type || ''));
+}
+
+function normalizeParamKey(value: unknown): string {
+  return trimString(value).toLowerCase().replace(/[-_\s]/g, '');
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.map((item) => trimString(item)).filter(Boolean))];
 }
 
 function veoGenerationType(videoMode: string, imageCount: number): string {

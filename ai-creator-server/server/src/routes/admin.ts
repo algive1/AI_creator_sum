@@ -1,26 +1,41 @@
 // src/routes/admin.ts
 import rateLimit from 'express-rate-limit';
 import { Router, Request, Response } from 'express';
+import bcrypt from 'bcryptjs';
 import { adminAuthMiddleware } from '../middleware/auth';
 import { queryOne, query, getConnection } from '../utils/db';
 import { preloadStorageConfigs } from '../services/storage/storage-config-loader';
 import { StorageService } from '../services/storage/storage.service';
 import { SettingsService } from '../services/settings.service';
+import { clearTextFeatureModelCache } from '../services/ai-feature.service';
 import { pollProviderTaskIfDue } from '../services/video-polling.service';
 import { success, error } from '../utils/response';
 import { ErrorCodes } from '../types';
 import { sanitizeHelpHtml } from '../utils/html-sanitizer';
+import { publicRequestBaseUrl } from '../utils/public-base-url';
 
 const router = Router();
 const loginLimiter = rateLimit({ windowMs: 60_000, max: 10, standardHeaders: true, legacyHeaders: false, message: { code: 429, message: '登录尝试过于频繁，请稍后重试', data: null } });
+const PROMPT_GUIDE_MODE_KEYS = new Set([
+  'ai_image.text2img',
+  'ai_image.img2img',
+  'ai_image.edit',
+  'ai_video.text2video',
+  'ai_video.img2video',
+  'ai_video.reference',
+  'ai_video.first_last_frame',
+  'ai_video.edit',
+  'comic.story',
+]);
 
 // ===== 认证 =====
 router.post('/auth/login', loginLimiter, async (req: Request, res: Response) => {
   try {
-    const { username, password } = req.body;
-    const bcrypt = require('bcryptjs');
-    const user = await queryOne<any>('SELECT * FROM admin_users WHERE username = ? AND status = ?', [username, 'active']);
-    if (!user || !bcrypt.compareSync(password, user.password_hash)) { error(res, 401, '用户名或密码错误', 401); return; }
+    const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    const user = await queryOne<any>('SELECT id, password_hash, nickname, role_key FROM admin_users WHERE username = ? AND status = ?', [username, 'active']);
+    const passwordMatches = user ? await bcrypt.compare(password, user.password_hash) : false;
+    if (!user || !passwordMatches) { error(res, 401, '用户名或密码错误', 401); return; }
     if (user.role_key !== 'super_admin') { error(res, ErrorCodes.FORBIDDEN, '仅超级管理员可登录后台', 403); return; }
     const jwt = require('jsonwebtoken');
     const cfg = require('../utils/config').config;
@@ -306,9 +321,7 @@ router.get('/tasks/:id(\\d+)', adminAuthMiddleware, async (req: Request, res: Re
 
 // GET /admin/files - 文件列表
 function requestBaseUrl(req: Request): string {
-  const configured = String(process.env.APP_PUBLIC_URL || process.env.PUBLIC_API_DOMAIN || process.env.SITE_API_DOMAIN || '').trim().replace(/\/+$/, '');
-  if (/^https?:\/\//i.test(configured)) return configured;
-  return `${req.protocol}://${req.get('host') || ''}`.replace(/\/+$/, '');
+  return publicRequestBaseUrl(req);
 }
 
 function absoluteFileUrl(req: Request, url: string): string {
@@ -319,6 +332,10 @@ function absoluteFileUrl(req: Request, url: string): string {
 
 function adminFileContentUrl(fileNo: string): string {
   return `/api/v1/admin/files/${encodeURIComponent(fileNo)}/content`;
+}
+
+function publicFileContentUrl(req: Request, fileNo: string): string {
+  return absoluteFileUrl(req, `/api/v1/files/${encodeURIComponent(fileNo)}/content`);
 }
 
 function runtimeFileAccessUrl(req: Request, file: any): string {
@@ -358,8 +375,11 @@ router.get('/files', adminAuthMiddleware, async (req: Request, res: Response) =>
     const [cnt] = await query<any>('SELECT COUNT(*) as total FROM files f WHERE ' + where, p);
     success(res, { list: list.map((f: any) => {
       const rawUrl = f.cdn_url || f.access_url || '';
-      const publicUrl = absoluteFileUrl(req, rawUrl);
+      const storageUrl = absoluteFileUrl(req, rawUrl);
       const accessUrl = runtimeFileAccessUrl(req, f) || absoluteFileUrl(req, f.access_url || '');
+      const publicProxyUrl = f.file_no ? publicFileContentUrl(req, f.file_no) : '';
+      const publicUrl = storageUrl || publicProxyUrl;
+      const deliveryUrl = publicUrl || publicProxyUrl;
       const displayUrl = f.file_no ? adminFileContentUrl(f.file_no) : publicUrl;
       return {
         id: f.id,
@@ -376,10 +396,13 @@ router.get('/files', adminAuthMiddleware, async (req: Request, res: Response) =>
         accessUrl,
         cdnUrl: f.cdn_url,
         rawUrl,
+        storageUrl,
         publicUrl,
+        deliveryUrl,
+        publicProxyUrl,
         displayUrl,
         previewUrl: accessUrl || publicUrl || displayUrl,
-        copyUrl: publicUrl || accessUrl,
+        copyUrl: deliveryUrl || accessUrl,
         url: displayUrl,
         fileCategory: f.file_category,
         visibility: f.visibility,
@@ -461,6 +484,18 @@ router.put('/files/:id(\\d+)/visibility', adminAuthMiddleware, async (req: Reque
     const fid = parseInt(req.params.id);
     const { visibility } = req.body;
     if (!['public', 'private'].includes(visibility)) { error(res, ErrorCodes.PARAM_ERROR, '可见性参数无效'); return; }
+    const file = await queryOne<any>('SELECT id, provider, storage_key FROM files WHERE id = ? AND is_deleted = 0', [fid]);
+    if (!file) { error(res, ErrorCodes.NOT_FOUND, 'file not found', 404); return; }
+    const adapter = StorageService.getActiveAdapter();
+    if (file.provider === adapter.provider && file.storage_key && typeof adapter.setVisibility === 'function') {
+      try {
+        await adapter.setVisibility(file.storage_key, visibility);
+      } catch (storageErr: any) {
+        console.error('[admin] update file visibility storage failed:', storageErr?.message || storageErr);
+        error(res, ErrorCodes.FILE_STORAGE_ERROR, storageErr?.message || 'file visibility update failed');
+        return;
+      }
+    }
     await query('UPDATE files SET visibility = ?, updated_at = NOW(3) WHERE id = ?', [visibility, fid]);
     await query('INSERT INTO admin_operation_logs (admin_user_id, action, target_type, target_id, created_at) VALUES (?, ?, ?, ?, NOW(3))', [req.user!.userId, 'file.update_visibility', 'file', fid.toString()]);
     success(res, { fileId: fid, visibility });
@@ -569,6 +604,7 @@ function validateMiniappHelpSettings(body: Record<string, any>): Record<string, 
     'miniapp_help.enabled',
     'miniapp_help.title',
     'miniapp_help.content_html',
+    'miniapp_help.items_json',
   ]);
   const sanitized: Record<string, string> = {};
   for (const key of Object.keys(body || {})) {
@@ -597,7 +633,124 @@ function validateMiniappHelpSettings(body: Record<string, any>): Record<string, 
     sanitized['miniapp_help.content_html'] = sanitizeHelpHtml(value);
   }
 
+  if (body['miniapp_help.items_json'] !== undefined) {
+    const rawItems = parseJsonConfig(body['miniapp_help.items_json'], []);
+    if (!Array.isArray(rawItems)) throw new Error('使用帮助条目必须是数组');
+    const items = rawItems.slice(0, 50).map((item, index) => sanitizeHelpItemForSave(item, index)).filter(hasHelpItemForSaveContent);
+    sanitized['miniapp_help.items_json'] = JSON.stringify(items);
+  }
+
   return sanitized;
+}
+
+function validateMiniappPromptGuideSettings(body: Record<string, any>): Record<string, string> {
+  const allowedKeys = new Set([
+    'miniapp_prompt_guides.enabled',
+    'miniapp_prompt_guides.items_json',
+  ]);
+  const sanitized: Record<string, string> = {};
+  for (const key of Object.keys(body || {})) {
+    if (/token|secret|api_key|apikey|private/i.test(key)) {
+      throw new Error('Prompt guide settings cannot save sensitive fields');
+    }
+    if (!allowedKeys.has(key)) {
+      throw new Error(`不支持的提示词引导配置项 ${key}`);
+    }
+  }
+
+  if (body['miniapp_prompt_guides.enabled'] !== undefined) {
+    sanitized['miniapp_prompt_guides.enabled'] = parseConfigBoolean(body['miniapp_prompt_guides.enabled'], 'miniapp_prompt_guides.enabled');
+  }
+
+  if (body['miniapp_prompt_guides.items_json'] !== undefined) {
+    const rawItems = parseJsonConfig(body['miniapp_prompt_guides.items_json'], {});
+    if (!rawItems || typeof rawItems !== 'object' || Array.isArray(rawItems)) throw new Error('提示词引导配置必须是对象');
+    const items: Record<string, ReturnType<typeof sanitizePromptGuideItemForSave>> = {};
+    for (const [key, value] of Object.entries(rawItems as Record<string, unknown>)) {
+      if (!PROMPT_GUIDE_MODE_KEYS.has(key)) throw new Error(`不支持的提示词引导模式 ${key}`);
+      const item = sanitizePromptGuideItemForSave(value);
+      if (hasPromptGuideForSaveContent(item)) items[key] = item;
+    }
+    sanitized['miniapp_prompt_guides.items_json'] = JSON.stringify(items);
+  }
+
+  return sanitized;
+}
+
+function parseJsonConfig(value: unknown, fallback: unknown) {
+  if (typeof value !== 'string') return value ?? fallback;
+  const text = value.trim();
+  if (!text) return fallback;
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error('配置 JSON 格式不正确');
+  }
+}
+
+function sanitizeHelpItemForSave(input: unknown, index: number) {
+  const row = input && typeof input === 'object' && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  const id = String(row.id || `help_${index + 1}`).trim().slice(0, 80);
+  const title = String(row.title || `帮助 ${index + 1}`).trim();
+  assertWeightedMax(title, 80, '帮助标题');
+  const subtitle = String(row.subtitle || row.subTitle || row.description || '').trim();
+  assertWeightedMax(subtitle, 120, '帮助副标题');
+  const contentHtml = sanitizeHelpHtml(String(row.contentHtml || row.content_html || row.content || '').trim());
+  if (contentHtml.length > 50000) throw new Error('帮助条目内容超出长度限制');
+  const mediaUrl = String(row.mediaUrl || row.media_url || '').trim();
+  if (mediaUrl.length > 1000) throw new Error('帮助媒体 URL 过长');
+  if (mediaUrl && !/^(https?:\/\/|\/)/i.test(mediaUrl)) throw new Error('帮助媒体 URL 必须是 http(s) 或 / 开头');
+  const mediaType = ['image', 'video'].includes(String(row.mediaType || row.media_type || '')) ? String(row.mediaType || row.media_type) : '';
+  const mediaRatio = normalizeHelpRatioForSave(row.mediaRatio || row.media_ratio || '16:9');
+  const copyText = String(row.copyText || row.copy_text || '').trim();
+  if (copyText.length > 2000) throw new Error('可复制文本超出长度限制');
+  const copyLabel = String(row.copyLabel || row.copy_label || '复制').trim().slice(0, 20);
+  return { id, title, subtitle, contentHtml, mediaType, mediaUrl, mediaRatio, copyText, copyLabel };
+}
+
+function hasHelpItemForSaveContent(item: ReturnType<typeof sanitizeHelpItemForSave>) {
+  return Boolean(item.subtitle || item.contentHtml || item.mediaUrl || item.copyText);
+}
+
+function sanitizePromptGuideItemForSave(input: unknown) {
+  const row = input && typeof input === 'object' && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  const enabled = parseOptionalBoolean(row.enabled, true);
+  const placeholder = String(row.placeholder || '').trim();
+  assertWeightedMax(placeholder, 220, '主提示词占位文字');
+  const title = String(row.title || '提示词写作帮助').trim();
+  assertWeightedMax(title, 60, '提示词引导标题');
+  const subtitle = String(row.subtitle || '').trim();
+  assertWeightedMax(subtitle, 120, '提示词引导副标题');
+  const copyText = String(row.copyText || row.copy_text || '').trim();
+  if (copyText.length > 2000) throw new Error('提示词示例超出长度限制');
+  const copyLabel = String(row.copyLabel || row.copy_label || '复制示例').trim().slice(0, 20);
+  const helpId = String(row.helpId || row.help_id || '').trim().slice(0, 80);
+  const item = {
+    enabled,
+    placeholder,
+    title,
+    subtitle,
+    contentHtml: sanitizeHelpHtml(String(row.contentHtml || row.content_html || row.content || '').trim()),
+    copyText,
+    copyLabel,
+    helpId,
+  };
+  if (item.contentHtml.length > 20000) throw new Error('提示词引导内容超出长度限制');
+  return item;
+}
+
+function hasPromptGuideForSaveContent(item: ReturnType<typeof sanitizePromptGuideItemForSave>) {
+  return Boolean(item.placeholder || item.subtitle || item.contentHtml || item.copyText || item.helpId);
+}
+
+function parseOptionalBoolean(value: unknown, fallback: boolean) {
+  if (value === undefined || value === null || value === '') return fallback;
+  return parseConfigBoolean(value, 'enabled') === 'true';
+}
+
+function normalizeHelpRatioForSave(value: unknown) {
+  const text = String(value || '').trim();
+  return /^\d+(\.\d+)?:\d+(\.\d+)?$/.test(text) ? text : '16:9';
 }
 
 function validateMiniappVisualAssetSettings(body: Record<string, any>): Record<string, string> {
@@ -624,6 +777,37 @@ function validateMiniappVisualAssetSettings(body: Record<string, any>): Record<s
     if (value.length > 1024) {
       throw new Error('小程序素材图片 URL 过长');
     }
+    sanitized[key] = value;
+  }
+
+  return sanitized;
+}
+
+function validateMiniappHomeEntrySettings(body: Record<string, any>): Record<string, string> {
+  const allowedKeys = new Set([
+    'miniapp.home_entry.image.enabled',
+    'miniapp.home_entry.image.message',
+    'miniapp.home_entry.video.enabled',
+    'miniapp.home_entry.video.message',
+    'miniapp.home_entry.comic.enabled',
+    'miniapp.home_entry.comic.message',
+  ]);
+  const sanitized: Record<string, string> = {};
+
+  for (const key of Object.keys(body || {})) {
+    if (/token|secret|api_key|apikey|private/i.test(key)) {
+      throw new Error('Home entry settings cannot save sensitive fields');
+    }
+    if (!allowedKeys.has(key)) {
+      throw new Error(`不支持的小程序首页入口配置项 ${key}`);
+    }
+    if (key.endsWith('.enabled')) {
+      sanitized[key] = parseConfigBoolean(body[key], key);
+      continue;
+    }
+    const value = String(body[key] || '').trim();
+    if (!value) throw new Error('维护提示文案不能为空');
+    assertWeightedMax(value, 80, '维护提示文案');
     sanitized[key] = value;
   }
 
@@ -661,12 +845,18 @@ router.get('/settings/groups', adminAuthMiddleware, async (_req: Request, res: R
       'ai.storyboard_generate.enabled',
       'ai.storyboard_generate.model_id',
       'ai.storyboard_generate.points_cost',
+      'miniapp.home_entry.image.enabled',
+      'miniapp.home_entry.image.message',
+      'miniapp.home_entry.video.enabled',
+      'miniapp.home_entry.video.message',
+      'miniapp.home_entry.comic.enabled',
+      'miniapp.home_entry.comic.message',
     ];
     const placeholders = visibleSettingKeys.map(() => '?').join(',');
     const rows = await query<any>(
       `SELECT config_group, COUNT(*) as total, SUM(is_secret) as secrets
          FROM system_configs
-        WHERE config_group IN ('general', 'ai') AND config_key IN (${placeholders})
+        WHERE config_group IN ('general', 'ai', 'miniapp_home_entry') AND config_key IN (${placeholders})
         GROUP BY config_group
         ORDER BY config_group`,
       visibleSettingKeys,
@@ -831,16 +1021,21 @@ router.post('/settings/secrets/copy', adminAuthMiddleware, async (req: Request, 
 router.post('/settings/:group', adminAuthMiddleware, async (req: Request, res: Response) => {
   try {
     const { SettingsService } = require('../services/settings.service');
-    const values = req.params.group === 'customer_service'
+      const values = req.params.group === 'customer_service'
       ? validateCustomerServiceSettings(req.body as Record<string, any>)
       : req.params.group === 'miniapp_help'
         ? validateMiniappHelpSettings(req.body as Record<string, any>)
-        : req.params.group === 'miniapp_visual_assets'
-          ? validateMiniappVisualAssetSettings(req.body as Record<string, any>)
-          : req.body as Record<string, string>;
+        : req.params.group === 'miniapp_prompt_guides'
+          ? validateMiniappPromptGuideSettings(req.body as Record<string, any>)
+          : req.params.group === 'miniapp_visual_assets'
+            ? validateMiniappVisualAssetSettings(req.body as Record<string, any>)
+            : req.params.group === 'miniapp_home_entry'
+              ? validateMiniappHomeEntrySettings(req.body as Record<string, any>)
+              : req.body as Record<string, string>;
     rejectRemovedConfigKeys(req.params.group, values);
     await SettingsService.setGroup(req.params.group, values, false, req.user!.userId);
-    await preloadStorageConfigs();
+    if (req.params.group === 'ai') clearTextFeatureModelCache();
+    await preloadStorageConfigs({ force: true });
     success(res, { saved: true });
   } catch (err: any) { error(res, ErrorCodes.PARAM_ERROR, err?.message || '保存失败'); }
 });
@@ -851,7 +1046,8 @@ router.post('/settings/:group/secure', adminAuthMiddleware, async (req: Request,
     const { SettingsService } = require('../services/settings.service');
     rejectRemovedConfigKeys(req.params.group, req.body as Record<string, string>);
     await SettingsService.setGroup(req.params.group, req.body as Record<string, string>, true, req.user!.userId);
-    await preloadStorageConfigs();
+    if (req.params.group === 'ai') clearTextFeatureModelCache();
+    await preloadStorageConfigs({ force: true });
     success(res, { saved: true });
   } catch { error(res, ErrorCodes.SERVER_ERROR, '保存失败'); }
 });

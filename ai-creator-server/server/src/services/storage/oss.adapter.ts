@@ -2,7 +2,7 @@
 // 阿里云 OSS 存储适配器
 
 import * as crypto from 'crypto';
-import { IStorageAdapter, UploadResult, CredentialOptions, CredentialResult } from './adapter.interface';
+import { IStorageAdapter, UploadResult, CredentialOptions, CredentialResult, UploadOptions } from './adapter.interface';
 
 interface OssConfig {
   accessKeyId: string;
@@ -91,7 +91,7 @@ export class OssAdapter implements IStorageAdapter {
     return `${this.cfg.bucket}.${ep}`;
   }
 
-  async upload(key: string, body: Buffer, contentType: string): Promise<UploadResult> {
+  async upload(key: string, body: Buffer, contentType: string, _options?: UploadOptions): Promise<UploadResult> {
     const cfg = this.cfg;
     const host = this.buildHost();
     const date = new Date().toUTCString();
@@ -131,7 +131,7 @@ export class OssAdapter implements IStorageAdapter {
     };
   }
 
-  async uploadLarge(key: string, stream: NodeJS.ReadableStream, contentType: string, size: number): Promise<UploadResult> {
+  async uploadLarge(key: string, stream: NodeJS.ReadableStream, contentType: string, size: number, _options?: UploadOptions): Promise<UploadResult> {
     const cfg = this.cfg;
     const host = this.buildHost();
     const date = new Date().toUTCString();

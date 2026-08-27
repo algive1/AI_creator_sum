@@ -35,6 +35,7 @@ export interface UserPreferences {
   defaultQuality: string;
   aiOptimize: boolean;
   systemPrompt: string;
+  themeSource?: 'system' | 'light' | 'dark';
 }
 
 export interface PointAccount {
@@ -126,6 +127,7 @@ export const ErrorCodes = {
   MEMBERSHIP_REQUIRED: 4603,
   VIDEO_EXPORT_SANITIZE_NOT_SUPPORTED: 4604,
   TEMPLATE_NOT_APPROVED: 4605,
+  FREE_QUOTA_INSUFFICIENT: 4606,
   INVITE_DISABLED: 4701,
   INVITE_CODE_INVALID: 4702,
   INVITE_SELF_NOT_ALLOWED: 4703,

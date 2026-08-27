@@ -19,6 +19,7 @@ export const config = {
   jwt: {
     secret: process.env.JWT_SECRET || (process.env.NODE_ENV === 'development' ? 'dev-secret-do-not-use-in-prod' : ''),
     expiresIn: parseInt(process.env.JWT_EXPIRES_IN || '7200', 10),
+    refreshExpiresIn: parseInt(process.env.JWT_REFRESH_EXPIRES_IN || '31536000', 10),
   },
 
   wechat: {

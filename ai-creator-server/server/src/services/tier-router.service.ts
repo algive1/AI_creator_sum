@@ -30,14 +30,18 @@ export interface TierCapabilities {
   allowUpscale: boolean;
   maxImages: number;
   maxReferenceImages: number;
+  maxVideoUrls?: number;
+  maxAudioUrls?: number;
   maxDurationSeconds: number;
   resolutionPresets: string[];
   sizeOptions: ImageSizeOption[];
   defaultSizeKey: string;
   inputMode?: string;
+  inputMediaTypes?: Array<'image' | 'video' | 'audio'>;
   minReferenceImages?: number;
   referenceUploadMode?: 'none' | 'first_frame' | 'first_last' | 'reference_images' | 'source_video';
   requiredReference?: boolean;
+  advancedParams?: string[];
 }
 
 export interface TierModelResult {
@@ -110,6 +114,8 @@ export async function selectTierModel(
     postprocessMode?: string;
     audioMode?: string;
     referenceImageCount?: number;
+    videoUrlCount?: number;
+    audioUrlCount?: number;
   } = {},
 ): Promise<TierModelResult> {
   const feature = await queryOne<any>(
@@ -208,6 +214,8 @@ export function mapCapabilities(row: any): TierCapabilities {
     allowUpscale: !!row.allow_upscale,
     maxImages: row.max_images || 1,
     maxReferenceImages: row.max_reference_images || 4,
+    maxVideoUrls: row.max_video_urls === null || row.max_video_urls === undefined ? undefined : Number(row.max_video_urls),
+    maxAudioUrls: row.max_audio_urls === null || row.max_audio_urls === undefined ? undefined : Number(row.max_audio_urls),
     maxDurationSeconds: row.max_duration_seconds || 30,
     resolutionPresets: [],
     sizeOptions: [],
@@ -216,6 +224,7 @@ export function mapCapabilities(row: any): TierCapabilities {
     minReferenceImages: row.min_reference_images ?? undefined,
     referenceUploadMode: (row.reference_upload_mode || undefined) as TierCapabilities['referenceUploadMode'],
     requiredReference: row.required_reference === null || row.required_reference === undefined ? undefined : !!row.required_reference,
+    advancedParams: [],
   };
 }
 
@@ -278,6 +287,14 @@ function validateCapabilities(tierName: string, caps: TierCapabilities, params: 
   if (hasReferenceImageCount && requiredReferenceCount > 0 && referenceImageCount < requiredReferenceCount) {
     throw paramError(`当前档位至少需要 ${requiredReferenceCount} 张参考图`);
   }
+  const videoUrlCount = Math.max(0, Number(params.videoUrlCount || 0));
+  if (videoUrlCount > Math.max(0, Number(caps.maxVideoUrls || 0))) {
+    throw paramError(`当前档位最多支持 ${caps.maxVideoUrls || 0} 个视频素材`);
+  }
+  const audioUrlCount = Math.max(0, Number(params.audioUrlCount || 0));
+  if (audioUrlCount > Math.max(0, Number(caps.maxAudioUrls || 0))) {
+    throw paramError(`当前档位最多支持 ${caps.maxAudioUrls || 0} 个音频素材`);
+  }
   if (!tierName) throw paramError('档位配置异常');
 }
 
@@ -339,10 +356,13 @@ function enrichModelCapabilities(featureKey: string, tierKey: string, caps: Tier
       supportedSizeModes: caps.supportedSizeModes,
       nativeSizes: caps.nativeSizes,
       maxReferenceImages: caps.maxReferenceImages,
+      maxVideoUrls: caps.maxVideoUrls,
+      maxAudioUrls: caps.maxAudioUrls,
       inputMode: caps.inputMode,
       minReferenceImages: caps.minReferenceImages,
       referenceUploadMode: caps.referenceUploadMode,
       requiredReference: caps.requiredReference,
+      advancedParams: caps.advancedParams,
     });
     return {
       ...caps,
@@ -353,11 +373,15 @@ function enrichModelCapabilities(featureKey: string, tierKey: string, caps: Tier
       defaultAudioMode: videoCaps.defaultAudioMode,
       supportedSizeModes: videoCaps.supportedSizeModes,
       nativeSizes: videoCaps.nativeSizes,
+      inputMediaTypes: videoCaps.inputMediaTypes,
       maxReferenceImages: videoCaps.maxReferenceImages,
+      maxVideoUrls: videoCaps.maxVideoUrls,
+      maxAudioUrls: videoCaps.maxAudioUrls,
       inputMode: videoCaps.inputMode,
       minReferenceImages: videoCaps.minReferenceImages,
       referenceUploadMode: videoCaps.referenceUploadMode,
       requiredReference: videoCaps.requiredReference,
+      advancedParams: videoCaps.advancedParams,
     };
   }
   if (!['image_create', 'image_to_image', 'image_edit'].includes(featureKey)) return caps;

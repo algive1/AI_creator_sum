@@ -11,7 +11,7 @@ const INVITE_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
 export type InviteRewardType = 'use' | 'member_purchase';
 export type InviteRewardStatus = 'granted' | 'skipped' | 'failed';
-export type InviteRelationSource = 'wechat_share' | 'manual' | 'link';
+export type InviteRelationSource = 'wechat_share' | 'manual' | 'link' | 'web_register';
 
 export interface InviteConfig {
   enabled: boolean;
