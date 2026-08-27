@@ -15,7 +15,7 @@
 - `release.json.version`：`1.0.74`
 - `release.json.packageType`：`server-admin-user-web`
 
-线上更新尚未执行。原因是本机没有可用的 MySQL（`127.0.0.1:3306` 连接被拒绝），因此生产同版本 staging 数据库验证必须在有 MySQL 的环境中完成后再上线。
+线上生产更新尚未执行；本机 MySQL 隔离 staging 流程已完成验证，生产部署仍需按下方步骤人工执行和验收。
 
 ## 根因
 
@@ -54,7 +54,7 @@
 
 `ai-creator-server/server/src/migrations/20260803_001_creation_workspace.sql`
 
-该迁移使用 `CREATE IF NOT EXISTS`、information_schema 条件判断、`INSERT IGNORE` 和 nullable 字段回填；没有 DROP、TRUNCATE，不删除或重命名旧字段，也不改变既有 API 字段语义。静态幂等检查已通过，但真实 MySQL 首次执行、重复执行、已有任务/输出/用户数据回填仍需 staging 实测。
+该迁移使用 `CREATE IF NOT EXISTS`、information_schema 条件判断、`INSERT IGNORE` 和 nullable 字段回填；没有 DROP、TRUNCATE，不删除或重命名旧字段，也不改变既有 API 字段语义。静态幂等检查和本机真实 MySQL staging 首次执行、重复执行、已有数据链路验证均已通过。
 
 ### 源码冻结
 
@@ -81,10 +81,12 @@
 - `bash scripts/inspect-release.sh ai-creator-release-1.0.74.tar.gz`
 - 最终包结构、package type、禁止文件和 SHA256 已复核
 - 本地 `check-deploy`：新增 user-web 源码与构建产物检查均为 OK；在临时 APP_ROOT 下通过，保留 6 条环境/数据库 warning
+- MySQL 隔离 staging 完整流程：
+  `env DB_PASSWORD= CHECK_DB_PASSWORD= CHECK_DB_NAME=ai_creator_install_update_check_1074 CHECK_RELEASE_VERSION=1.0.73 CHECK_UPDATE_VERSION=1.0.74 npm run check:install-update-flow`
+  已通过；验证首次初始化、迁移/种子数据、管理员密码校验、安装完成记录、更新包预检查，以及 `app_releases`/更新日志从 `1.0.73` 推进到 `1.0.74`
 
 未完成或受环境限制：
 
-- `CHECK_RELEASE_VERSION=1.0.73 CHECK_UPDATE_VERSION=1.0.74 npm run check:install-update-flow`：本机 MySQL 未启动，连接 `127.0.0.1:3306` 被拒绝，未宣称数据库链路通过。
 - 未联调真实小马、红鸟、对象存储、生产生成链路和真实支付；本轮不读取、不写入、不提交任何 API key。
 - 未执行线上 PM2、health、旧任务续跑、新任务生成和文件下载验收。
 
