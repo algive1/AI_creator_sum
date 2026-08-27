@@ -473,6 +473,10 @@ export default function Settings() {
     message.success('已复制');
   };
 
+  const openPromptOptimizePrompt = () => {
+    window.location.href = '/content?tab=prompt&targetFeature=prompt_optimize';
+  };
+
   const editMeta = getMeta(editKey);
 
   const columns = [
@@ -549,7 +553,7 @@ export default function Settings() {
         <Form.Item name="subtitle" label="入口描述">
           <Input maxLength={80} placeholder="订单、会员、生成问题都可以咨询" />
         </Form.Item>
-        <Form.Item name="icon" label="图标" rules={[{ required: true, message: '请输入图标标识' }]}>
+        <Form.Item name="icon" label="图标" extra="小程序内置图标名称，默认为 customer-service，一般无需修改。">
           <Input maxLength={64} placeholder="customer-service" />
         </Form.Item>
         <Form.Item name="sessionFrom" label="会话来源">
@@ -571,11 +575,34 @@ export default function Settings() {
 
   const visibleConfigs = configs.filter((item: any) => VISIBLE_CONFIG_KEYS.has(item.key));
   const settingGroups = groups.filter((g: any) => VISIBLE_SETTING_GROUPS.has(g.group));
+  const renderConfigTable = (group: string) => (
+    <Table
+      rowKey="key"
+      columns={columns}
+      dataSource={visibleConfigs}
+      loading={loading && activeGroup === group}
+      size="small"
+      pagination={false}
+      tableLayout="fixed"
+      scroll={{ x: advancedMode ? 820 : 740 }}
+    />
+  );
+  const renderAiTextSettings = (group: string) => (
+    <>
+      <Space style={{ marginBottom: 12 }} wrap>
+        <Button size="small" onClick={openPromptOptimizePrompt}>编辑智能补全提示词</Button>
+        <Text type="secondary">调整智能补全系统提示词；模型 ID、开关和积分仍在当前表格配置。</Text>
+      </Space>
+      {renderConfigTable(group)}
+    </>
+  );
   const tabItems = settingGroups.map((g: any) => ({
     key: g.group, label: GROUP_LABELS[g.group] || g.group,
     children: g.group === 'customer_service'
       ? renderCustomerServiceSettings()
-      : <Table rowKey="key" columns={columns} dataSource={visibleConfigs} loading={loading && activeGroup === g.group} size="small" pagination={false} tableLayout="fixed" scroll={{ x: advancedMode ? 820 : 740 }} />,
+      : g.group === 'ai'
+        ? renderAiTextSettings(g.group)
+        : renderConfigTable(g.group),
   }));
 
   tabItems.push({

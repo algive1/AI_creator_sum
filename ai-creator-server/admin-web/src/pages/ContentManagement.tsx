@@ -61,7 +61,11 @@ const features = [
 ];
 
 export default function ContentManagement() {
-  const [tab, setTab] = useState('legal');
+  const searchParams = new URLSearchParams(window.location.search);
+  const initialTab = searchParams.get('tab') === 'prompt' ? 'prompt' : 'legal';
+  const initialTargetFeature = searchParams.get('targetFeature') || '';
+  const [tab, setTab] = useState(initialTab);
+  const [targetFeatureFilter, setTargetFeatureFilter] = useState(initialTargetFeature);
 
   const [legalDocs, setLegalDocs] = useState<any[]>([]);
   const [announcements, setAnnouncements] = useState<any[]>([]);
@@ -140,7 +144,14 @@ export default function ContentManagement() {
     } else if (type === 'announcement') {
       form.setFieldsValue({ enabled: true, type: 'popup', showFrequency: 'once_per_day', targetType: 'all', priority: 0, sortOrder: 0 });
     } else {
-      form.setFieldsValue({ enabled: true, promptType: 'system', version: 'v1' });
+      form.setFieldsValue({
+        enabled: true,
+        promptType: 'system',
+        version: 'v1',
+        promptKey: targetFeatureFilter === 'prompt_optimize' ? 'prompt_optimize_system' : `prompt_${Date.now()}`,
+        promptName: targetFeatureFilter === 'prompt_optimize' ? '智能补全系统提示词' : undefined,
+        targetFeature: targetFeatureFilter || undefined,
+      });
     }
     setModalOpen(true);
   };
@@ -164,7 +175,10 @@ export default function ContentManagement() {
       message.success('保存成功');
       setModalOpen(false);
       loadAll();
-    } catch (e: any) { if (e?.errorFields) return; }
+    } catch (e: any) {
+      if (e?.errorFields) return;
+      message.error(e?.response?.data?.message || e?.message || '保存失败，请检查内容配置');
+    }
   };
 
   const legalColumns = [
@@ -207,6 +221,11 @@ export default function ContentManagement() {
     { title: '操作', width: 120, render: (_: any, row: any) => <Button size="small" icon={<EditOutlined />} onClick={() => openModal('prompt', row)}>编辑</Button> },
   ];
 
+  const visiblePrompts = targetFeatureFilter
+    ? prompts.filter((item: any) => item.targetFeature === targetFeatureFilter)
+    : prompts;
+  const targetFeatureLabel = features.find(item => item.value === targetFeatureFilter)?.label || targetFeatureFilter;
+
   return (
     <div>
       <Space style={{ marginBottom: 16 }}>
@@ -218,11 +237,32 @@ export default function ContentManagement() {
 
       <Tabs
         activeKey={tab}
-        onChange={(key) => { setTab(key); if (key === 'sensitive') fetchWords(); }}
+        onChange={(key) => {
+          setTab(key);
+          if (key !== 'prompt') setTargetFeatureFilter('');
+          if (key === 'sensitive') fetchWords();
+        }}
         items={[
           { key: 'legal', label: '协议管理', children: <Table rowKey="id" columns={legalColumns} dataSource={legalDocs} loading={loading} size="middle" pagination={false} tableLayout="fixed" scroll={{ x: 980 }} /> },
           { key: 'announcement', label: '公告管理', children: <Table rowKey="id" columns={announceColumns} dataSource={announcements} loading={loading} size="middle" pagination={false} tableLayout="fixed" scroll={{ x: 980 }} /> },
-          { key: 'prompt', label: '系统提示词', children: <Table rowKey="id" columns={promptColumns} dataSource={prompts} loading={loading} size="middle" pagination={false} tableLayout="fixed" scroll={{ x: 1020 }} /> },
+          {
+            key: 'prompt',
+            label: '系统提示词',
+            children: (
+              <>
+                {targetFeatureFilter && (
+                  <Alert
+                    type="info"
+                    showIcon
+                    style={{ marginBottom: 12 }}
+                    message={`当前仅显示 ${targetFeatureLabel} 提示词`}
+                    action={<Button size="small" onClick={() => setTargetFeatureFilter('')}>查看全部</Button>}
+                  />
+                )}
+                <Table rowKey="id" columns={promptColumns} dataSource={visiblePrompts} loading={loading} size="middle" pagination={false} tableLayout="fixed" scroll={{ x: 1020 }} />
+              </>
+            ),
+          },
           { key: 'confirm', label: '合规记录', children: <Table rowKey="id" columns={[
             { title: '场景', dataIndex: 'scene', width: 120 },
             { title: '用户ID', dataIndex: 'userId', width: 100 },
@@ -340,8 +380,26 @@ export default function ContentManagement() {
           )}
           {modalType === 'prompt' && (
             <>
-              <Form.Item name="promptKey" label="提示词标识" rules={[{ required: true }]}><Input /></Form.Item>
-              <Form.Item name="promptName" label="名称" rules={[{ required: true }]}><Input /></Form.Item>
+              <Form.Item name="promptKey" hidden><Input /></Form.Item>
+              <Form.Item name="promptName" label="名称" rules={[{ required: true }]}>
+                <Input
+                  onChange={(e) => {
+                    const name = e.target.value;
+                    const rights = form.getFieldValue('promptKey');
+                    // Auto-generate promptKey from name if key is empty or looks auto-generated
+                    const looksAuto = !rights || /^prompt_\d{13}$/.test(rights) || /^[a-z0-9_]+$/.test(rights);
+                    if (looksAuto) {
+                      const slug = name
+                        .toLowerCase()
+                        .replace(/[^a-z0-9一-鿿]+/g, '_')
+                        .replace(/^_+|_+$/g, '')
+                        .replace(/_+/g, '_')
+                        .substring(0, 32);
+                      form.setFieldValue('promptKey', slug || `prompt_${Date.now()}`);
+                    }
+                  }}
+                />
+              </Form.Item>
               <Form.Item name="promptType" label="类型"><Select options={promptTypes} /></Form.Item>
               <Form.Item name="targetFeature" label="功能" rules={[{ required: true }]}><Select options={features} /></Form.Item>
               <Form.Item name="content" label="内容" rules={[{ required: true }]}><Input.TextArea rows={8} /></Form.Item>

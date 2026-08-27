@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Alert, Button, Checkbox, Form, Image, Input, InputNumber, Modal, Popconfirm, Select, Space, Switch, Table, Tag, Upload, message } from 'antd';
 import { BulbOutlined, DeleteOutlined, EditOutlined, PlusOutlined, PushpinOutlined, UploadOutlined } from '@ant-design/icons';
 import api from '../services/api';
+import { pickUploadUrl, uploadAdminAsset } from '../services/upload';
 import { TEMPLATE_USAGE_SHORT } from '../utils/adminLabels';
 import { EllipsisText, nowrapActionStyle } from '../utils/tableCells';
 
@@ -15,7 +16,8 @@ const VIDEO_USAGE_OPTIONS = [
 const POSITIONS = [
   { key: 'text_to_video', label: '文生视频' }, { key: 'image_to_video', label: '图生视频' },
   { key: 'first_last_frame_video', label: '首尾帧视频' }, { key: 'video_edit', label: '视频编辑' },
-  { key: 'inspiration', label: '灵感广场' },
+  { key: 'home_inspiration', label: '首页灵感推荐' }, { key: 'inspiration', label: '灵感广场' },
+  { key: 'inspiration_top', label: '灵感页顶部横滑' },
 ];
 const USAGE_TARGET_FEATURES: Record<string, string> = {
   generate: 'text_to_video',
@@ -33,7 +35,7 @@ const RESOLUTIONS = ['480p', '720p', '1080p'];
 const DURATIONS = ['3s', '5s', '8s', '10s', '15s', '30s'];
 
 function resolveTargetFeature(usageType: string, config: Record<string, any>) {
-  const selectedPosition = POSITIONS.find(item => item.key !== 'inspiration' && config[item.key]);
+  const selectedPosition = POSITIONS.find(item => !item.key.startsWith('inspiration') && config[item.key]);
   return selectedPosition?.key || USAGE_TARGET_FEATURES[usageType] || 'text_to_video';
 }
 
@@ -54,13 +56,15 @@ export default function VideoTemplates() {
   const previewUrl = Form.useWatch('previewUrl', form);
 
   const [pagination, setPagination] = useState({ current: 1, pageSize: 20, total: 0 });
+  const [keyword, setKeyword] = useState('');
   const [selectedRowKeys, setSelectedRowKeys] = useState<Array<string | number>>([]);
-  const fetch = (page = 1) => { setLoading(true); setSelectedRowKeys([]); api.get('/templates', { params: { type: 'video', page, pageSize: 20 } }).then((r: any) => { const d = r.data?.list || r.data || []; setData(Array.isArray(d) ? d : []); setPagination(p => ({ ...p, current: page, total: r.data?.pagination?.total || 0 })); }).finally(() => setLoading(false)); };
+  const fetch = (page = 1, nextKeyword = keyword) => { setLoading(true); setSelectedRowKeys([]); api.get('/templates', { params: { type: 'video', page, pageSize: 20, keyword: nextKeyword || undefined } }).then((r: any) => { const d = r.data?.list || r.data || []; setData(Array.isArray(d) ? d : []); setPagination(p => ({ ...p, current: page, total: r.data?.pagination?.total || 0 })); }).finally(() => setLoading(false)); };
+  const search = (value: string) => { const nextKeyword = value.trim(); setKeyword(nextKeyword); fetch(1, nextKeyword); };
   const fetchCats = () => { api.get('/content/template-categories').then((r: any) => setCats(r.data || [])); };
   useEffect(() => { fetch(); fetchCats(); }, []);
 
-  const openCreate = () => { setEditing(null); form.resetFields(); form.setFieldsValue({ sortOrder: 0, status: 'active', usageType: 'generate' }); setDisplayConfig({}); setModalOpen(true); };
-  const openEdit = (item: any) => { setEditing(item); form.setFieldsValue({ title: item.title || item.name, prompt: item.prompt, coverUrl: item.coverUrl, previewUrl: item.previewUrl || '', categoryId: item.categoryId, resolution: item.resolution || '720p', duration: item.duration || '5s', ratio: item.ratio || '16:9', style: item.style || '', sortOrder: item.sortOrder || 0, isRecommended: item.isRecommended || false, status: item.status || 'active', usageType: item.usageType || 'generate' }); setDisplayConfig(item.displayConfig || {}); setModalOpen(true); };
+  const openCreate = () => { setEditing(null); form.resetFields(); form.setFieldsValue({ sortOrder: 0, usageCount: randomUsageCount(), status: 'active', usageType: 'generate' }); setDisplayConfig({}); setModalOpen(true); };
+  const openEdit = (item: any) => { setEditing(item); form.setFieldsValue({ title: item.title || item.name, prompt: item.prompt, coverUrl: item.coverUrl, previewUrl: item.previewUrl || '', categoryId: item.categoryId, resolution: item.resolution || '720p', duration: item.duration || '5s', ratio: item.ratio || '16:9', style: item.style || '', sortOrder: item.sortOrder || 0, usageCount: item.usageCount || 0, isRecommended: item.isRecommended || false, status: item.status || 'active', usageType: item.usageType || 'generate' }); setDisplayConfig(item.displayConfig || {}); setModalOpen(true); };
 
   const toggleDisplay = (k: string) => { setDisplayConfig(p => p[k] ? (() => { const c = { ...p }; delete c[k]; return c; })() : { ...p, [k]: { pinned: false, pinOrder: 0 } }); };
   const togglePin = (k: string) => { setDisplayConfig(p => { if (!p[k]) return p; const max = Math.max(0, ...Object.values(p).map((x: any) => x?.pinOrder || 0)); return { ...p, [k]: { ...p[k], pinned: !p[k].pinned, pinOrder: p[k].pinned ? 0 : max + 1 } }; }); };
@@ -68,15 +72,10 @@ export default function VideoTemplates() {
   const toggleBatchPin = (k: string) => { setBatchDisplayConfig(p => { if (!p[k]) return p; const max = Math.max(0, ...Object.values(p).map((x: any) => x?.pinOrder || 0)); return { ...p, [k]: { ...p[k], pinned: !p[k].pinned, pinOrder: p[k].pinned ? 0 : max + 1 } }; }); };
   const uploadTemplateAsset = (field: 'coverUrl' | 'previewUrl', category: 'template_cover' | 'ai_video', refType: string) => async (options: any) => {
     const file = options.file as File;
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('category', category);
-    formData.append('refType', refType);
     try {
       setUploading(prev => ({ ...prev, [field]: true }));
-      const result: any = await api.post('/files/upload', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
-      const fileInfo = result?.data || result;
-      const url = fileInfo?.url || fileInfo?.cdnUrl;
+      const fileInfo: any = await uploadAdminAsset(file, { category, refType });
+      const url = pickUploadUrl(fileInfo);
       if (!url) throw new Error('上传成功但未返回文件地址');
       form.setFieldsValue({ [field]: url });
       message.success(field === 'coverUrl' ? '封面上传成功' : '视频资源上传成功');
@@ -120,6 +119,7 @@ export default function VideoTemplates() {
     { title: '展示位置', width: 180, render: (_: any, r: any) => { const cfg = r.displayConfig; if (!cfg || !Object.keys(cfg).length) return '-'; return <Space size={2} wrap>{Object.keys(cfg).map(k => <Tag key={k} color={cfg[k]?.pinned ? 'orange' : 'purple'}>{POSITIONS.find(p => p.key === k)?.label || k}{cfg[k]?.pinned ? ' 📌' : ''}</Tag>)}</Space>; }},
     { title: '分辨率', dataIndex: 'resolution', width: 80 },
     { title: '时长', dataIndex: 'duration', width: 60 },
+    { title: '引用', dataIndex: 'usageCount', width: 60 },
     { title: '排序', dataIndex: 'sortOrder', width: 60 },
     { title: '状态', dataIndex: 'status', width: 70, render: (v: string) => <Tag color={v === 'active' ? 'green' : 'default'}>{v === 'active' ? '启用' : '停用'}</Tag> },
     { title: '操作', width: 210, render: (_: any, r: any) => (<Space size={4} style={nowrapActionStyle}><Button size="small" icon={<EditOutlined />} onClick={() => openEdit(r)}>编辑</Button><Switch checked={r.status === 'active'} onChange={() => toggleStatus(r)} checkedChildren="开" unCheckedChildren="关" /><Popconfirm title="确认删除？" onConfirm={() => del(r.id)}><Button size="small" danger icon={<DeleteOutlined />} /></Popconfirm></Space>)},
@@ -128,16 +128,17 @@ export default function VideoTemplates() {
   return (
     <div><h2><BulbOutlined /> 视频模板</h2>
       <Space style={{ marginBottom: 12 }}>
+        <Input.Search allowClear enterButton placeholder="搜索名称 / 提示词 / 分类" value={keyword} onChange={(e) => setKeyword(e.target.value)} onSearch={search} style={{ width: 320 }} />
         <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新增模板</Button>
         <Popconfirm title={`确认删除选中的 ${selectedRowKeys.length} 个模板？`} onConfirm={batchDelete} disabled={!selectedRowKeys.length}>
           <Button danger icon={<DeleteOutlined />} disabled={!selectedRowKeys.length}>批量删除</Button>
         </Popconfirm>
         <Button icon={<PushpinOutlined />} disabled={!selectedRowKeys.length} onClick={openBatchDisplay}>批量展示位置</Button>
       </Space>
-      <Table rowKey="id" rowSelection={{ selectedRowKeys, onChange: (keys) => setSelectedRowKeys(keys as Array<string | number>) }} columns={cols} dataSource={data} loading={loading} size="middle" pagination={pagination} tableLayout="fixed" scroll={{ x: 1240 }} onChange={(p: any) => fetch(p.current)} />
+      <Table rowKey="id" rowSelection={{ selectedRowKeys, onChange: (keys) => setSelectedRowKeys(keys as Array<string | number>) }} columns={cols} dataSource={data} loading={loading} size="middle" pagination={pagination} tableLayout="fixed" scroll={{ x: 1300 }} onChange={(p: any) => fetch(p.current, keyword)} />
       <Modal title={editing ? '编辑模板' : '新增模板'} open={modalOpen} onCancel={() => setModalOpen(false)} onOk={save} confirmLoading={saving} width={640} destroyOnClose>
         <Form form={form} layout="vertical" style={{ marginTop: 12 }}>
-          <Form.Item name="title" label="模板名称" rules={[{ required: true }]}><Input /></Form.Item>
+          <Form.Item name="title" label="模板名称" extra="可留空，保存时默认使用提示词作为标题。"><Input /></Form.Item>
           <Form.Item name="prompt" label="提示词" rules={[{ required: true }]}><Input.TextArea rows={3} /></Form.Item>
           <Form.Item label="封面图片" extra="支持上传 jpg、png、webp，也可以手动填写图片 URL。">
             <Space align="start" size={12} style={{ width: '100%' }}>
@@ -182,6 +183,7 @@ export default function VideoTemplates() {
           </Space>
           <Space style={{ display: 'flex' }} size="middle">
             <Form.Item name="sortOrder" label="排序"><InputNumber min={0} style={{ width: 80 }} /></Form.Item>
+            <Form.Item name="usageCount" label="使用次数"><InputNumber min={0} precision={0} style={{ width: 110 }} /></Form.Item>
             <Form.Item name="isRecommended" label="推荐" valuePropName="checked"><Switch /></Form.Item>
             {editing && <Form.Item name="status" label="状态"><Select options={[{ label: '启用', value: 'active' }, { label: '停用', value: 'inactive' }]} style={{ width: 100 }} /></Form.Item>}
           </Space>
@@ -202,4 +204,8 @@ export default function VideoTemplates() {
       </Modal>
     </div>
   );
+}
+
+function randomUsageCount() {
+  return 20 + Math.floor(Math.random() * 281);
 }

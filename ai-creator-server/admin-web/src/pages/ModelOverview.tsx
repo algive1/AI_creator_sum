@@ -157,7 +157,7 @@ export default function ModelOverview() {
                 </Descriptions.Item>
                 <Descriptions.Item label={<Tag color="blue">步骤 2</Tag>}>
                   <Text strong>创建功能档位</Text>
-                  <br /><Text type="secondary">进入「功能页配置」→ 切换到对应功能（如文生图）→ 点击「新增档位」→ 填写档位名称、积分价格、画质倍率定价 → 保存。</Text>
+                  <br /><Text type="secondary">进入「功能页配置」→ 切换到对应功能（如文生图）→ 点击「新增档位」→ 填写档位名称、积分价格；图片高分辨率价格请用参数矩阵配置 → 保存。</Text>
                   <br /><a onClick={() => nav('/ai-models/features')}>去功能页配置 →</a>
                 </Descriptions.Item>
                 <Descriptions.Item label={<Tag color="blue">步骤 3</Tag>}>

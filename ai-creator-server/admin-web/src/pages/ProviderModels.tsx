@@ -132,6 +132,53 @@ interface ProviderPreset {
   remark?: string;
 }
 
+interface ModelSyncFieldChange {
+  key: string;
+  label: string;
+  before?: unknown;
+  after?: unknown;
+}
+
+interface ModelSyncAddition {
+  apiModelName: string;
+  name: string;
+  modelType: string;
+  queryTaskUrl?: string;
+}
+
+interface ModelSyncUpdate {
+  modelId: number;
+  apiModelName: string;
+  name: string;
+  fields: ModelSyncFieldChange[];
+}
+
+interface ModelSyncRemoval {
+  modelId: number;
+  apiModelName: string;
+  name: string;
+  modelType: string;
+  bindingCount?: number;
+  fallbackCount?: number;
+  affectedTiers?: Array<{
+    tierId?: number;
+    tierKey?: string;
+    tierName?: string;
+    featureKey?: string;
+    featureName?: string;
+  }>;
+}
+
+interface ModelSyncPreviewData {
+  totalRemote: number;
+  additions: ModelSyncAddition[];
+  updates: ModelSyncUpdate[];
+  removals: ModelSyncRemoval[];
+  skipped: Array<{ apiModelName: string; name: string }>;
+  failures: Array<{ scope: string; message: string }>;
+  message?: string;
+}
+
 interface ProviderTestResult {
   responseStatus?: string | number;
   responseTimeMs?: number;
@@ -180,6 +227,13 @@ const PROVIDER_PRESETS: ProviderPreset[] = [
     remark: 'OpenAI 兼容模型中转站',
   },
   {
+    key: 'deepseek',
+    name: 'DeepSeek',
+    providerType: 'openai_compatible',
+    apiBaseUrl: 'https://api.deepseek.com',
+    remark: 'DeepSeek OpenAI-compatible text provider, default model deepseek-v4-flash.',
+  },
+  {
     key: 'custom-relay',
     name: '自定义中转站',
     providerType: 'openai_compatible',
@@ -220,6 +274,7 @@ const MODEL_CAPABILITY_OPTIONS = [
   { label: '图生视频', value: 'image_to_video' },
   { label: '首尾帧视频', value: 'first_last_frame_video' },
   { label: '视频编辑', value: 'video_edit' },
+  { label: '文本对话', value: 'text_chat' },
   { label: '提示词优化', value: 'prompt_optimize' },
   { label: '文本生成', value: 'text_generation' },
 ];
@@ -232,6 +287,7 @@ const FEATURE_LABELS: Record<string, string> = {
   image_to_video: '图生视频',
   first_last_frame_video: '首尾帧视频',
   video_edit: '视频编辑',
+  text_chat: '文本对话',
   prompt_optimize: '提示词优化',
   text_generation: '文本生成',
 };
@@ -365,6 +421,53 @@ const parseConfig = (config: ModelItem['config']) => {
   }
 };
 
+const listToText = (value: unknown) => (Array.isArray(value) ? value.map((item) => String(item)).join('\n') : '');
+
+const textToList = (value: unknown) =>
+  String(value || '')
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+const optionalNumber = (value: unknown) => {
+  if (value === undefined || value === null || value === '') return undefined;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : undefined;
+};
+
+const isHongniaoModel = (model: ModelItem | null | undefined, config: Record<string, unknown>, provider?: ProviderItem | null) => {
+  const providerType = String(provider?.providerType || model?.providerType || '').toLowerCase();
+  const providerKey = String(provider?.providerKey || provider?.code || '').toLowerCase();
+  const syncProviderType = String(config.sync_provider_type || '').toLowerCase();
+  const apiFormat = String(config.api_format || '').toLowerCase();
+  return providerType === 'hongniao' || providerKey === 'hongniao' || syncProviderType === 'hongniao' || apiFormat.startsWith('hongniao_');
+};
+
+const buildHongniaoCommonConfig = (values: Record<string, unknown>, existingConfig: Record<string, unknown>) => {
+  const defaultParams = {
+    ...((existingConfig.default_params && typeof existingConfig.default_params === 'object') ? existingConfig.default_params as Record<string, unknown> : {}),
+  };
+  if (hasValue(values.defaultAspectRatio)) defaultParams.aspectRatio = values.defaultAspectRatio;
+  if (hasValue(values.defaultResolution)) defaultParams.resolution = values.defaultResolution;
+  if (hasValue(values.defaultDurationSeconds)) defaultParams.seconds = values.defaultDurationSeconds;
+  return {
+    supported_ratios: textToList(values.supportedRatiosText),
+    supported_qualities: textToList(values.supportedQualitiesText),
+    supported_durations: textToList(values.supportedDurationsText),
+    supported_audio_modes: textToList(values.supportedAudioModesText),
+    supported_size_modes: textToList(values.supportedSizeModesText),
+    input_mode: values.inputMode || undefined,
+    reference_upload_mode: values.referenceUploadMode || undefined,
+    max_images: optionalNumber(values.maxImages),
+    min_reference_images: optionalNumber(values.minReferenceImages),
+    max_reference_images: optionalNumber(values.maxReferenceImages),
+    max_audio_urls: optionalNumber(values.maxAudioUrls),
+    max_video_urls: optionalNumber(values.maxVideoUrls),
+    default_size_key: values.defaultSizeKey || undefined,
+    default_params: defaultParams,
+  };
+};
+
 const normalizeCapabilityKey = (value: unknown) => {
   const key = String(value || '').trim().toLowerCase();
   return CAPABILITY_ALIASES[key] || key;
@@ -491,6 +594,140 @@ const getRequestErrorMessage = (error: unknown, fallback: string) => {
   return detail ? `${fallback}：${detail}` : fallback;
 };
 
+const SyncPreviewContent = ({ data }: { data: ModelSyncPreviewData }) => {
+  const additionColumns: ColumnsType<ModelSyncAddition> = [
+    { title: '模型 ID', dataIndex: 'apiModelName', key: 'apiModelName', render: (value) => <Text code>{String(value)}</Text> },
+    { title: '名称', dataIndex: 'name', key: 'name', render: (value) => safeText(value) },
+    { title: '类型', dataIndex: 'modelType', key: 'modelType', width: 90, render: (value) => <Tag color="blue">{MODEL_TYPE_LABELS[String(value)] || String(value)}</Tag> },
+  ];
+  const updateColumns: ColumnsType<ModelSyncUpdate> = [
+    {
+      title: '模型',
+      dataIndex: 'name',
+      key: 'name',
+      render: (_, row) => (
+        <Space direction="vertical" size={0}>
+          <Text>{safeText(row.name)}</Text>
+          <Text type="secondary" code>{row.apiModelName}</Text>
+        </Space>
+      ),
+    },
+    {
+      title: '将覆盖字段',
+      dataIndex: 'fields',
+      key: 'fields',
+      render: (fields: ModelSyncFieldChange[]) => (
+        <Space wrap>
+          {fields.map((field) => (
+            <Tag key={field.key} color={field.key === 'config' ? 'warning' : 'processing'}>
+              {field.label || field.key}
+            </Tag>
+          ))}
+        </Space>
+      ),
+    },
+  ];
+  const removalColumns: ColumnsType<ModelSyncRemoval> = [
+    {
+      title: '模型',
+      dataIndex: 'name',
+      key: 'name',
+      render: (_, row) => (
+        <Space direction="vertical" size={0}>
+          <Text>{safeText(row.name)}</Text>
+          <Text type="secondary" code>{row.apiModelName}</Text>
+        </Space>
+      ),
+    },
+    { title: '绑定', dataIndex: 'bindingCount', key: 'bindingCount', width: 80, render: (value) => Number(value || 0) },
+    { title: 'Fallback', dataIndex: 'fallbackCount', key: 'fallbackCount', width: 90, render: (value) => Number(value || 0) },
+    {
+      title: '受影响功能页',
+      dataIndex: 'affectedTiers',
+      key: 'affectedTiers',
+      render: (tiers: ModelSyncRemoval['affectedTiers']) => (
+        <Space wrap>
+          {(tiers || []).length ? tiers?.map((tier, index) => (
+            <Tag key={`${tier.tierId || index}`} color="warning">
+              {tier.featureName || tier.featureKey || '-'} / {tier.tierName || tier.tierKey || '-'}
+            </Tag>
+          )) : <Text type="secondary">无绑定</Text>}
+        </Space>
+      ),
+    },
+  ];
+
+  return (
+    <Space direction="vertical" size={12} style={{ width: '100%' }}>
+      <Alert
+        showIcon
+        type={data.updates.length ? 'warning' : 'info'}
+        message="同步预览"
+        description="确认后才会写入数据库。已有模型只覆盖模型类型、轮询接口和能力参数；价格、启停状态、档位绑定和显示名不会被覆盖。"
+      />
+      <Space wrap>
+        <Tag>远端 {data.totalRemote}</Tag>
+        <Tag color="green">新增 {data.additions.length}</Tag>
+        <Tag color={data.updates.length ? 'orange' : 'default'}>待覆盖 {data.updates.length}</Tag>
+        <Tag color={data.removals.length ? 'red' : 'default'}>删除待处理 {data.removals.length}</Tag>
+        <Tag>跳过 {data.skipped.length}</Tag>
+        {data.failures.length ? <Tag color="red">部分失败 {data.failures.length}</Tag> : null}
+      </Space>
+      {data.failures.length ? (
+        <Alert
+          showIcon
+          type="warning"
+          message="部分模型类型拉取失败"
+          description={data.failures.map((item) => `${item.scope}: ${item.message}`).join('；')}
+        />
+      ) : null}
+      {data.additions.length ? (
+        <div>
+          <Text strong>新增模型</Text>
+          <Table
+            size="small"
+            rowKey="apiModelName"
+            columns={additionColumns}
+            dataSource={data.additions}
+            pagination={data.additions.length > 6 ? { pageSize: 6, size: 'small' } : false}
+            style={{ marginTop: 8 }}
+          />
+        </div>
+      ) : null}
+      {data.updates.length ? (
+        <div>
+          <Text strong>需要确认覆盖的已有模型</Text>
+          <Table
+            size="small"
+            rowKey="modelId"
+            columns={updateColumns}
+            dataSource={data.updates}
+            pagination={data.updates.length > 6 ? { pageSize: 6, size: 'small' } : false}
+            style={{ marginTop: 8 }}
+          />
+        </div>
+      ) : null}
+      {data.removals.length ? (
+        <div>
+          <Alert
+            showIcon
+            type="warning"
+            style={{ marginBottom: 8 }}
+            message="这些模型已不在红鸟远端列表中，确认同步后会软停用并解除套餐绑定和 fallback。历史任务和模型记录会保留。"
+          />
+          <Table
+            size="small"
+            rowKey="modelId"
+            columns={removalColumns}
+            dataSource={data.removals}
+            pagination={data.removals.length > 6 ? { pageSize: 6, size: 'small' } : false}
+          />
+        </div>
+      ) : null}
+    </Space>
+  );
+};
+
 const ProviderModels = () => {
   const navigate = useNavigate();
   const [providers, setProviders] = useState<ProviderItem[]>([]);
@@ -524,6 +761,7 @@ const ProviderModels = () => {
   const [detailProvider, setDetailProvider] = useState<ProviderItem | null>(null);
   const [detailModel, setDetailModel] = useState<ModelItem | null>(null);
   const [checkingProviderId, setCheckingProviderId] = useState<number | null>(null);
+  const [syncingProviderId, setSyncingProviderId] = useState<number | null>(null);
   const [providerTestOpen, setProviderTestOpen] = useState(false);
   const [testingProvider, setTestingProvider] = useState<ProviderItem | null>(null);
   const [providerTestStatus, setProviderTestStatus] = useState<'idle' | 'testing' | 'success' | 'failed'>('idle');
@@ -564,6 +802,16 @@ const ProviderModels = () => {
     if (!selectedProviderId) return null;
     return providers.find((provider) => provider.id === selectedProviderId) || null;
   }, [providers, selectedProviderId]);
+
+  const editingModelConfig = useMemo(
+    () => editingModel ? parseConfig(editingModel.config) : {},
+    [editingModel],
+  );
+
+  const editingIsHongniao = useMemo(
+    () => isHongniaoModel(editingModel, editingModelConfig, editingModel ? providerMap.get(editingModel.providerId) : currentProvider),
+    [currentProvider, editingModel, editingModelConfig, providerMap],
+  );
 
   const currentModels = useMemo(() => {
     if (!currentProvider) return [];
@@ -946,6 +1194,55 @@ const ProviderModels = () => {
     }
   };
 
+  const openProviderModelSync = async (provider: ProviderItem) => {
+    if (syncingProviderId === provider.id) return;
+    setSyncingProviderId(provider.id);
+    try {
+      const res: any = await api.post(`/models/providers/${provider.id}/sync`, { mode: 'preview' });
+      const payload = res?.data || {};
+      const preview: ModelSyncPreviewData = {
+        totalRemote: Number(payload.totalRemote || 0),
+        additions: Array.isArray(payload.additions) ? payload.additions : [],
+        updates: Array.isArray(payload.updates) ? payload.updates : [],
+        removals: Array.isArray(payload.removals) ? payload.removals : [],
+        skipped: Array.isArray(payload.skipped) ? payload.skipped : [],
+        failures: Array.isArray(payload.failures) ? payload.failures : [],
+        message: payload.message,
+      };
+      if (!preview.additions.length && !preview.updates.length && !preview.removals.length) {
+        message.info(preview.message || '同步预览完成，没有需要写入的变动');
+        return;
+      }
+      Modal.confirm({
+        title: `同步模型：${provider.name}`,
+        width: 920,
+        icon: <SyncOutlined />,
+        content: <SyncPreviewContent data={preview} />,
+        okText: preview.removals.length ? '确认同步并软停用' : preview.updates.length ? '确认覆盖并同步' : '确认同步新增模型',
+        cancelText: '取消',
+        onOk: async () => {
+          setSyncingProviderId(provider.id);
+          try {
+            const applyRes: any = await api.post(`/models/providers/${provider.id}/sync`, { mode: 'apply' });
+            message.success(applyRes?.data?.message || '同步已完成');
+            await Promise.allSettled([refreshAll(), fetchModelTable()]);
+          } catch (error) {
+            logRequestError('同步模型失败', error);
+            message.error(getRequestErrorMessage(error, '同步模型失败'));
+            throw error;
+          } finally {
+            setSyncingProviderId(null);
+          }
+        },
+      });
+    } catch (error) {
+      logRequestError('获取模型同步预览失败', error);
+      message.error(getRequestErrorMessage(error, '获取模型同步预览失败'));
+    } finally {
+      setSyncingProviderId(null);
+    }
+  };
+
   const openAddModel = () => {
     if (!currentProvider) {
       message.warning('请先选择或添加供应商');
@@ -974,6 +1271,22 @@ const ProviderModels = () => {
       retryTimes: 3,
       maxConcurrency: 5,
       maxPollingMinutes: undefined,
+      supportedRatiosText: '',
+      supportedQualitiesText: '',
+      supportedDurationsText: '',
+      supportedAudioModesText: '',
+      supportedSizeModesText: '',
+      inputMode: '',
+      referenceUploadMode: '',
+      maxImages: undefined,
+      minReferenceImages: undefined,
+      maxReferenceImages: undefined,
+      maxAudioUrls: undefined,
+      maxVideoUrls: undefined,
+      defaultAspectRatio: '',
+      defaultResolution: '',
+      defaultDurationSeconds: '',
+      defaultSizeKey: '',
       status: true,
       remark: '',
     });
@@ -1008,6 +1321,22 @@ const ProviderModels = () => {
       retryTimes: model.retryTimes,
       maxConcurrency: model.maxConcurrency,
       maxPollingMinutes: config.max_polling_minutes,
+      supportedRatiosText: listToText(config.supported_ratios),
+      supportedQualitiesText: listToText(config.supported_qualities),
+      supportedDurationsText: listToText(config.supported_durations),
+      supportedAudioModesText: listToText(config.supported_audio_modes),
+      supportedSizeModesText: listToText(config.supported_size_modes),
+      inputMode: config.input_mode,
+      referenceUploadMode: config.reference_upload_mode,
+      maxImages: config.max_images,
+      minReferenceImages: config.min_reference_images,
+      maxReferenceImages: config.max_reference_images,
+      maxAudioUrls: config.max_audio_urls,
+      maxVideoUrls: config.max_video_urls,
+      defaultAspectRatio: (config.default_params as Record<string, unknown> | undefined)?.aspectRatio,
+      defaultResolution: (config.default_params as Record<string, unknown> | undefined)?.resolution,
+      defaultDurationSeconds: (config.default_params as Record<string, unknown> | undefined)?.seconds,
+      defaultSizeKey: config.default_size_key,
       status: normalizeStatus(model.status),
       remark: model.remark,
     });
@@ -1032,7 +1361,8 @@ const ProviderModels = () => {
         maxConcurrency: values.maxConcurrency,
         remark: values.remark,
       };
-      const configBody = {
+      const existingConfig = editingModel ? parseConfig(editingModel.config) : {};
+      const configBody: Record<string, unknown> = {
         capabilities: normalizeCapabilities(values.capabilities || []),
         model_source: values.modelSource,
         description: values.description,
@@ -1040,6 +1370,9 @@ const ProviderModels = () => {
         fallback_priority: values.fallbackPriority,
         max_polling_minutes: values.maxPollingMinutes,
       };
+      if (editingIsHongniao) {
+        Object.assign(configBody, buildHongniaoCommonConfig(values, existingConfig));
+      }
       if (editingModel) {
         await api.put(`/real-models/${editingModel.id}`, { ...body, config: configBody });
         message.success('模型已保存');
@@ -1764,25 +2097,8 @@ const ProviderModels = () => {
                   </Button>
                   <Button
                     icon={<SyncOutlined />}
-                    loading={!!currentProvider && checkingProviderId === currentProvider.id}
-                    onClick={async () => {
-                      if (!currentProvider) return;
-                      Modal.confirm({
-                        title: '同步模型',
-                        content: `将从 ${currentProvider.name} 拉取最新模型列表并自动新增缺失的模型。已存在的模型不会重复添加。`,
-                        okText: '开始同步',
-                        cancelText: '取消',
-                        onOk: async () => {
-                          try {
-                            const res: any = await api.post(`/models/providers/${currentProvider.id}/sync`);
-                            message.success(res.data?.message || '同步完成');
-                            void refreshAll();
-                          } catch (err: any) {
-                            message.error(err?.response?.data?.message || '同步失败');
-                          }
-                        },
-                      });
-                    }}
+                    loading={!!currentProvider && syncingProviderId === currentProvider.id}
+                    onClick={() => currentProvider && openProviderModelSync(currentProvider)}
                   >
                     同步模型
                   </Button>
@@ -2449,6 +2765,102 @@ const ProviderModels = () => {
             message="当前后端仅保存 1K 售价和 1K 成本价；2K/4K 字段仅用于前端配置参考，不会提交。"
           />
 
+          {editingIsHongniao ? (
+            <>
+              <Divider orientation="left" plain>
+                红鸟能力
+              </Divider>
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 16 }}
+                message="这里只编辑常用能力字段，完整上游参数保留在模型详情中只读查看。"
+              />
+              <Row gutter={16}>
+                <Col span={12}>
+                  <Form.Item name="supportedRatiosText" label="支持比例">
+                    <TextArea rows={3} placeholder={'16:9\n9:16\n1:1'} />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item name="supportedQualitiesText" label="支持清晰度">
+                    <TextArea rows={3} placeholder={'720p\n1K\n2K'} />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item name="supportedDurationsText" label="支持时长">
+                    <TextArea rows={3} placeholder={'5s\n10s\n15s'} />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item name="supportedAudioModesText" label="音频模式">
+                    <TextArea rows={3} placeholder={'silent\naudio'} />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item name="supportedSizeModesText" label="尺寸模式">
+                    <Input placeholder="ratio, auto" />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item name="inputMode" label="输入模式">
+                    <Input placeholder="text / first_frame / reference_images / source_video" />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item name="referenceUploadMode" label="参考上传模式">
+                    <Input placeholder="none / first_frame / reference_images / source_video" />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item name="defaultSizeKey" label="默认尺寸 key">
+                    <Input placeholder="auto 或 size option key" />
+                  </Form.Item>
+                </Col>
+                <Col span={8}>
+                  <Form.Item name="maxImages" label="最大图片数">
+                    <InputNumber min={0} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+                <Col span={8}>
+                  <Form.Item name="minReferenceImages" label="最少参考图">
+                    <InputNumber min={0} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+                <Col span={8}>
+                  <Form.Item name="maxReferenceImages" label="最多参考图">
+                    <InputNumber min={0} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+                <Col span={8}>
+                  <Form.Item name="maxAudioUrls" label="最大音频数">
+                    <InputNumber min={0} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+                <Col span={8}>
+                  <Form.Item name="maxVideoUrls" label="最大视频数">
+                    <InputNumber min={0} style={{ width: '100%' }} />
+                  </Form.Item>
+                </Col>
+                <Col span={8}>
+                  <Form.Item name="defaultDurationSeconds" label="默认时长">
+                    <Input placeholder="10" />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item name="defaultAspectRatio" label="默认比例">
+                    <Input placeholder="16:9" />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item name="defaultResolution" label="默认清晰度">
+                    <Input placeholder="720p / 1K / 2K" />
+                  </Form.Item>
+                </Col>
+              </Row>
+            </>
+          ) : null}
+
           <Divider orientation="left" plain>
             高级配置
           </Divider>
@@ -2993,6 +3405,33 @@ const ProviderModels = () => {
                 <Text type="secondary">暂未绑定功能页入口</Text>
               )}
             </Card>
+            {(() => {
+              const config = parseConfig(detailModel.config);
+              const remoteParameters = config.remote_parameters;
+              const shouldShow = isHongniaoModel(detailModel, config, providerMap.get(detailModel.providerId))
+                || (Array.isArray(remoteParameters) && remoteParameters.length > 0);
+              if (!shouldShow) return null;
+              return (
+                <Card size="small" title="红鸟原始参数" style={{ borderRadius: 8 }}>
+                  <Descriptions bordered size="small" column={1} style={{ marginBottom: 12 }}>
+                    <Descriptions.Item label="计费方式">{JSON.stringify(config.billing || {})}</Descriptions.Item>
+                    <Descriptions.Item label="远端状态">{safeText(config.remote_status as string)}</Descriptions.Item>
+                    <Descriptions.Item label="远端删除标记">{safeText(config.upstream_removed_at as string)}</Descriptions.Item>
+                  </Descriptions>
+                  <Collapse
+                    items={[{
+                      key: 'remote_parameters',
+                      label: '查看原始参数',
+                      children: (
+                        <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 360, overflow: 'auto' }}>
+                          {JSON.stringify(sanitizeSensitive(remoteParameters || []), null, 2)}
+                        </pre>
+                      ),
+                    }]}
+                  />
+                </Card>
+              );
+            })()}
             <Divider />
             <Space direction="vertical" style={{ width: '100%' }}>
               <Button block danger={normalizeStatus(detailModel.status)} onClick={() => confirmToggleModel(detailModel)}>

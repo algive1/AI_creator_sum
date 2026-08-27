@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Alert, Button, Card, Col, Row, Space, Switch, Tag, message } from 'antd';
+import { Alert, Button, Card, Col, Input, Row, Space, Switch, Tag, message } from 'antd';
 import { ThunderboltOutlined, CrownOutlined, SafetyCertificateOutlined, BulbOutlined, ReloadOutlined } from '@ant-design/icons';
 import api from '../services/api';
 
@@ -8,10 +8,31 @@ interface ToggleGroup {
   icon: React.ReactNode;
   intro: string;
   keys: string[];
-  labels: Record<string, { label: string; hint: string; disabledWarning: string }>;
+  labels: Record<string, { label: string; hint: string; disabledWarning: string; messageKey?: string; defaultMessage?: string }>;
 }
 
 const GROUPS: ToggleGroup[] = [
+  {
+    title: '小程序过审模式',
+    icon: <SafetyCertificateOutlined />,
+    intro: '控制小程序审核期的商业化露出。开启过审模式后，小程序不展示购买入口、价格、套餐、付款、充值和会员购买文案，后端也拒绝下单和拉起支付。',
+    keys: [
+      'miniapp.review_mode_enabled',
+      'miniapp.purchase_enabled',
+    ],
+    labels: {
+      'miniapp.review_mode_enabled': {
+        label: '过审模式',
+        hint: '开启后强制隐藏并禁止所有购买能力；审核通过后关闭即可恢复原购买入口和接口。',
+        disabledWarning: '关闭后小程序将按购买能力总开关、微信支付开关和会员开关恢复展示。',
+      },
+      'miniapp.purchase_enabled': {
+        label: '购买能力总开关',
+        hint: '关闭后积分购买、会员购买、微信支付下单均不可用；不影响 AI 创作、灵感、工具、历史记录等页面。',
+        disabledWarning: '关闭后用户无法购买积分或会员；已有订单记录仍可查询。',
+      },
+    },
+  },
   {
     title: 'AI 创作能力',
     icon: <ThunderboltOutlined />,
@@ -39,9 +60,9 @@ const GROUPS: ToggleGroup[] = [
         disabledWarning: '关闭后小程序提示词框不应展示"智能补全"或"提示词生成"入口。',
       },
       'ai.storyboard_generate.enabled': {
-        label: 'AI 漫剧分镜生成',
-        hint: '输入脚本后生成镜头画面、运镜、光影说明，对应 /tasks/storyboard。',
-        disabledWarning: '关闭后小程序不应展示"AI漫剧分镜"生成入口。',
+        label: 'AI 漫剧分镜能力（页内）',
+        hint: '控制漫剧页内分镜/脚本生成能力，对应 /tasks/storyboard；不等同于首页“生漫剧入口”维护态。',
+        disabledWarning: '关闭后小程序不应展示"AI漫剧分镜"生成入口；首页入口是否可进入请使用下方“首页生漫剧入口”。',
       },
     },
   },
@@ -111,28 +132,69 @@ const GROUPS: ToggleGroup[] = [
       },
     },
   },
+  {
+    title: '首页入口维护',
+    icon: <ThunderboltOutlined />,
+    intro: '控制小程序首页“生图 / 生视频 / 生漫剧”三个入口维护态。关闭后首页点击只提示后台配置文案，不跳转到对应功能页；不关闭生成接口或其它页面入口。',
+    keys: [
+      'miniapp.home_entry.image.enabled',
+      'miniapp.home_entry.video.enabled',
+      'miniapp.home_entry.comic.enabled',
+    ],
+    labels: {
+      'miniapp.home_entry.image.enabled': {
+        label: '首页生图入口',
+        hint: '关闭后，首页 AI 生图入口不跳转到生图页，只提示维护文案。',
+        disabledWarning: '关闭后用户无法从首页进入生图页；生图接口本身不受影响。',
+        messageKey: 'miniapp.home_entry.image.message',
+        defaultMessage: '生图功能维护中，请稍后再试',
+      },
+      'miniapp.home_entry.video.enabled': {
+        label: '首页生视频入口',
+        hint: '关闭后，首页 AI 视频入口不跳转到生视频页，只提示维护文案。',
+        disabledWarning: '关闭后用户无法从首页进入生视频页；生视频接口本身不受影响。',
+        messageKey: 'miniapp.home_entry.video.message',
+        defaultMessage: '生视频功能维护中，请稍后再试',
+      },
+      'miniapp.home_entry.comic.enabled': {
+        label: '首页生漫剧入口',
+        hint: '关闭后，首页 AI 漫剧入口不跳转到 AI 漫剧页，只提示维护文案。',
+        disabledWarning: '关闭后用户无法从首页进入 AI 漫剧页；AI 漫剧页面和生成接口本身不受影响。',
+        messageKey: 'miniapp.home_entry.comic.message',
+        defaultMessage: '生漫剧功能维护中，请稍后再试',
+      },
+    },
+  },
 ];
 
 const ALL_KEYS = GROUPS.flatMap(g => g.keys);
+const ALL_MESSAGE_KEYS = GROUPS.flatMap(g => Object.values(g.labels).map(item => item.messageKey).filter(Boolean)) as string[];
 const UNIMPLEMENTED_TOGGLES = new Set(['security.captcha_enabled']);
+
+function groupForKey(key: string) {
+  if (key.startsWith('ai.')) return 'ai';
+  if (key.startsWith('security.')) return 'security';
+  if (key.startsWith('miniapp.review_mode') || key.startsWith('miniapp.purchase')) return 'miniapp_review';
+  if (key.startsWith('miniapp.home_entry.')) return 'miniapp_home_entry';
+  if (key.startsWith('content.')) return 'general';
+  if (key.startsWith('template.') || key.startsWith('inspiration.')) return 'general';
+  if (key.startsWith('membership.')) return 'general';
+  return 'general';
+}
 
 export default function FeatureToggles() {
   const [toggles, setToggles] = useState<Record<string, boolean>>({});
+  const [entryMessages, setEntryMessages] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<Record<string, boolean>>({});
+  const [savingMessages, setSavingMessages] = useState<Record<string, boolean>>({});
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
       const results: Record<string, boolean> = {};
-      const groupsToFetch = [...new Set(GROUPS.map(g => {
-        // Map config keys to their groups
-        if (g.keys.some(k => k.startsWith('ai.'))) return 'ai';
-        if (g.keys.some(k => k.startsWith('membership.'))) return 'general';
-        if (g.keys.some(k => k.startsWith('content.') || k.startsWith('security.'))) return 'security';
-        if (g.keys.some(k => k.startsWith('template.') || k.startsWith('inspiration.'))) return 'general';
-        return 'general';
-      }))];
+      const messages: Record<string, string> = {};
+      const groupsToFetch = [...new Set([...ALL_KEYS, ...ALL_MESSAGE_KEYS].map(groupForKey))];
 
       for (const group of groupsToFetch) {
         try {
@@ -142,10 +204,14 @@ export default function FeatureToggles() {
             if (ALL_KEYS.includes(c.key)) {
               results[c.key] = c.value === 'true' || c.value === '1';
             }
+            if (ALL_MESSAGE_KEYS.includes(c.key)) {
+              messages[c.key] = String(c.value || '');
+            }
           }
         } catch { /* group might not exist yet */ }
       }
       setToggles(results);
+      setEntryMessages(messages);
     } finally {
       setLoading(false);
     }
@@ -160,21 +226,31 @@ export default function FeatureToggles() {
     }
     setSaving(prev => ({ ...prev, [key]: true }));
     try {
-      // Determine the correct config group for this key
-      let group = 'general';
-      if (key.startsWith('ai.')) group = 'ai';
-      else if (key.startsWith('content.')) group = 'general';
-      else if (key.startsWith('security.')) group = 'security';
-      else if (key.startsWith('template.') || key.startsWith('inspiration.')) group = 'general';
-      else if (key.startsWith('membership.')) group = 'general';
-
-      await api.post('/settings/' + group, { [key]: String(checked) });
+      await api.post('/settings/' + groupForKey(key), { [key]: String(checked) });
       setToggles(prev => ({ ...prev, [key]: checked }));
       message.success(checked ? `已开启「${getLabel(key)}」` : `已关闭「${getLabel(key)}」`);
     } catch {
       message.error('保存失败');
     } finally {
       setSaving(prev => ({ ...prev, [key]: false }));
+    }
+  };
+
+  const handleMessageSave = async (key: string, fallback: string) => {
+    const value = String(entryMessages[key] ?? fallback).trim();
+    if (!value) {
+      message.warning('维护提示文案不能为空');
+      return;
+    }
+    setSavingMessages(prev => ({ ...prev, [key]: true }));
+    try {
+      await api.post('/settings/' + groupForKey(key), { [key]: value });
+      setEntryMessages(prev => ({ ...prev, [key]: value }));
+      message.success('维护提示文案已保存');
+    } catch {
+      message.error('维护提示文案保存失败');
+    } finally {
+      setSavingMessages(prev => ({ ...prev, [key]: false }));
     }
   };
 
@@ -244,6 +320,15 @@ export default function FeatureToggles() {
         description="本页只控制入口开关；模型 ID 和积分在「系统设置 → AI 文本能力」配置；具体提示词模板在「内容管理 → 系统提示词」配置。小程序端需要读取 /public/app 的 features 后再展示对应按钮。"
       />
 
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="工具箱配置已迁移"
+        description="工具页总开关、工具增删排序、次数、广告解锁、积分收费、关闭提示和工具模型绑定，请在「微信配置 → 工具页配置」统一维护。"
+        action={<Button size="small" type="primary" onClick={() => { window.location.href = '/wechat/tools'; }}>前往工具页配置</Button>}
+      />
+
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         {GROUPS.map(group => {
           const anyOff = group.keys.some(k => toggles[k] === false);
@@ -277,6 +362,29 @@ export default function FeatureToggles() {
                         )}
                         {toggles[key] === false && (
                           <Alert type="warning" message={getWarning(key)} style={{ fontSize: 11, padding: '6px 10px' }} showIcon={false} />
+                        )}
+                        {group.labels[key]?.messageKey && (
+                          <div style={{ marginTop: 8 }}>
+                            <Input.TextArea
+                              value={entryMessages[group.labels[key].messageKey!] ?? group.labels[key].defaultMessage}
+                              rows={2}
+                              maxLength={80}
+                              showCount
+                              placeholder="关闭入口时给用户看的提示"
+                              onChange={(event) => {
+                                const messageKey = group.labels[key].messageKey!;
+                                setEntryMessages(prev => ({ ...prev, [messageKey]: event.target.value }));
+                              }}
+                            />
+                            <Button
+                              size="small"
+                              style={{ marginTop: 8 }}
+                              loading={savingMessages[group.labels[key].messageKey!]}
+                              onClick={() => handleMessageSave(group.labels[key].messageKey!, group.labels[key].defaultMessage || '功能维护中，请稍后再试')}
+                            >
+                              保存提示文案
+                            </Button>
+                          </div>
                         )}
                       </div>
                     </div>

@@ -284,9 +284,7 @@ export default function SystemUpdate() {
       formData.append('file', options.file as File);
       setUploading(true);
       try {
-        const res: any = await api.post('/system/update-packages/upload', formData, {
-          headers: { 'Content-Type': 'multipart/form-data' },
-        });
+        const res: any = await api.post('/system/update-packages/upload', formData);
         message.success(res.message || '更新包上传成功');
         options.onSuccess?.(res);
         await fetchPackages();

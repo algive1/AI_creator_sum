@@ -9,34 +9,67 @@ import {
   WechatOutlined, ControlOutlined, CloudUploadOutlined,
 } from '@ant-design/icons';
 
-const Dashboard = lazy(() => import('../pages/Dashboard'));
-const Users = lazy(() => import('../pages/Users'));
-const Tasks = lazy(() => import('../pages/Tasks'));
-const Orders = lazy(() => import('../pages/Orders'));
-const Audit = lazy(() => import('../pages/Audit'));
-const Files = lazy(() => import('../pages/Files'));
-const Settings = lazy(() => import('../pages/settings'));
-const Membership = lazy(() => import('../pages/Membership'));
-const PointTasks = lazy(() => import('../pages/PointTasks'));
-const Invite = lazy(() => import('../pages/Invite'));
-const FeatureConfig = lazy(() => import('../pages/FeatureConfig'));
-const ProviderModels = lazy(() => import('../pages/ProviderModels'));
-const ModelTest = lazy(() => import('../pages/ModelTest'));
-const ModelOverview = lazy(() => import('../pages/ModelOverview'));
-const TemplateCategories = lazy(() => import('../pages/TemplateCategories'));
-const ImageTemplates = lazy(() => import('../pages/ImageTemplates'));
-const VideoTemplates = lazy(() => import('../pages/VideoTemplates'));
-const InspirationSquare = lazy(() => import('../pages/InspirationSquare'));
-const TemplateReview = lazy(() => import('../pages/TemplateReview'));
-const ContentManagement = lazy(() => import('../pages/ContentManagement'));
-const SystemUpdate = lazy(() => import('../pages/SystemUpdate'));
-const LaunchCheck = lazy(() => import('../pages/LaunchCheck'));
-const WechatSettings = lazy(() => import('../pages/WechatSettings'));
-const AuditLog = lazy(() => import('../pages/AuditLog'));
-const StorageSettings = lazy(() => import('../pages/StorageSettings'));
-const ApiReference = lazy(() => import('../pages/ApiReference'));
-const FeatureToggles = lazy(() => import('../pages/FeatureToggles'));
-const BackupManagement = lazy(() => import('../pages/BackupManagement'));
+const pageLoaders = {
+  Dashboard: () => import('../pages/Dashboard'),
+  Users: () => import('../pages/Users'),
+  Tasks: () => import('../pages/Tasks'),
+  Orders: () => import('../pages/Orders'),
+  Audit: () => import('../pages/Audit'),
+  Files: () => import('../pages/Files'),
+  Settings: () => import('../pages/settings'),
+  Membership: () => import('../pages/Membership'),
+  PointTasks: () => import('../pages/PointTasks'),
+  Invite: () => import('../pages/Invite'),
+  FeatureConfig: () => import('../pages/FeatureConfig'),
+  ProviderModels: () => import('../pages/ProviderModels'),
+  ModelTest: () => import('../pages/ModelTest'),
+  ModelOverview: () => import('../pages/ModelOverview'),
+  TemplateCategories: () => import('../pages/TemplateCategories'),
+  ImageTemplates: () => import('../pages/ImageTemplates'),
+  VideoTemplates: () => import('../pages/VideoTemplates'),
+  InspirationSquare: () => import('../pages/InspirationSquare'),
+  TemplateReview: () => import('../pages/TemplateReview'),
+  ContentManagement: () => import('../pages/ContentManagement'),
+  SystemUpdate: () => import('../pages/SystemUpdate'),
+  LaunchCheck: () => import('../pages/LaunchCheck'),
+  WechatSettings: () => import('../pages/WechatSettings'),
+  WechatToolsSettings: () => import('../pages/WechatToolsSettings'),
+  AuditLog: () => import('../pages/AuditLog'),
+  StorageSettings: () => import('../pages/StorageSettings'),
+  ApiReference: () => import('../pages/ApiReference'),
+  FeatureToggles: () => import('../pages/FeatureToggles'),
+  BackupManagement: () => import('../pages/BackupManagement'),
+};
+
+const Dashboard = lazy(pageLoaders.Dashboard);
+const Users = lazy(pageLoaders.Users);
+const Tasks = lazy(pageLoaders.Tasks);
+const Orders = lazy(pageLoaders.Orders);
+const Audit = lazy(pageLoaders.Audit);
+const Files = lazy(pageLoaders.Files);
+const Settings = lazy(pageLoaders.Settings);
+const Membership = lazy(pageLoaders.Membership);
+const PointTasks = lazy(pageLoaders.PointTasks);
+const Invite = lazy(pageLoaders.Invite);
+const FeatureConfig = lazy(pageLoaders.FeatureConfig);
+const ProviderModels = lazy(pageLoaders.ProviderModels);
+const ModelTest = lazy(pageLoaders.ModelTest);
+const ModelOverview = lazy(pageLoaders.ModelOverview);
+const TemplateCategories = lazy(pageLoaders.TemplateCategories);
+const ImageTemplates = lazy(pageLoaders.ImageTemplates);
+const VideoTemplates = lazy(pageLoaders.VideoTemplates);
+const InspirationSquare = lazy(pageLoaders.InspirationSquare);
+const TemplateReview = lazy(pageLoaders.TemplateReview);
+const ContentManagement = lazy(pageLoaders.ContentManagement);
+const SystemUpdate = lazy(pageLoaders.SystemUpdate);
+const LaunchCheck = lazy(pageLoaders.LaunchCheck);
+const WechatSettings = lazy(pageLoaders.WechatSettings);
+const WechatToolsSettings = lazy(pageLoaders.WechatToolsSettings);
+const AuditLog = lazy(pageLoaders.AuditLog);
+const StorageSettings = lazy(pageLoaders.StorageSettings);
+const ApiReference = lazy(pageLoaders.ApiReference);
+const FeatureToggles = lazy(pageLoaders.FeatureToggles);
+const BackupManagement = lazy(pageLoaders.BackupManagement);
 
 const { Header, Sider, Content } = AntLayout;
 
@@ -84,6 +117,7 @@ const menuItems = [
     label: '微信配置',
     children: [
       { key: '/wechat/miniapp', label: '微信小程序' },
+      { key: '/wechat/tools', label: '工具页配置' },
       { key: '/wechat/pay', label: '微信支付' },
       { key: '/wechat/customer-service', label: '微信客服' },
       { key: '/wechat/help', label: '使用帮助' },
@@ -253,6 +287,7 @@ export default function Layout() {
               <Route path="/templates/review" element={<TemplateReview />} />
               <Route path="/content" element={<ContentManagement />} />
               <Route path="/wechat/miniapp" element={<WechatSettings />} />
+              <Route path="/wechat/tools" element={<WechatToolsSettings />} />
               <Route path="/wechat/pay" element={<WechatSettings />} />
               <Route path="/wechat/customer-service" element={<WechatSettings />} />
               <Route path="/wechat/help" element={<WechatSettings />} />

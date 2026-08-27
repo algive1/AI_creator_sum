@@ -8,6 +8,8 @@ const GROUPS: { title: string; intro?: string; items: ApiItem[] }[] = [
   {
     title: '用户与认证', intro: '微信登录、Token 续期、用户信息管理。',
     items: [
+      { method: 'POST', path: '/auth/register', label: 'PC 用户网页端邮箱注册，email/password/nickname/inviteCode，成功后返回 user token + refresh token', auth: false },
+      { method: 'POST', path: '/auth/login', label: 'PC 用户网页端邮箱登录，返回 clientType=web 的 user token + refresh token', auth: false },
       { method: 'POST', path: '/auth/wechat-login', label: '微信登录（code 换 token + 用户信息），可选传 inviteCode 绑定邀请', auth: false },
       { method: 'POST', path: '/auth/refresh-token', label: '刷新令牌（用 refreshToken 换新 access token + refresh token）', auth: true },
       { method: 'GET', path: '/users/me', label: '获取当前用户基本信息（昵称/头像/openid）', auth: true },
@@ -135,7 +137,7 @@ const GROUPS: { title: string; intro?: string; items: ApiItem[] }[] = [
   {
     title: '应用配置与首页', intro: '全局配置（含所有功能档位完整信息）、首页聚合数据。推荐小程序启动时调一次 /public/app 并缓存。',
     items: [
-      { method: 'GET', path: '/public/app', label: '应用全局配置。含 featureKeys、modelTiers、功能开关、客服配置、使用帮助 help、运营素材 visualAssets、底部导航栏、会员入口。切换Tab无需额外请求档位', auth: false },
+      { method: 'GET', path: '/public/app', label: '应用全局配置。含 featureKeys、modelTiers、功能开关、客服配置、使用帮助 help（含 items[] 标题/副标题/详情/媒体/复制块）、运营素材 visualAssets、mediaDownload(CDN下载域名)、底部导航栏、会员入口。切换Tab无需额外请求档位', auth: false },
       { method: 'GET', path: '/app/home', label: '首页聚合数据（弹窗公告按后台频率控制；首页公告条不因已读/关闭隐藏；含功能入口/模板/灵感/积分/会员入口）', auth: false },
     ],
   },

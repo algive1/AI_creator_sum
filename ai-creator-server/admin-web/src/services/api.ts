@@ -89,8 +89,7 @@ api.interceptors.response.use(
         return Promise.reject(err);
       } else {
         localStorage.removeItem('admin_token');
-        message.error('登录已过期，请重新登录');
-        setTimeout(() => { window.location.href = '/login'; }, 1500);
+        window.location.href = '/login';
       }
     } else if (err.code === 'ECONNABORTED') {
       message.error('请求超时，请检查网络连接');

@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { Alert, Table, Button, Modal, Tabs, Form, Input, InputNumber, Select, Tag, Space, message, Popconfirm, Card, Upload, Avatar } from 'antd';
+import { Alert, Table, Button, Modal, Tabs, Form, Input, InputNumber, Select, Switch, Tag, Space, message, Popconfirm, Popover, Card, Upload, Avatar } from 'antd';
 import { PlusOutlined, EditOutlined, CrownOutlined, UploadOutlined, LinkOutlined, PictureOutlined } from '@ant-design/icons';
 import api from '../services/api';
+import { pickUploadUrl, uploadAdminAsset } from '../services/upload';
 import { EllipsisText, nowrapActionStyle } from '../utils/tableCells';
 
 const DURATION_TYPES = [
@@ -84,6 +85,14 @@ export default function Membership() {
   const [iconLinkForm] = Form.useForm();
   const [planSaving, setPlanSaving] = useState(false);
   const [versionSaving, setVersionSaving] = useState(false);
+  const [rightsTab, setRightsTab] = useState<string>('');
+  const [rightsData, setRightsData] = useState<any[]>([]);
+  const [rightsPlans, setRightsPlans] = useState<any[]>([]);
+  const [rightsSaving, setRightsSaving] = useState(false);
+  const [rightsDirty, setRightsDirty] = useState(false);
+  const [rightsLoaded, setRightsLoaded] = useState(false);
+  const rightsLoadedRef = { current: false };
+  const rightsDirtyRef = { current: false };
 
   const fetchBenefitIcons = async () => {
     const iconRes: any = await api.get('/membership/benefit-icons');
@@ -110,6 +119,179 @@ export default function Membership() {
 
   useEffect(() => { fetchAll(); }, []);
 
+  // Mark dirty when data changes (after initial load)
+  const markDirty = () => {
+    if (rightsLoadedRef.current) {
+      setRightsDirty(true);
+      rightsDirtyRef.current = true;
+    }
+  };
+
+  // Load version rights config table
+  const loadVersionRightsConfig = async (versionId: number) => {
+    if (!versionId) { setRightsData([]); setRightsPlans([]); setRightsLoaded(false); return; }
+    try {
+      const r: any = await api.get('/membership/versions/' + versionId + '/rights-with-plans');
+      const overrides = r.data?.overrides || [];
+      const merged = (r.data?.rights || []).map((right: any) => {
+        const pv: Record<string, any> = {};
+        (r.data?.plans || []).forEach((plan: any) => {
+          const ov = overrides.find((o: any) => o.planId === plan.id && o.rightKey === right.rightKey);
+          pv[plan.id] = { enabled: ov ? ov.enabled : true, value: ov?.rightValue || '' };
+        });
+        return { ...right, _plans: pv };
+      });
+      setRightsData(merged);
+      setRightsPlans(r.data?.plans || []);
+      setRightsDirty(false);
+      rightsDirtyRef.current = false;
+      rightsLoadedRef.current = true;
+      setRightsLoaded(true);
+    } catch { /* ignore */ }
+  };
+
+  // Auto-select first version
+  useEffect(() => {
+    if (versions.length > 0 && !rightsTab) {
+      const firstActive = versions.find(v => v.status === 'active');
+      const tab = firstActive ? String(firstActive.id) : String(versions[0].id);
+      setRightsTab(tab);
+      loadVersionRightsConfig(Number(tab));
+    }
+  }, [versions]);
+
+  // Warn before leaving page with unsaved changes
+  useEffect(() => {
+    const handler = (e: BeforeUnloadEvent) => {
+      if (rightsDirtyRef.current) { e.preventDefault(); e.returnValue = ''; }
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, []);
+
+  // Auto-save version-level rights (rightName, hint, icon, etc.)
+  const autoSaveVersionRights = async (data: any[]) => {
+    if (rightsSaving) return;
+    setRightsSaving(true);
+    try {
+      const rights = data.map((r, i) => ({
+        rightKey: r.rightKey, rightName: r.rightName, rightValue: r.rightValue || '',
+        hint: r.hint || '', rightCategory: r.rightCategory || 'general',
+        iconUrl: r.iconUrl || '', iconFileId: r.iconFileId || null, sortOrder: i,
+      }));
+      await api.put('/membership/versions/' + rightsTab + '/rights', { rights });
+      setRightsDirty(false);
+      rightsDirtyRef.current = false;
+      message.success('权益已保存');
+      return true;
+    } catch (e: any) {
+      message.error('保存失败: ' + (e?.response?.data?.message || e?.message || ''));
+      return false;
+    } finally {
+      setRightsSaving(false);
+    }
+  };
+
+  // Auto-save batch plan overrides
+  const autoSavePlanRights = async (data: any[]) => {
+    try {
+      const planOverrides = data.map((right: any) => ({
+        rightKey: right.rightKey, rightName: right.rightName, rightValue: right.rightValue,
+        rightCategory: right.rightCategory, iconUrl: right.iconUrl || '', iconFileId: right.iconFileId || null,
+        sortOrder: right.sortOrder || 0,
+        plans: rightsPlans.map((plan: any) => ({
+          planId: plan.id,
+          enabled: right._plans?.[plan.id]?.enabled !== false,
+          rightValue: right._plans?.[plan.id]?.value || '',
+        })),
+      }));
+      await api.put('/membership/plans/batch-rights', { planOverrides });
+      setRightsDirty(false);
+      rightsDirtyRef.current = false;
+      message.success('套餐覆盖已保存');
+      return true;
+    } catch (e: any) {
+      message.error('保存失败: ' + (e?.response?.data?.message || e?.message || ''));
+      return false;
+    }
+  };
+
+  const updateRightsCell = (rightIdx: number, planId: number, field: string, value: any) => {
+    const updated = [...rightsData];
+    if (!updated[rightIdx]._plans) updated[rightIdx]._plans = {};
+    if (!updated[rightIdx]._plans[planId]) updated[rightIdx]._plans[planId] = { enabled: true, value: '' };
+    updated[rightIdx]._plans[planId][field] = value;
+    setRightsData(updated);
+    markDirty();
+    // Auto-save plan overrides on Switch toggle
+    if (field === 'enabled') autoSavePlanRights(updated);
+  };
+
+  const updateRightsRow = (rightIdx: number, field: string, value: any) => {
+    const updated = [...rightsData];
+    updated[rightIdx] = { ...updated[rightIdx], [field]: value };
+    setRightsData(updated);
+    markDirty();
+  };
+
+  // Save version rights on blur (name, value, hint, icon)
+  const handleRightsRowBlur = (rightIdx: number) => {
+    const updated = [...rightsData];
+    autoSaveVersionRights(updated);
+  };
+
+  // Save plan override value on blur
+  const handlePlanValueBlur = () => {
+    autoSavePlanRights(rightsData);
+  };
+
+  const addRight = () => {
+    const idx = rightsData.length;
+    const updated = [...rightsData, {
+      rightKey: `right_${Date.now()}`, rightName: '', rightValue: '', hint: '',
+      rightCategory: 'general', iconUrl: '', iconFileId: null, sortOrder: idx,
+      _plans: Object.fromEntries(rightsPlans.map(p => [p.id, { enabled: true, value: '' }])),
+    }];
+    setRightsData(updated);
+    markDirty();
+  };
+
+  const deleteRight = (rightIdx: number) => {
+    const updated = rightsData.filter((_, i) => i !== rightIdx);
+    setRightsData(updated);
+    markDirty();
+    autoSaveVersionRights(updated);
+  };
+
+  const moveRight = (rightIdx: number, direction: -1 | 1) => {
+    const newIdx = rightIdx + direction;
+    if (newIdx < 0 || newIdx >= rightsData.length) return;
+    const updated = [...rightsData];
+    [updated[rightIdx], updated[newIdx]] = [updated[newIdx], updated[rightIdx]];
+    setRightsData(updated);
+    markDirty();
+    autoSaveVersionRights(updated);
+  };
+
+  // Switch version tab with unsaved check
+  const handleRightsTabChange = (key: string) => {
+    if (rightsDirtyRef.current) {
+      Modal.confirm({
+        title: '未保存的更改', content: '当前版本的权益配置有未保存的更改，是否放弃？',
+        okText: '放弃更改', cancelText: '继续编辑',
+        onOk: () => {
+          setRightsTab(key);
+          rightsLoadedRef.current = false;
+          loadVersionRightsConfig(Number(key));
+        },
+      });
+    } else {
+      setRightsTab(key);
+      rightsLoadedRef.current = false;
+      loadVersionRightsConfig(Number(key));
+    }
+  };
+
   const featureDiscountDefaults = (discounts: FeatureDiscount[] = []) => {
     const byKey = new Map(discounts.map(item => [item.featureKey, Number(item.discountPercent || 100)]));
     return Object.fromEntries(features.map(item => [item.featureKey, byKey.get(item.featureKey) || 100]));
@@ -131,7 +313,6 @@ export default function Membership() {
       originalPrice: 0,
       sortOrder: 0,
       status: 'active',
-      rights: [],
       immediatePoints: 0,
       featureDiscounts: featureDiscountDefaults(),
     });
@@ -140,6 +321,8 @@ export default function Membership() {
 
   const openEdit = async (plan: Plan) => {
     setEditingPlan(plan);
+    form.resetFields();
+    setModalOpen(true);
     try {
       const r: any = await api.get('/membership/plans/' + plan.id);
       const detail = r.data;
@@ -154,13 +337,12 @@ export default function Membership() {
         tag: detail.tag,
         sortOrder: detail.sortOrder,
         status: detail.status,
-        rights: detail.rights || [],
         immediatePoints: Number(detail.pointRule?.immediatePoints || 0) + Number(detail.pointRule?.giftPoints || 0),
         featureDiscounts: featureDiscountDefaults(detail.featureDiscounts || []),
       });
-      setModalOpen(true);
     } catch {
       message.error('获取套餐详情失败');
+      setModalOpen(false);
     }
   };
 
@@ -183,15 +365,6 @@ export default function Membership() {
         status: values.status || 'active',
       };
 
-      const rights = (values.rights || []).map((r: any) => ({
-        rightKey: r.rightKey,
-        rightName: r.rightName,
-        rightValue: r.rightValue,
-        rightCategory: r.rightCategory,
-        iconUrl: r.iconUrl || '',
-        iconFileId: r.iconFileId || null,
-        sortOrder: r.sortOrder || 0,
-      }));
       const pointRule = {
         totalPoints: values.immediatePoints || 0,
         immediatePoints: values.immediatePoints || 0,
@@ -205,12 +378,11 @@ export default function Membership() {
       if (editingPlan) {
         await api.put('/membership/plans/' + editingPlan.id, body);
         await Promise.all([
-          api.put('/membership/plans/' + editingPlan.id + '/rights', { rights }),
           api.put('/membership/plans/' + editingPlan.id + '/points', pointRule),
           api.put('/membership/plans/' + editingPlan.id + '/feature-discounts', { featureDiscounts }),
         ]);
       } else {
-        await api.post('/membership/plans', { ...body, rights, pointRule, featureDiscounts });
+        await api.post('/membership/plans', { ...body, pointRule, featureDiscounts });
       }
 
       message.success(editingPlan ? '已保存' : '已创建');
@@ -241,10 +413,23 @@ export default function Membership() {
     setVersionModalOpen(true);
   };
 
-  const openEditVersion = (version: Version) => {
+  const openEditVersion = async (version: Version) => {
     setEditingVersion(version);
+    versionForm.resetFields();
     versionForm.setFieldsValue(version);
     setVersionModalOpen(true);
+    // Load version rights template
+    try {
+      const r: any = await api.get('/membership/versions/' + version.id + '/rights');
+      const rights = (r.data || []).map((item: any) => ({
+        rightKey: item.rightKey || `item_${Date.now()}`,
+        rightName: item.rightName || '',
+        rightValue: item.rightValue || '',
+        rightCategory: item.rightCategory || 'general',
+        sortOrder: item.sortOrder || 0,
+      }));
+      if (rights.length > 0) versionForm.setFieldValue('versionRights', rights);
+    } catch { /* ignore */ }
   };
 
   const handleVersionSave = async () => {
@@ -259,8 +444,19 @@ export default function Membership() {
         sortOrder: values.sortOrder || 0,
         status: values.status || 'active',
       };
-      if (editingVersion) await api.put('/membership/versions/' + editingVersion.id, body);
-      else await api.post('/membership/versions', body);
+      if (editingVersion) {
+        await api.put('/membership/versions/' + editingVersion.id, body);
+        // Save version rights template if present
+        const versionRights = (values.versionRights || []).map((r: any) => ({
+          rightKey: r.rightKey, rightName: r.rightName, rightValue: r.rightValue || '',
+          rightCategory: r.rightCategory || 'general', sortOrder: r.sortOrder || 0,
+        }));
+        if (versionRights.length > 0) {
+          await api.put('/membership/versions/' + editingVersion.id + '/rights', { rights: versionRights });
+        }
+      } else {
+        await api.post('/membership/versions', body);
+      }
       message.success('版本已保存');
       setVersionModalOpen(false);
       void fetchAll();
@@ -282,24 +478,51 @@ export default function Membership() {
     form.setFieldValue('rights', rights);
   };
 
+  const slugifyKey = (text: string, fallbackCategory?: string): string => {
+    if (!text?.trim()) return fallbackCategory ? `${fallbackCategory}_${Date.now()}` : `key_${Date.now()}`;
+    // Try ASCII slug first
+    const slug = text
+      .toLowerCase()
+      .replace(/[^a-z0-9一-鿿]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .replace(/_+/g, '_');
+    // If the result has at least one ASCII char, use it
+    if (/[a-z0-9]/.test(slug)) return slug.substring(0, 32);
+    // For pure Chinese names, use category + timestamp
+    const prefix = (fallbackCategory || 'item').replace(/[^a-z0-9_]/gi, '_').substring(0, 16);
+    return `${prefix}_${Date.now()}`;
+  };
+
   const rightNameAt = (fieldName?: number) => {
     if (fieldName === undefined) return '';
     const rights = form.getFieldValue('rights') || [];
     return String(rights[fieldName]?.rightName || '').trim();
   };
 
+  const handleRightNameChange = (fieldName: number, value: string) => {
+    const rights = [...(form.getFieldValue('rights') || [])];
+    const item = rights[fieldName] || {};
+    const existingKey = item.rightKey;
+    // Only auto-generate if key is empty or was auto-generated (matches our pattern)
+    const looksAutoGenerated = !existingKey || /^[a-z]+_\d{13}$/.test(existingKey) || /^[a-z0-9_]+$/.test(existingKey);
+    if (looksAutoGenerated) {
+      rights[fieldName] = {
+        ...item,
+        rightName: value,
+        rightKey: slugifyKey(value, item.rightCategory),
+      };
+    } else {
+      rights[fieldName] = { ...item, rightName: value };
+    }
+    form.setFieldValue('rights', rights);
+  };
+
   const uploadIcon = async (options: any, fieldName?: number) => {
     const { file, onSuccess, onError } = options;
     try {
-      const uploadForm = new FormData();
-      uploadForm.append('file', file);
-      uploadForm.append('category', 'general');
-      uploadForm.append('refType', 'member_benefit_icon');
-      const uploaded: any = await api.post('/files/upload', uploadForm, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
-      const url = uploaded.data?.url || uploaded.url || '';
-      const fileId = Number(uploaded.data?.fileId || uploaded.fileId || 0) || null;
+      const uploaded: any = await uploadAdminAsset(file, { category: 'general', refType: 'member_benefit_icon' });
+      const url = pickUploadUrl(uploaded);
+      const fileId = Number(uploaded.fileId || 0) || null;
       if (!url) throw new Error('上传接口未返回图标 URL');
       const rawName = String(file?.name || '权益图标').replace(/\.[^.]+$/, '');
       await api.post('/membership/benefit-icons', {
@@ -458,54 +681,228 @@ export default function Membership() {
         <Table rowKey="id" columns={versionColumns} dataSource={versions} loading={loading} pagination={false} size="small" tableLayout="fixed" scroll={{ x: 880 }} />
       </Card>
 
+
+      {/* ── Version Rights Configuration Table ── */}
       <Card
-        title="权益图标库"
+        title={<>权益配置 <Tag color={rightsSaving ? 'processing' : rightsDirty ? 'orange' : 'green'} style={{ marginLeft: 8 }}>{rightsSaving ? '保存中...' : rightsDirty ? '未保存' : '已保存'}</Tag></>}
         extra={
           <Space>
-            <Upload
-              accept="image/png,image/jpeg,image/webp"
-              showUploadList={false}
-              customRequest={(options) => uploadIcon(options)}
-            >
-              <Button icon={<UploadOutlined />}>上传图标</Button>
-            </Upload>
-            <Button icon={<LinkOutlined />} onClick={openIconLink}>添加图标链接</Button>
+            <Button loading={rightsSaving} onClick={() => autoSaveVersionRights(rightsData)}>保存权益模板</Button>
+            <Button loading={rightsSaving} onClick={() => autoSavePlanRights(rightsData)}>保存套餐覆盖</Button>
           </Space>
         }
         style={{ marginBottom: 16 }}
       >
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message="权益图标库用于会员权益配置。小程序优先展示后台返回图标，图片加载失败时自动使用本地默认图标。"
+        <Alert type="info" showIcon style={{ marginBottom: 12 }}
+          message="编辑权益名称/默认值/提示/图标后失焦自动保存。Switch 和套餐覆盖值改动后即时保存。拖拽排序按钮调整顺序。" />
+        <Tabs
+          activeKey={rightsTab}
+          onChange={handleRightsTabChange}
+          items={versions.filter(v => v.status === 'active').map(v => ({
+            key: String(v.id),
+            label: v.name,
+          }))}
         />
-        <Table rowKey="id" columns={iconColumns} dataSource={benefitIcons} loading={loading} pagination={{ pageSize: 8 }} size="small" tableLayout="fixed" scroll={{ x: 720 }} />
+        {!rightsLoaded ? (
+          <Alert type="info" showIcon message="请选择版本查看权益配置。" />
+        ) : (
+          <Table
+            rowKey="rightKey"
+            dataSource={rightsData}
+            pagination={false}
+            size="small"
+            scroll={{ x: 500 + rightsPlans.length * 220 }}
+            columns={[
+              {
+                title: '排序', width: 70,
+                render: (_: any, __: any, idx: number) => (
+                  <Space size={0}>
+                    <Button type="text" size="small" disabled={idx === 0}
+                      onClick={() => moveRight(idx, -1)}>↑</Button>
+                    <Button type="text" size="small" disabled={idx >= rightsData.length - 1}
+                      onClick={() => moveRight(idx, 1)}>↓</Button>
+                  </Space>
+                ),
+              },
+              {
+                title: '权益名称', width: 100,
+                render: (_: any, r: any, idx: number) => (
+                  <Input size="small" value={r.rightName} style={{ fontWeight: 500 }}
+                    placeholder="输入名称"
+                    onChange={e => updateRightsRow(idx, 'rightName', e.target.value)}
+                    onBlur={() => {
+                      if (rightsData[idx]?.rightName?.trim()) handleRightsRowBlur(idx);
+                    }} />
+                ),
+              },
+              {
+                title: '默认值', width: 100,
+                render: (_: any, r: any, idx: number) => (
+                  <Input size="small" value={r.rightValue}
+                    style={{ width: 100 }}
+                    placeholder="默认值"
+                    onChange={e => updateRightsRow(idx, 'rightValue', e.target.value)}
+                    onBlur={() => handleRightsRowBlur(idx)} />
+                ),
+              },
+              {
+                title: '图标', width: 52,
+                render: (_: any, r: any, idx: number) => (
+                  <Popover trigger="click" placement="bottomLeft"
+                    content={
+                      <div style={{ width: 260, maxHeight: 300, overflowY: 'auto' }}>
+                        <div style={{ marginBottom: 6, fontWeight: 500, fontSize: 12 }}>图标库</div>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 4, marginBottom: 8 }}>
+                          {benefitIcons.map(icon => (
+                            <Avatar key={icon.id} shape="square" size={36} src={icon.iconUrl}
+                              icon={<PictureOutlined />}
+                              style={{ cursor: 'pointer', border: r.iconUrl === icon.iconUrl ? '2px solid #6366f1' : '2px solid transparent', borderRadius: 6 }}
+                              onClick={() => { updateRightsRow(idx, 'iconUrl', icon.iconUrl); handleRightsRowBlur(idx); }} />
+                          ))}
+                        </div>
+                        <div style={{ borderTop: '1px solid #eee', paddingTop: 6 }}>
+                          <Upload accept="image/png,image/jpeg,image/webp" showUploadList={false}
+                            customRequest={async (opts: any) => {
+                              try {
+                                const up: any = await uploadAdminAsset(opts.file, { category: 'general', refType: 'member_benefit_icon' });
+                                const u = pickUploadUrl(up);
+                                if (u) { updateRightsRow(idx, 'iconUrl', u); handleRightsRowBlur(idx); }
+                              } catch { message.error('上传失败'); }
+                            }}>
+                            <Button block icon={<UploadOutlined />} size="small">上传图标</Button>
+                          </Upload>
+                          <Input size="small" placeholder="或粘贴链接" style={{ marginTop: 4 }}
+                            onPressEnter={e => {
+                              const v = (e.target as HTMLInputElement).value.trim();
+                              if (v) { updateRightsRow(idx, 'iconUrl', v); handleRightsRowBlur(idx); (e.target as HTMLInputElement).value = ''; }
+                            }} />
+                        </div>
+                      </div>
+                    }>
+                    <Avatar shape="square" size={30} src={r.iconUrl} icon={<PictureOutlined />} style={{ cursor: 'pointer' }} />
+                  </Popover>
+                ),
+              },
+              {
+                title: '提示', width: 100,
+                render: (_: any, r: any, idx: number) => (
+                  <Input size="small" value={r.hint} style={{ width: 100 }}
+                    placeholder="tooltip文字"
+                    onChange={e => updateRightsRow(idx, 'hint', e.target.value)}
+                    onBlur={() => handleRightsRowBlur(idx)} />
+                ),
+              },
+              ...rightsPlans.map(plan => ({
+                title: plan.name, width: 200,
+                render: (_: any, r: any, idx: number) => {
+                  const pv = r._plans?.[plan.id] || { enabled: true, value: '' };
+                  return (
+                    <Space size={2}>
+                      <Switch size="small" checked={pv.enabled}
+                        onChange={v => updateRightsCell(idx, plan.id, 'enabled', v)}
+                        checkedChildren="启" unCheckedChildren="禁" />
+                      <Input size="small" value={pv.value}
+                        style={{ width: 100 }}
+                        placeholder={r.rightValue || '默认值'}
+                        onChange={e => updateRightsCell(idx, plan.id, 'value', e.target.value)}
+                        onBlur={handlePlanValueBlur} />
+                    </Space>
+                  );
+                },
+              })),
+              {
+                title: '', width: 40,
+                render: (_: any, __: any, idx: number) => (
+                  <Popconfirm title="确定删除该权益？所有套餐的此权益配置将被移除。" onConfirm={() => deleteRight(idx)}>
+                    <Button type="link" danger size="small">删除</Button>
+                  </Popconfirm>
+                ),
+              },
+            ]}
+            footer={() => (
+              <Button type="dashed" icon={<PlusOutlined />} onClick={addRight} block>添加权益</Button>
+            )}
+          />
+        )}
       </Card>
 
       <Table rowKey="id" columns={columns} dataSource={plans} loading={loading} pagination={false} tableLayout="fixed" scroll={{ x: 920 }} />
 
-      <Modal title={editingVersion ? '编辑会员版本' : '新增会员版本'} open={versionModalOpen} onCancel={() => setVersionModalOpen(false)} onOk={handleVersionSave} confirmLoading={versionSaving} destroyOnClose>
+      <Modal title={editingVersion ? '编辑会员版本' : '新增会员版本'} open={versionModalOpen} onCancel={() => setVersionModalOpen(false)} onOk={handleVersionSave} confirmLoading={versionSaving} width={700}>
         <Form form={versionForm} layout="vertical" style={{ marginTop: 16 }}>
-          <Form.Item name="name" label="版本名称" rules={[{ required: true, message: '请输入版本名称' }]}>
-            <Input placeholder="例如：标准版 / 专业版" />
-          </Form.Item>
-          <Form.Item name="versionKey" label="版本 Key" rules={[{ required: true, message: '请输入版本 Key' }]}>
-            <Input placeholder="standard / pro" disabled={!!editingVersion} />
-          </Form.Item>
-          <Form.Item name="description" label="描述">
-            <Input placeholder="前台可展示的版本说明" />
-          </Form.Item>
-          <Space size="middle" wrap>
-            <Form.Item name="sortOrder" label="排序"><InputNumber min={0} style={{ width: 120 }} /></Form.Item>
-            <Form.Item name="status" label="状态">
-              <Select options={[{ label: '启用', value: 'active' }, { label: '停用', value: 'inactive' }]} style={{ width: 120 }} />
-            </Form.Item>
-          </Space>
+          <Tabs items={[
+            {
+              key: 'basic',
+              label: '基础信息',
+              children: (
+                <>
+                  <Form.Item name="name" label="版本名称" rules={[{ required: true, message: '请输入版本名称' }]}>
+                    <Input placeholder="例如：标准版 / 专业版" />
+                  </Form.Item>
+                  <Form.Item name="versionKey" label="版本 Key" rules={[{ required: true, message: '请输入版本 Key' }]}>
+                    <Input placeholder="standard / pro" disabled={!!editingVersion} />
+                  </Form.Item>
+                  <Form.Item name="description" label="描述">
+                    <Input placeholder="前台可展示的版本说明" />
+                  </Form.Item>
+                  <Space size="middle" wrap>
+                    <Form.Item name="sortOrder" label="排序"><InputNumber min={0} style={{ width: 120 }} /></Form.Item>
+                    <Form.Item name="status" label="状态">
+                      <Select options={[{ label: '启用', value: 'active' }, { label: '停用', value: 'inactive' }]} style={{ width: 120 }} />
+                    </Form.Item>
+                  </Space>
+                </>
+              ),
+            },
+            {
+              key: 'rights',
+              label: '权益模板',
+              children: editingVersion ? (
+                <Form.List name="versionRights">
+                  {(fields, { add, remove }) => (
+                    <>
+                      {fields.map(({ key, name, ...rest }) => (
+                        <Space key={key} style={{ display: 'flex', marginBottom: 8 }} align="baseline" wrap>
+                          <Form.Item {...rest} name={[name, 'rightCategory']} rules={[{ required: true }]}>
+                            <Select options={RIGHT_CATEGORIES} placeholder="分类" style={{ width: 110 }} />
+                          </Form.Item>
+                          <Form.Item {...rest} name={[name, 'rightKey']} hidden><Input /></Form.Item>
+                          <Form.Item {...rest} name={[name, 'rightName']} rules={[{ required: true }]}>
+                            <Input placeholder="权益名称" style={{ width: 130 }}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                const items = [...(versionForm.getFieldValue('versionRights') || [])];
+                                const item = items[name] || {};
+                                if (!item.rightKey || /^[a-z]+_\d{13}$/.test(item.rightKey) || /^[a-z0-9_]+$/.test(item.rightKey)) {
+                                  const slug = String(val).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').substring(0, 32);
+                                  items[name] = { ...item, rightName: val, rightKey: slug || `${(item.rightCategory || 'item')}_${Date.now()}` };
+                                  versionForm.setFieldValue('versionRights', items);
+                                }
+                              }}
+                            />
+                          </Form.Item>
+                          <Form.Item {...rest} name={[name, 'rightValue']} rules={[{ required: true }]}>
+                            <Input placeholder="默认值" style={{ width: 130 }} />
+                          </Form.Item>
+                          <Form.Item {...rest} name={[name, 'sortOrder']}>
+                            <InputNumber placeholder="排序" min={0} style={{ width: 70 }} />
+                          </Form.Item>
+                          <Button type="link" danger onClick={() => remove(name)}>删除</Button>
+                        </Space>
+                      ))}
+                      <Button type="dashed" onClick={() => add({ rightCategory: 'image', rightKey: `item_${Date.now()}`, rightName: '', rightValue: '', sortOrder: 0 })} block>
+                        添加权益
+                      </Button>
+                    </>
+                  )}
+                </Form.List>
+              ) : <Alert type="info" showIcon message="请先创建版本，再编辑权益模板。" />
+            },
+          ]} />
         </Form>
       </Modal>
 
-      <Modal title={editingPlan ? '编辑套餐 - ' + editingPlan.name : '新增套餐'} open={modalOpen} onCancel={() => setModalOpen(false)} onOk={handleSave} confirmLoading={planSaving} width={820} destroyOnClose>
+      <Modal title={editingPlan ? '编辑套餐 - ' + editingPlan.name : '新增套餐'} open={modalOpen} onCancel={() => setModalOpen(false)} onOk={handleSave} confirmLoading={planSaving} width={820}>
         <Form form={form} layout="vertical" style={{ marginTop: 16 }}>
           <Tabs items={[
             {
@@ -546,42 +943,6 @@ export default function Membership() {
                     </Form.Item>
                   </Space>
                 </>
-              ),
-            },
-            {
-              key: 'rights',
-              label: '权益配置',
-              children: (
-                <Form.List name="rights">
-                  {(fields, { add, remove }) => (
-                    <>
-                      {fields.map(({ key, name, ...rest }) => (
-                        <Space key={key} style={{ display: 'flex', marginBottom: 8 }} align="baseline" wrap>
-                          <Form.Item {...rest} name={[name, 'rightCategory']} rules={[{ required: true }]}>
-                            <Select options={RIGHT_CATEGORIES} placeholder="权益分类" style={{ width: 120 }} />
-                          </Form.Item>
-                          <Form.Item {...rest} name={[name, 'rightKey']} rules={[{ required: true }]}>
-                            <Input placeholder="权益 Key" style={{ width: 120 }} />
-                          </Form.Item>
-                          <Form.Item {...rest} name={[name, 'rightName']} rules={[{ required: true }]}>
-                            <Input placeholder="权益名称" style={{ width: 140 }} />
-                          </Form.Item>
-                          <Form.Item {...rest} name={[name, 'rightValue']} rules={[{ required: true }]}>
-                            <Input placeholder="权益值" style={{ width: 120 }} />
-                          </Form.Item>
-                          <Form.Item {...rest} name={[name, 'sortOrder']}>
-                            <InputNumber placeholder="排序" min={0} style={{ width: 80 }} />
-                          </Form.Item>
-                          {renderRightIconControls(name)}
-                          <Button type="link" danger onClick={() => remove(name)}>删除</Button>
-                        </Space>
-                      ))}
-                      <Button type="dashed" onClick={() => add({ rightCategory: 'image', rightKey: '', rightName: '', rightValue: '', sortOrder: 0 })} block>
-                        添加权益
-                      </Button>
-                    </>
-                  )}
-                </Form.List>
               ),
             },
             {

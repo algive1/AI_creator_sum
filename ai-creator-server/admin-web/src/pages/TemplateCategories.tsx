@@ -16,7 +16,7 @@ export default function TemplateCategories() {
 
   const openCreate = () => { setEditing(null); form.resetFields(); form.setFieldsValue({ sortOrder: 0, status: 'active' }); setModalOpen(true); };
   const openEdit = (r: any) => { setEditing(r); form.setFieldsValue(r); setModalOpen(true); };
-  const save = async () => { try { setSaving(true); const v = await form.validateFields(); if (editing) await api.put('/content/template-categories/' + editing.id, v); else await api.post('/content/template-categories', v); message.success(editing ? '已保存' : '已创建'); setModalOpen(false); fetch(); } catch (e: any) { if (e?.errorFields) return; } finally { setSaving(false); } };
+  const save = async () => { try { setSaving(true); const v = await form.validateFields(); if (editing) await api.put('/content/template-categories/' + editing.id, v); else await api.post('/content/template-categories', v); message.success(editing ? '已保存' : '已创建'); setModalOpen(false); fetch(); } catch (e: any) { if (e?.errorFields) return; message.error(e?.response?.data?.message || e?.message || '保存失败，请检查分类配置'); } finally { setSaving(false); } };
   const toggleStatus = async (r: any) => { await api.put('/content/template-categories/' + r.id, { status: r.status === 'active' ? 'inactive' : 'active' }); message.success(r.status === 'active' ? '已停用' : '已启用'); fetch(); };
   const del = async (id: number) => { try { await api.delete('/content/template-categories/' + id); message.success('已删除'); fetch(); } catch { message.error('删除失败'); } };
 

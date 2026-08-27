@@ -4,10 +4,6 @@ import { CrownOutlined, PlusCircleOutlined, UserOutlined } from '@ant-design/ico
 import api from '../services/api';
 import { MEMBER_LEVEL_LABELS, labelOf } from '../utils/adminLabels';
 
-function maskPhone(phone: string) {
-  if (!phone || phone.length < 7) return phone || '-';
-  return phone.slice(0, 3) + '****' + phone.slice(-4);
-}
 function formatDate(d: string | null) {
   if (!d) return '-'; const date = new Date(d);
   return Number.isNaN(date.getTime()) ? d : date.toISOString().slice(0, 10);
@@ -101,7 +97,7 @@ export default function Users() {
   const cols = [
     { title: '用户 ID', dataIndex: 'userId', width: 80 },
     { title: '用户', width: 130, render: (_: any, r: any) => <span><UserOutlined style={{ marginRight: 6, color: '#8b5cf6' }} />{r.nickname || '未设置'}</span> },
-    { title: '手机号', dataIndex: 'phone', width: 115, render: (v: string) => v ? maskPhone(v) : '-' },
+    { title: '手机号', dataIndex: 'phone', width: 130, render: (v: string) => v || '-' },
     { title: '积分', dataIndex: 'points', width: 80, render: (v: number) => <strong>{v || 0}</strong> },
     { title: '会员等级', dataIndex: 'memberLevel', width: 100, render: (v: string) => <Tag color={v === 'free' ? 'default' : 'blue'}>{labelOf(MEMBER_LEVEL_LABELS, v, '普通用户')}</Tag> },
     { title: '会员到期', dataIndex: 'memberExpireAt', width: 105, render: (v: string) => v ? formatDate(v) : <span style={{ color: '#999' }}>-</span> },
@@ -140,6 +136,7 @@ export default function Users() {
           </div>
 
           <Descriptions column={3} size="small" bordered style={{ marginBottom: 16 }}>
+            <Descriptions.Item label="手机号">{detailUser.phone || '-'}</Descriptions.Item>
             <Descriptions.Item label="积分">{detailUser.points || 0}</Descriptions.Item>
             <Descriptions.Item label="会员">{labelOf(MEMBER_LEVEL_LABELS, detailUser.membershipLevel, '普通用户')}{detailUser.memberExpireAt ? <span style={{ color: '#888', fontSize: 11, marginLeft: 4 }}>· {formatDate(detailUser.memberExpireAt)}到期</span> : ''}</Descriptions.Item>
             <Descriptions.Item label="创作">生图{detailUser.imageCreations || 0} 生视频{detailUser.videoCreations || 0}</Descriptions.Item>

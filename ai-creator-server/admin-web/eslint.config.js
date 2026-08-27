@@ -11,6 +11,14 @@ export default [
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
+    files: ['src/**/*.test.mjs'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'module',
+      globals: globals.node,
+    },
+  },
+  {
     files: ['src/**/*.{ts,tsx}'],
     languageOptions: {
       ecmaVersion: 2020,

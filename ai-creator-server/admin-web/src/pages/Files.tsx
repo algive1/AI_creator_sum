@@ -28,6 +28,7 @@ import {
   VideoCameraOutlined,
 } from '@ant-design/icons';
 import api from '../services/api';
+import { uploadAdminAsset } from '../services/upload';
 
 const { Paragraph, Text } = Typography;
 
@@ -105,7 +106,7 @@ function absoluteBrowserUrl(url: string): string {
 }
 
 function copyableFileUrl(row: any): string {
-  return absoluteBrowserUrl(String(row?.copyUrl || row?.previewUrl || row?.accessUrl || row?.publicUrl || row?.rawUrl || row?.cdnUrl || fileUrl(row) || '').trim());
+  return absoluteBrowserUrl(String(row?.deliveryUrl || row?.copyUrl || row?.publicUrl || row?.storageUrl || row?.cdnUrl || row?.rawUrl || row?.previewUrl || row?.accessUrl || fileUrl(row) || '').trim());
 }
 
 function isImage(row: any): boolean {
@@ -164,13 +165,8 @@ export default function Files() {
       return;
     }
     setUploading(true);
-    const form = new FormData();
-    form.append('file', file);
-    form.append('category', uploadCategory);
-    form.append('refType', 'admin_upload');
     try {
-      const result: any = await api.post('/files/upload', form);
-      const uploaded = result.data || result;
+      const uploaded: any = await uploadAdminAsset(file, { category: uploadCategory, refType: 'admin_upload' });
       message.success(uploaded.url ? '上传成功，已生成可复制链接' : '上传成功');
       options.onSuccess?.(uploaded);
       fetch(1);
@@ -249,7 +245,7 @@ export default function Files() {
           return <Button size="small" icon={<VideoCameraOutlined />} onClick={() => setDetailFile(row)}>预览</Button>;
         }
         if (isImage(row) && url) {
-          return <Image src={url} width={42} height={42} style={{ objectFit: 'cover', borderRadius: 4 }} />;
+          return <Image src={url} width={42} height={42} style={{ objectFit: 'cover', borderRadius: 4, background: '#f6f7fb', border: '1px solid #e5e7eb' }} />;
         }
         return <FileOutlined style={{ fontSize: 18, color: '#999' }} />;
       },

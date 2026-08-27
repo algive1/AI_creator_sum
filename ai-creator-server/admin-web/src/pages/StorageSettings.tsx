@@ -119,7 +119,7 @@ export default function StorageSettings() {
         payload[k] = String(v ?? '');
       }
       await api.post('/settings/storage', payload);
-      message.success('配置已保存');
+      message.success('配置已保存，如需切换平台请点击“启用此平台”');
     } catch (e: any) {
       if (!e?.errorFields) message.error('保存失败');
     } finally { setSaving(false); }
