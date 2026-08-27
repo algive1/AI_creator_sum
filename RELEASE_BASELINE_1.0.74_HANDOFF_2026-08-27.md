@@ -10,8 +10,8 @@
 发布契约、运行目录迁移、版本识别、用户端静态产物检查、候选源码冻结和发布包构建已完成。最终发布包已经生成并通过 `inspect-release.sh`：
 
 - 文件：`ai-creator-server/ai-creator-release-1.0.74.tar.gz`
-- 大小：`3120524 bytes`（约 3.0M）
-- SHA256：`81cb810f1c9aa1070542596dc05932445aa05844339f3627cadda44549a5960c`
+- 大小：`3120260 bytes`（约 3.0M）
+- SHA256：`4bc0df97c8c8434f1fbb79cc2940459389e9fa963d7722c2bae14ea3d9ab2472`
 - `release.json.version`：`1.0.74`
 - `release.json.packageType`：`server-admin-user-web`
 
