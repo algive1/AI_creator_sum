@@ -27,7 +27,7 @@ const DEFAULT_CUSTOMER_SERVICE = {
   showInProfile: true,
   sessionFrom: 'profile',
   showMessageCard: true,
-  sendMessageTitle: 'AI创作助手客服咨询',
+  sendMessageTitle: 'AI艺术生成工坊客服咨询',
   sendMessagePath: '/pages/user/index',
   sendMessageImg: '',
 };
@@ -153,7 +153,7 @@ router.get('/public/app', async (req: Request, res: Response) => {
       loadPublicSettingsSnapshot(),
       loadToolsSettingsSnapshot(),
     ]);
-    const appName = firstSetting(settings, ['public.app_name', 'app.name', 'site.name'], 'AI Creator');
+        const appName = firstSetting(settings, ['public.app_name', 'app.name', 'site.name'], 'AI艺术生成工坊');
     const publicKeys = [
       'compliance_tips',
       'membership.show_entry',

@@ -846,7 +846,7 @@ function normalizeInstallPayload(raw: any): NormalizedInstallPayload {
   };
   if (!db.user) throw new Error('请填写数据库用户名');
 
-  const siteName = firstString(sysRaw.siteName, sysRaw.site?.name, sysRaw['site.name']) || 'AI创作工坊';
+  const siteName = firstString(sysRaw.siteName, sysRaw.site?.name, sysRaw['site.name']) || 'AI艺术生成工坊';
   const timezone = firstString(sysRaw.timezone, sysRaw.siteTimezone, sysRaw['site.timezone']) || 'Asia/Shanghai';
   const adminTitle = firstString(sysRaw.adminTitle, sysRaw.siteAdminTitle, sysRaw['site.admin_title']) || `${siteName}后台`;
   const storageType = firstString(sysRaw.storageProvider, sysRaw.storageType, sysRaw['storage.provider']) || 'local';
@@ -1138,7 +1138,7 @@ export async function executeInit(onProgress?: (step: InstallTaskStepKey) => voi
         ['site.lang', 'zh-CN', 'general', 0],
         ['site.debug', sys.debugMode ? 'true' : 'false', 'general', 0],
         ['site.allow_register', sys.allowRegister ? 'true' : 'false', 'general', 0],
-        ['site.admin_title', (sys as any).adminTitle || 'AI创作工坊', 'general', 0],
+        ['site.admin_title', (sys as any).adminTitle || 'AI艺术生成工坊后台', 'general', 0],
         ['wechat.app_id', '', 'wechat', 1],
         ['wechat.app_secret', '', 'wechat', 1],
         ['wechat.login_enabled', 'true', 'wechat', 0],
@@ -1183,7 +1183,7 @@ export async function executeInit(onProgress?: (step: InstallTaskStepKey) => voi
         ['customer_service.show_in_profile', 'true', 'boolean', '是否显示在个人中心', 50],
         ['customer_service.session_from', 'profile', 'string', '微信客服会话来源 sessionFrom', 60],
         ['customer_service.show_message_card', 'true', 'boolean', '是否向客服发送小程序卡片', 70],
-        ['customer_service.send_message_title', 'AI创作助手客服咨询', 'string', '小程序客服卡片标题', 80],
+        ['customer_service.send_message_title', 'AI艺术生成工坊客服咨询', 'string', '小程序客服卡片标题', 80],
         ['customer_service.send_message_path', '/pages/user/index', 'string', '小程序客服卡片路径', 90],
         ['customer_service.send_message_img', '', 'string', '小程序客服卡片 HTTPS 图片 URL，可为空', 100],
       ];

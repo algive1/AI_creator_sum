@@ -37,7 +37,7 @@ router.get('/status', async (_req: Request, res: Response) => {
       message: status.message,
       lockFileExists: status.lockFileExists,
       version: '1.0.0',
-      systemName: 'AI创作工坊',
+      systemName: 'AI艺术生成工坊',
     });
     return;
   }
@@ -55,7 +55,7 @@ router.get('/status', async (_req: Request, res: Response) => {
     service: status.service,
     diagnostics: status.diagnostics,
     version: '1.0.0',
-    systemName: 'AI创作工坊',
+    systemName: 'AI艺术生成工坊',
   });
 });
 
