@@ -7,7 +7,7 @@
 
 ## 当前结论
 
-发布契约、运行目录迁移、版本识别、用户端静态产物检查和发布包构建已完成。最终发布包已经生成并通过 `inspect-release.sh`：
+发布契约、运行目录迁移、版本识别、用户端静态产物检查、候选源码冻结和发布包构建已完成。最终发布包已经生成并通过 `inspect-release.sh`：
 
 - 文件：`ai-creator-server/ai-creator-release-1.0.74.tar.gz`
 - 大小：`3120524 bytes`（约 3.0M）
@@ -50,17 +50,25 @@
 
 ### 迁移
 
-相对已核实的 `1.0.73` 发布包，本工作区只新增迁移：
+相对已核实的 `1.0.73` 发布包，本工作区纳入以下两条兼容迁移：
 
 `ai-creator-server/server/src/migrations/20260803_001_creation_workspace.sql`
 
-该迁移使用 `CREATE IF NOT EXISTS`、information_schema 条件判断、`INSERT IGNORE` 和 nullable 字段回填；没有 DROP、TRUNCATE，不删除或重命名旧字段，也不改变既有 API 字段语义。静态幂等检查和本机真实 MySQL staging 首次执行、重复执行、已有数据链路验证均已通过。
+`ai-creator-server/server/src/migrations/20260827_001_unify_app_brand_name.sql`
+
+前者使用 `CREATE IF NOT EXISTS`、information_schema 条件判断、`INSERT IGNORE` 和 nullable 字段回填；后者只对已知旧品牌默认值执行条件 `UPDATE`，不覆盖用户自定义站点名。两者均没有 DROP、TRUNCATE，不删除或重命名旧字段，也不改变既有 API 字段语义。静态幂等检查和本机真实 MySQL staging 首次执行、重复执行、已有数据链路验证均已通过。
 
 ### 源码冻结
 
-- 已新增独立提交 `fab0c49`：`chore: track user web release source`。
-- 该提交只纳入 `user-web` 源码、配置和 lockfile，不包含 `dist`、`node_modules`、日志、tsbuildinfo 或真实环境文件。
-- 其他候选业务改动仍保留在工作区，没有执行 reset、checkout、覆盖或批量提交；后续应按业务边界继续拆分提交。
+- 已按发布边界拆分提交：
+  - `fab0c49`：跟踪 `user-web` 源码、配置和 lockfile。
+  - `8571547`：冻结发布契约和运行目录修复。
+  - `0dec0c0`：冻结 server 候选运行时代码。
+  - `67bf250`：冻结 server 验证脚本与测试，并修复 proxy URL 选择顺序。
+  - `c1b2d36`：冻结 admin-web 候选。
+  - `244aaef`：冻结 uni-app 候选。
+  - `1959b7b`：统一品牌默认值并增加兼容迁移。
+- 这些提交均未纳入 `dist`、`node_modules`、日志、tsbuildinfo、真实环境文件、备份、截图或压缩包；根目录的历史 `PRODUCT.md`/`README.md` 工作区变更也未被覆盖。
 - 发布压缩包是本地生成物，保持未纳入版本控制。
 
 ## 验证结果
@@ -73,7 +81,7 @@
 - `admin-web npm run lint`：0 errors，22 warnings（现有候选前端 warning）
 - `user-web npm run build`
 - `user-web npm run lint`
-- `server npm run check:migrations-idempotent`：103 files scanned
+- `server npm run check:migrations-idempotent`：104 files scanned
 - `server npm run check:architecture-unified`
 - `server` 的更新预检查测试：完整包、旧 `server-admin`、缺少 `user-web/dist`、危险 `.env`、`current/release.json` 回退均已覆盖并通过
 - 发布脚本和静态 Host 相关测试：5 tests passed
@@ -81,14 +89,18 @@
 - `bash scripts/inspect-release.sh ai-creator-release-1.0.74.tar.gz`
 - 最终包结构、package type、禁止文件和 SHA256 已复核
 - 本地 `check-deploy`：新增 user-web 源码与构建产物检查均为 OK；在临时 APP_ROOT 下通过，保留 6 条环境/数据库 warning
+- `server` 的 TSX 测试：113 个 JavaScript 测试、4 个 TypeScript 测试全部通过
+- `uni-app`：typecheck、全量 118 个 TSX 静态测试、微信小程序构建和体积检查全部通过；产物 1615.73KB / 上限 1806.64KB
 - MySQL 隔离 staging 完整流程：
-  `env DB_PASSWORD= CHECK_DB_PASSWORD= CHECK_DB_NAME=ai_creator_install_update_check_1074 CHECK_RELEASE_VERSION=1.0.73 CHECK_UPDATE_VERSION=1.0.74 npm run check:install-update-flow`
+  `env DB_PASSWORD= CHECK_DB_PASSWORD= CHECK_DB_NAME=ai_creator_install_update_check_1074_brand CHECK_RELEASE_VERSION=1.0.73 CHECK_UPDATE_VERSION=1.0.74 npm run check:install-update-flow`
   已通过；验证首次初始化、迁移/种子数据、管理员密码校验、安装完成记录、更新包预检查，以及 `app_releases`/更新日志从 `1.0.73` 推进到 `1.0.74`
+- MySQL staging 额外确认 `20260827_001_unify_app_brand_name` 成功记录为 `success=1`，旧品牌默认值已按条件更新，用户自定义站点名保持不变
 
 未完成或受环境限制：
 
 - 未联调真实小马、红鸟、对象存储、生产生成链路和真实支付；本轮不读取、不写入、不提交任何 API key。
 - 未执行线上 PM2、health、旧任务续跑、新任务生成和文件下载验收。
+- `admin-web` lint 保留 22 条 warning，server lint 保留 12 条 warning；均无 error。uni-app 构建保留 Sass legacy API、Vite circular chunk 提示，需后续依赖升级时处理。
 
 ## 1.0.73 → 1.0.74 上线步骤
 
@@ -110,7 +122,7 @@
 
 3. 在管理后台系统更新页选择 `1.0.74`，先完成预检查，确认没有结构、数据库连接、磁盘、PM2、`mysqldump` 和 health 依赖错误；确认文本必须填写 `1.0.74`。
 
-4. 执行安装。安装器会依次备份数据库和当前代码、解压到 `releases/1.0.74`、复用 `shared/.env`、构建 server/admin-web、校验包内 `user-web/dist`、执行迁移、原子切换 `current`、重启 PM2 并校验 health。
+4. 执行安装。安装器会依次备份数据库和当前代码、解压到 `releases/1.0.74`、复用 `shared/.env`、构建 server/admin-web、校验包内 `user-web/dist`、执行两条兼容迁移、原子切换 `current`、重启 PM2 并校验 health。
 
 5. 上线后验收：
 

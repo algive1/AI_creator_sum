@@ -1,0 +1,201 @@
+{
+  "fetchedAt": "2026-07-07T00:00:00+08:00",
+  "source": "https://open.hongniaoai.com/zh-CN/api-client",
+  "baseUrl": "https://open.hongniaoai.com",
+  "modelCount": 21,
+  "notes": [
+    "Runtime sync reads GET /v1/models and stores tasks[].parameters in ai_models.config.remote_parameters.",
+    "This snapshot records the docs-page model ids and pricing only; use the admin sync action for live parameters."
+  ],
+  "models": [
+    {
+      "id": "banana2-S",
+      "type": "image_generation",
+      "pricing": {
+        "type": "per_call",
+        "amount": 0.09,
+        "currency": "CNY"
+      }
+    },
+    {
+      "id": "banana2-S_copy",
+      "type": "image_generation",
+      "pricing": {
+        "type": "per_call",
+        "amount": 0.1,
+        "currency": "CNY"
+      }
+    },
+    {
+      "id": "gpt-image-2",
+      "type": "image_generation",
+      "pricing": {
+        "type": "per_call",
+        "amount": 0.06,
+        "currency": "CNY"
+      }
+    },
+    {
+      "id": "ph-gpt-image-2",
+      "type": "image_generation",
+      "pricing": {
+        "type": "per_call",
+        "amount": 0.08,
+        "currency": "CNY"
+      }
+    },
+    {
+      "id": "ph-gpt-image-2k",
+      "type": "image_generation",
+      "pricing": {
+        "type": "per_call",
+        "amount": 0.1,
+        "currency": "CNY"
+      }
+    },
+    {
+      "id": "ph-gpt-image-4k",
+      "type": "image_generation",
+      "pricing": {
+        "type": "per_call",
+        "amount": 0.1,
+        "currency": "CNY"
+      }
+    },
+    {
+      "id": "zh-grok-video-1.0",
+      "type": "video_generation",
+      "pricing": {
+        "type": "per_call",
+        "amount": 0.4,
+        "currency": "CNY"
+      }
+    },
+    {
+      "id": "grok-imagine-video-1.5-fast",
+      "type": "video_generation",
+      "pricing": {
+        "type": "per_call",
+        "amount": 0.4,
+        "currency": "CNY"
+      }
+    },
+    {
+      "id": "zh-grok-video-1.5",
+      "type": "video_generation",
+      "pricing": {
+        "type": "per_call",
+        "amount": 0.4,
+        "currency": "CNY"
+      }
+    },
+    {
+      "id": "gr-banana-2",
+      "type": "image_generation",
+      "pricing": {
+        "type": "per_call",
+        "amount": 0.12,
+        "currency": "CNY"
+      }
+    },
+    {
+      "id": "gr-banana-pro",
+      "type": "image_generation",
+      "pricing": {
+        "type": "per_call",
+        "amount": 0.18,
+        "currency": "CNY"
+      }
+    },
+    {
+      "id": "sdquan-2-miao_fast",
+      "type": "video_generation",
+      "pricing": {
+        "type": "per_second",
+        "amount": 0.3,
+        "currency": "CNY"
+      }
+    },
+    {
+      "id": "sdquan-2-miao",
+      "type": "video_generation",
+      "pricing": {
+        "type": "per_second",
+        "amount": 0.43,
+        "currency": "CNY"
+      }
+    },
+    {
+      "id": "sdquan-fast",
+      "type": "video_generation",
+      "pricing": {
+        "type": "per_call",
+        "amount": 3.9,
+        "currency": "CNY"
+      }
+    },
+    {
+      "id": "sdquan-2",
+      "type": "video_generation",
+      "pricing": {
+        "type": "per_call",
+        "amount": 5.8,
+        "currency": "CNY"
+      }
+    },
+    {
+      "id": "sdquan-v3-pro",
+      "type": "video_generation",
+      "pricing": {
+        "type": "per_second",
+        "amount": 0.43,
+        "currency": "CNY"
+      }
+    },
+    {
+      "id": "me-kuaile1.0",
+      "type": "video_generation",
+      "pricing": {
+        "type": "per_second",
+        "amount": 0.14,
+        "currency": "CNY"
+      }
+    },
+    {
+      "id": "wanneng1.1",
+      "type": "video_generation",
+      "pricing": {
+        "type": "per_second",
+        "amount": 0.14,
+        "currency": "CNY"
+      }
+    },
+    {
+      "id": "B-quannengship2.0",
+      "type": "video_generation",
+      "pricing": {
+        "type": "per_call",
+        "amount": 2.6,
+        "currency": "CNY"
+      }
+    },
+    {
+      "id": "seedance-2.0-933",
+      "type": "video_generation",
+      "pricing": {
+        "type": "per_call",
+        "amount": 3.5,
+        "currency": "CNY"
+      }
+    },
+    {
+      "id": "quanneng2.0",
+      "type": "video_generation",
+      "pricing": {
+        "type": "per_call",
+        "amount": 2.8,
+        "currency": "CNY"
+      }
+    }
+  ]
+}

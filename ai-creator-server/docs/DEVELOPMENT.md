@@ -7,6 +7,7 @@
 ```text
 server/        Express + TypeScript + MySQL
 admin-web/     React + Ant Design + Vite
+user-web/      React + Ant Design + Vite, PC user creator workspace
 scripts/       发布包脚本
 docs/          当前维护文档
 ```
@@ -37,6 +38,16 @@ Vite 开发服务端口是 `5173`，`/api` 和 `/static` 代理到 `http://local
 ```bash
 VITE_API_PROXY_TARGET=http://127.0.0.1:3137 npm run dev
 ```
+
+用户网页端：
+
+```bash
+cd user-web
+npm ci
+npm run dev
+```
+
+`user-web` 默认开发端口是 `5174`，`/api` 和 `/static` 同样代理到 `VITE_API_PROXY_TARGET`，本地可用 `http://localhost:5174` 验证登录、创作表单、任务队列、作品库和手机宽度提示页。
 
 这样后台上传返回的 `/static/...` 图片/视频可以在开发页面里正常预览。
 
@@ -74,13 +85,46 @@ npm run check:payment -- --strict-real-collection
 - 不要依赖 `ADD COLUMN IF NOT EXISTS`，MySQL 8.0 兼容性不好。
 
 首次安装会执行 schema、seed、migrations，并写入 `schema_migrations`。
+迁移运行器在失败时会输出迁移文件名、SQL 序号、MySQL `code/errno/sqlState` 和 SQL preview，方便定位安装更新日志里具体失败的语句。涉及临时表、字符串字面量和业务表字段比较时，要显式保持 `CHARACTER SET`/`COLLATE` 一致；`20260615_003_seed_hongniao_image_models.sql` 使用 `utf8mb4_unicode_ci` 与 `ai_models` 对齐，避免生产库默认 `utf8mb4_0900_ai_ci` 时出现 `Illegal mix of collations`。
 
 ## 变更记录
+
+### 2026-07-05 智能提示词补全增强
+
+- 小程序生图、生视频页的“智能补全”按钮继续调用 `/api/v1/tasks/optimize-prompt`，不新增接口。
+- 前端会随请求传 `usage=deep_completion` 和 `context`，包含当前模式、比例、时长、清晰度、参考素材和入口档位信息。
+- 后端默认系统提示词从短句润色改为深度补全：保留用户原意，补齐主体、场景、镜头、光影、风格和质量要求；视频场景额外补动作、镜头运动和节奏。
+- 点击智能补全时前端会进入 loading 并阻止重复点击；完成或失败后恢复按钮，避免用户连续点出多笔并发请求。
+- 后端对文本能力模型绑定和 `system_prompts` 组合内容做 60 秒内存缓存；后台创建/编辑系统提示词后会清理对应 `target_feature` 的缓存，保存「AI 文本能力」设置后会清理文本能力模型绑定缓存。
+- 不缓存最终 `optimizedPrompt` 生成结果：同一提示词多次点击应允许模型产出不同版本，缓存仅用于配置和系统提示词。
+- 后端会白名单化智能补全 `context`，过滤素材 URL、本地路径、fileId/fileNo 等标识，只保留模式、尺寸、时长、入口档位和参考素材数量。
+- 后台「系统设置 → AI 文本能力」提供「编辑智能补全提示词」入口，跳转到「内容管理 → 系统提示词」并聚焦 `prompt_optimize`；新增时自动带入目标功能，减少误填。
+
+### 2026-06-27 ooa8.com 用户网页端
+
+- 新增独立 `user-web`：React + Vite + TypeScript + Ant Design，页面包含登录注册、工作台、生图、生视频、漫剧、灵感模板、作品库、任务详情、工具箱、签到和个人中心。
+- 新增邮箱注册/登录接口：`POST /api/v1/auth/register`、`POST /api/v1/auth/login`，refresh token 支持 `clientType=web`。
+- 新增迁移 `20260627_001_web_email_auth.sql`，为 `users.email` 增加唯一索引；新安装 schema 同步包含 `uk_email`。
+- `server/src/index.ts` 增加 `WEB_APP_HOSTS=ooa8.com,www.ooa8.com` Host 分流，命中用户域名时返回 `user-web/dist`，其他 Host 继续返回 `admin-web/dist`。
+- 发布脚本和检查脚本同步构建/打包 `user-web/dist`，部署文档需同步配置 DNS、SSL、Nginx、CORS/CSP 和验收命令。
+- 网页端第一版不开放支付和激励广告；积分不足时提示签到、邀请、联系客服或使用小程序处理。
 
 ### 2026-06-06 小程序死代码清理
 
 - 小程序任务创建后统一进入 `pages/result/index`，该页面负责轮询、状态展示和结果操作；已移除未导航的 `pages/generating/index` 和 `pages/task-detail/index` 注册。
 - 删除未被业务页面引用的旧组件、API 包装函数和工具导出；后端接口未删除，后续如需订单列表、邀请码绑定或独立任务详情，需要重新设计前端入口再接入。
+
+### 2026-06-14 工具页与工具模型绑定
+
+- 新增迁移 `20260614_001_tools_page.sql`：创建 `tool_usage_logs`、`tool_ad_unlocks`，写入工具箱默认开关、次数、底部导航默认值，并新增 `tool_prompt_reverse`、`tool_cutout` 两个模型功能入口。
+- 新增迁移 `20260614_002_tools_visible_keys.sql`：写入 `tools.visible_keys` 默认 8 个内置工具，顺序即小程序工具页展示顺序；移出工具只从该列表删除，不删除历史次数、日志、提示文案、工具积分收费配置或模型绑定。
+- 新增迁移 `20260614_003_tools_points_billing.sql`：写入每个工具的 `tools.{toolKey}.points_enabled` 和 `tools.{toolKey}.points_cost` 默认配置，默认关闭且 0 积分。
+- 新增小程序 `/pages/tools/index`，默认底部导航为 `首页 / 灵感 / 工具 / 记录 / 我的`；后台仍可保存超过 5 个导航项，小程序端只展示前 5 个启用项。
+- 新增 `/api/v1/tools/config`、`/api/v1/tools/process`、`/api/v1/tools/ad-session`、`/api/v1/tools/ad-unlock`。会员按 `member_daily_quota` 免费使用，非会员按 `guest_daily_quota` 免费使用；免费次数和广告解锁不可用时，如工具积分收费开启，会扣 `points_cost` 积分，处理失败自动退回。
+- 新增后台 `/api/v1/admin/tools/config` 和页面 `/wechat/tools`，入口为「微信配置 → 工具页配置」。该页统一维护工具页总开关、工具增删排序、工具启停、会员/非会员次数、广告解锁、工具积分收费、关闭提示和工具模型绑定。
+- 后台「功能开关」不再维护工具箱分组，只显示迁移提示；后台「微信配置 → 底部导航」继续只维护导航启停和内置图标标识；后台「AI 模型管理 → 功能页配置」默认隐藏 `tool_prompt_reverse`、`tool_cutout`，这两个绑定入口迁移到「微信配置 → 工具页配置」。
+- 反推提示词会尝试调用 `tool_prompt_reverse` 绑定的 OpenAI-compatible 视觉/多模态模型，失败时回退本地提示词。智能抠图当前仍是本地轻量算法，`tool_cutout` 先作为后续供应商抠图/图片编辑接入的绑定入口。
+- 工具积分收费不走 AI 任务冻结链路，使用 `point_logs` 记录 `source=tool_usage/ref_type=tool_process` 扣费，失败退款记录 `source=tool_usage_refund/ref_type=tool_process_refund`。小程序可根据 `/tools/config` 的 `pointsEnabled/pointsCost` 展示扣费文案。
 
 ### 2026-06-04 第二轮上线前修复（#1-#10）
 
@@ -114,12 +158,13 @@ npm run check:payment -- --strict-real-collection
 - 新增迁移 `20260610_002_template_save_use_member_gate.sql`：写入当前模板保存/使用会员开关 `membership.template_save_use_member_only`，默认 `false`；生成结果保存/导出不读取该开关。
 - 智能优化、图片模板使用、保存导出均增加服务端会员门槛；默认关闭，后台「功能开关」开启后生效。
 - `membership.enabled` 现在会同时影响小程序入口、会员套餐接口、会员状态接口和会员下单；`content.filter_enabled` 会影响图片/视频任务敏感词拦截；`template.user_share_enabled` 会影响结果页分享入口和后端分享接口。
+- `miniapp.home_entry.image/video/comic.enabled` 控制小程序三大创作入口维护态。任一入口关闭后首页入口仍展示，但点击只提示对应 `miniapp.home_entry.*.message` 且不跳转，不关闭生成接口或其它页面入口。
 - `security.captcha_enabled` 当前没有验证码输入/校验链路，后台「功能开关」已标记为未接入并禁用切换，避免只保存配置但业务不读取。
 - 新用户注册送积分改读 `points.new_user_bonus_points`，后台「积分管理 > 新用户奖励」可配置；只影响后续新用户。
 - 新增 `POST /api/v1/users/me/phone`，小程序个人中心用微信 `getPhoneNumber` 授权绑定手机号，页面不再展示退出登录按钮。
 - `POST /api/v1/users/me/phone` 属于主线用户接口：小程序用户点击微信手机号授权后，前端提交微信返回的 `code`，后端换取手机号并绑定；该流程不需要短信验证码，也不支持用户手输任意手机号直接绑定。
-- 灵感广场查询兼容 `display_config.inspiration` 标记的官方图片模板，避免后台手动放入灵感位后前台不可见。
-- 小程序灵感页分类改读 `/templates/categories`，列表项使用 `/templates/inspirations` 返回的 `categoryName/categoryKey`，不要在前端继续写死模板分类；后台批量展示位置会覆盖所选模板 `display_config`。
+- 灵感广场查询读取 `display_config.inspiration` 标记的官方图片/视频模板；`template_type` 只表示真实模板类型（`image`/`video`），不要再写入 `inspiration`。
+- 小程序灵感页分类改读 `/templates/categories`，列表项使用 `/templates/inspirations` 返回的 `templateType`、`targetFeature`、`categoryName/categoryKey`，不要在前端继续写死模板分类；后台灵感广场批量设置使用 `mergeDisplayConfig=true` 合并 `inspiration` 展示位。
 
 ### 2026-06-04 全量审计修复
 
@@ -146,6 +191,11 @@ npm run check:payment -- --strict-real-collection
 
 - `lockPointAccountTx` 在用户缺少 `point_accounts` 记录时会先幂等补建 0 余额账户，再继续积分变动；避免老用户普通签到因“积分账户不存在”失败。
 - 用户资料接口新增 `displayId`，小程序个人页展示 8 位非顺序对外ID，避免通过用户ID推断注册用户数量；内部 `id` 不变。
+
+### 2026-06-11 签到表标准字段修复
+
+- 新增迁移 `20260611_001_signin_records_updated_at.sql`：`signin_records` 必须包含 `updated_at`，与签到写入逻辑保持一致。
+- 新安装 schema、安装/运行时/后台就绪检查同步校验 `signin_records.updated_at`。
 
 ### 2026-06-10 Release 打包日志降噪
 
@@ -193,6 +243,7 @@ npm run check:payment -- --strict-real-collection
 - 新增迁移 `20260609_003_fix_xiaoma_video_capabilities.sql`：修正小马视频模型比例、清晰度、时长、声音模式和参考图上传模式，保证小程序只展示真实可提交能力
 - 新增迁移 `20260609_004_video_dynamic_pricing.sql`：为 `model_tiers` 增加 `pricing_mode/pricing_rules`，视频下单按时长、清晰度、声音等参数动态计算创作点
 - 新增迁移 `20260609_005_bind_xiaoma_video_launch_tiers.sql`：上线首批小马视频档位，覆盖 Sora/Grok/即梦/可灵/Veo 3.1/Omni Flash/SD 2.0 首尾帧/SD 2.0 参考生，并为 SD 2.0 全能参考配置最多 9 张参考图
+- 新增迁移 `20260614_005_refresh_xiaoma_media_model_configs.sql`：按 2026-06-14 小马 `API接口SKILL.md` 刷新 40 个视频模型和 7 个音频模型的 `param_names/default_params/supported_*`，把小马媒体模型 `query_task_url` 改为 `/v1/skills/task-status?task_id={task_id}`，并同步公开小马视频档位能力；SD 2.0 参考生只记录 `version` 为上游字段，不写入默认 `version`
 - API Key 通过 `CODESONLINE_IMAGE_API_KEY` 环境变量同步，不写入迁移
 
 ### 2026-06-03 权益图标 / 音频模式 / 参考图上限 / 积分任务 / 水印合规
@@ -278,12 +329,14 @@ npm run check:payment -- --strict-real-collection
 - `wechat_pay.*`：微信支付。
 - `storage.*`：本地和云存储。
 - `customer_service.*`：小程序客服入口。
-- `miniapp_help.*`：小程序使用帮助，含启用状态、标题和 HTML 富文本内容。
+- `miniapp_help.*`：小程序使用帮助，含启用状态、标题、兼容单条 HTML 富文本内容，以及 `miniapp_help.items_json` 多条帮助内容。每条帮助可配置标题、副标题、图片/视频 URL、固定展示比例和可复制文本块；小程序目录卡片只展示标题和副标题，点击后进入详情页。后台「微信配置 → 使用帮助」的「使用帮助内容」标签页以表格维护条目，点进条目弹窗编辑富文本。后台保存和公开下发都会净化 HTML。
+- `miniapp_prompt_guides.*`：生成页提示词引导。`miniapp_prompt_guides.enabled` 控制总开关，`miniapp_prompt_guides.items_json` 按固定模式 key 配置主提示词占位文字和“不会写提示词？”轻量弹层文案。支持的 key 为 `ai_image.text2img`、`ai_image.img2img`、`ai_image.edit`、`ai_video.text2video`、`ai_video.img2video`、`ai_video.reference`、`ai_video.first_last_frame`、`ai_video.edit`、`comic.story`。后台「微信配置 → 使用帮助」的「功能页帮助按钮」标签页单独维护这些入口。迁移 `20260617_001_miniapp_prompt_guides.sql` 会写入默认配置行。
 - `membership.*`：会员开关。
 - `invite.*`：邀请奖励。
 - `signin.*`：签到、补签、超级签到。
 - `ad.reward.*`：激励广告奖励。生产环境必须配置 `ad.reward.enabled=true` 和真实微信激励视频广告位 `ad.reward.ad_unit_id`，否则小程序只展示不可用提示，不会发放广告积分。超级签到复用 `ad.reward.ad_unit_id` 作为微信广告位，但奖励和次数统计独立于广告积分。
 - `miniapp.tab_bar`：小程序底部导航。
+- `tools.*`：工具箱开关、`tools.visible_keys`、会员/非会员每日免费次数、广告解锁开关、工具积分收费和维护文案。小程序工具页会读取 `tools.enabled`、`tools.visible_keys` 和每个 `tools.{toolKey}.*`。工具页配置位置是后台「微信配置 → 工具页配置」。
 - `ai_*`：AI 文本辅助功能兜底配置。
 
 重要微信支付回调地址：
@@ -302,7 +355,9 @@ https://your-domain.com/api/v1/payments/wechat/notify
 
 生产环境如使用 CDN 或反向代理，必须把 `storage.local.base_url` 设置为公网 HTTPS 完整地址。安装时本地上传目录默认写入 `APP_ROOT_DIR/uploads`。若旧库里仍是默认 `/www/wwwroot/ai-creator/uploads`，可设置 `LOCAL_UPLOAD_DIR=/实际可写/uploads` 后执行 `npm run db:migrate` 同步；若数据库里公开地址仍是默认 `/static`，可设置 `LOCAL_BASE_URL=https://你的后端域名/static` 后同步。已有自定义存储值不会被覆盖。
 
-后台和小程序上传会在写入存储前重新加载 `storage.*` 配置；修改后台存储配置后无需改代码，但要确保 `storage.local.upload_dir` 指向服务进程可写目录，`storage.local.base_url` 指向可访问的 `/static` 地址。本地开发时应通过安装参数或 `db:migrate` 把 `LOCAL_UPLOAD_DIR`/`LOCAL_BASE_URL` 同步到数据库，避免 WSL 或本机服务写入 `/www/wwwroot/...`。后台 `/admin/files/upload` 统一返回 `{ code, message, data }`；长期保存到模板/配置时使用稳定的 `data.url/data.cdnUrl/data.publicUrl`。后台即时预览优先使用最新 `data.accessUrl/data.previewUrl` 签名地址，避免 COS 裸公网地址 403 导致破图；文件内容代理读取超时可通过 `FILE_CONTENT_PROXY_TIMEOUT_MS` 调整，默认 120000。
+后台和小程序上传会在写入存储前重新加载 `storage.*` 配置；修改后台存储配置后无需改代码，但要确保 `storage.local.upload_dir` 指向服务进程可写目录，`storage.local.base_url` 指向可访问的 `/static` 地址。本地开发时应通过安装参数或 `db:migrate` 把 `LOCAL_UPLOAD_DIR`/`LOCAL_BASE_URL` 同步到数据库，避免 WSL 或本机服务写入 `/www/wwwroot/...`。后台 `/admin/files/upload` 和小程序 `/files/upload` 统一使用磁盘临时文件接收后流式转存，COS/OSS/本地/EOS/七牛/又拍云服务端中转均避免大视频整块进入 Node 内存；后台页面所有 `FormData` 上传都不要手写 `Content-Type: multipart/form-data`，必须让浏览器自动生成 boundary。长期保存到模板/配置时优先使用 `data.deliveryUrl/data.publicUrl/data.cdnUrl/data.storageUrl/data.url`，使小程序只配置 CDN 下载域名时也能保存到相册；`data.publicProxyUrl` 只作为公开代理兜底。`/api/v1/files/:fileNo/content` 和后台内容预览代理支持 `Range` 分段请求，便于视频播放和拖动；文件内容代理读取超时可通过 `FILE_CONTENT_PROXY_TIMEOUT_MS` 调整，默认 120000。`/templates*` 和 `/public/templates` 下发前会把可匹配到 `files` 表的历史代理地址或裸对象存储地址优先纠偏为 CDN 地址；缺少 `cdn_url` 的老记录仍可能回退代理，需要补齐 CDN 地址或重新上传。后台即时预览优先使用最新 `data.accessUrl/data.previewUrl` 签名地址。
+
+公网文件代理 URL 生成优先使用 `APP_PUBLIC_URL/PUBLIC_API_DOMAIN/SITE_API_DOMAIN`，其次使用反向代理的 `X-Forwarded-Proto/X-Forwarded-Host`；若生产域名请求未带转发协议且不是本地地址，默认生成 HTTPS，避免宝塔/Nginx 反代下把小程序媒体地址降级为 HTTP。
 
 本地通过 `http://127.0.0.1` 或 `http://localhost` 访问后端时，服务端不会下发 HSTS 和 `upgrade-insecure-requests`，避免浏览器把 `/static/...` 自动升级成 HTTPS 导致预览破图。公网生产域名仍按生产环境安全头强制 HTTPS。
 
@@ -313,23 +368,33 @@ https://your-domain.com/api/v1/payments/wechat/notify
 核心表：
 
 - `model_features`：功能，例如 `image_create`、`video_create`。
-- `model_tiers`：小程序可选档位，含默认积分价格、`quality_multipliers` 和动态定价字段 `pricing_mode/pricing_rules`。
+- `model_tiers`：小程序可选档位，含默认积分价格和动态定价字段 `pricing_mode/pricing_rules`。
 - `ai_model_providers`：模型供应商。
 - `ai_models`：真实模型。
 - `tier_model_bindings`：档位到真实模型的绑定。
 
-小程序创建任务时应传 `tierKey` 或 `tierId`。后端根据档位和绑定选择真实模型，不允许小程序直接指定 `modelId`。
+小程序创建任务时应传 `tierKey` 或 `tierId`。后端根据档位和绑定选择真实模型，不允许小程序直接指定 `modelId`。工具页的模型能力也走同一套功能页配置：`tool_prompt_reverse` 用于反推提示词，`tool_cutout` 用于智能抠图后续模型化接入；后台绑定入口只在「微信配置 → 工具页配置」显示。
 
 小程序只展示可提交任务的档位。一个入口必须同时满足：`model_features` 与 `model_tiers` 启用、至少一个绑定模型启用、供应商启用且 Base URL/API Key 已配置、绑定模型能力匹配当前 feature。后台「功能页配置」的绑定状态检查按同一口径展示“可展示/需检查”；如果小程序档位为空，应先检查这些条件，而不是在前端写兜底档位。
 
-运行时价格以 `model_tiers.points_cost` 作为默认/兜底价；如档位配置了 `pricing_mode/pricing_rules`，视频任务会按提交参数动态计算基础创作点，再应用会员功能折扣。模型降级以 `tier_model_bindings` 的主模型/备用模型顺序为准。旧表 `ai_model_price_rules`、`ai_model_fallback_rules` 仅为历史兼容数据，不参与小程序任务扣费或降级选择。
+运行时价格以 `model_tiers.points_cost` 作为默认/兜底价；如档位配置了 `pricing_mode/pricing_rules`，图片任务会按 `resolutionPreset/quality/resolution` 命中分辨率价格，视频任务会按提交参数动态计算基础创作点，再应用会员功能折扣。模型降级以 `tier_model_bindings` 的主模型/备用模型顺序为准。旧表 `ai_model_price_rules`、`ai_model_fallback_rules` 和历史字段 `quality_multipliers` 仅为兼容数据，不参与小程序任务扣费或降级选择。
 
-会员功能折扣按套餐和功能配置在 `member_plan_feature_discounts`：`discount_percent=100` 表示无折扣，`95` 表示按原积分 95% 扣费。`GET /public/model-tiers` 在带有效用户 token 时会返回会员折扣后的 `pointsCost`，同时返回 `basePointsCost/memberDiscountPercent/memberDiscountApplied/pricing`。图片任务创建时后端会按 `pointsCost × imageCount` 重新计算并冻结、扣减和失败退款；`resolutionPreset` 不影响价格。视频任务会按 `duration/quality/resolution/audioMode` 等参数命中 `pricing_rules`，前端展示只作为预计，真实扣费以后端任务创建时重算结果为准。
+后台「功能页配置」新增或编辑入口时，主模型下拉会读取 `ai_models.config` 的 `supported_durations/supported_qualities/supported_resolutions/resolution_presets/supported_audio_modes` 以及 `default_params`，把时长、清晰度/分辨率和声音渲染为定价矩阵选项；如果矩阵行仍为空，会按模型参数自动生成待定价行，但不会覆盖运营已经手动填写的价格。
+
+会员功能折扣按套餐和功能配置在 `member_plan_feature_discounts`：`discount_percent=100` 表示无折扣，`95` 表示按原积分 95% 扣费。`GET /public/model-tiers` 在带有效用户 token 时会返回会员折扣后的 `pointsCost`，同时返回 `basePointsCost/memberDiscountPercent/memberDiscountApplied/pricing`。图片任务创建时后端会先按所选 `resolutionPreset` 命中 `pricing_rules` 单张价格，再按 `pointsCost × imageCount` 重新计算并冻结、扣减和失败退款；未配置动态规则的档位继续按固定价扣费。视频任务会按 `duration/quality/resolution/audioMode` 等参数命中 `pricing_rules`，前端展示只作为预计，真实扣费以后端任务创建时重算结果为准。
+
+工具页不走 AI 任务表，使用 `tool_usage_logs` 记录每日次数。工具积分收费开启时，免费次数和广告解锁之外的使用会扣积分并写入积分流水，处理异常自动退款。需要模型的工具读取功能页默认档位和 `tier_model_bindings`：`tool_prompt_reverse` 会直接调用绑定模型的 OpenAI-compatible `chat/completions` 图片输入；若没有可用绑定、供应商 Key 缺失或调用失败，会回退本地提示词。`tool_cutout` 的绑定入口已存在，但运行时仍使用本地背景移除，接入真实供应商抠图能力时应在工具服务中补对应 provider adapter，不要直接在小程序指定真实模型。
+
+工具执行页横幅广告读取 `tools.banner_ad_unit_id`，后台配置入口在「微信配置 → 工具页配置」。该字段只控制小程序工具执行页底部 `<ad>` 横幅展示，未配置时前端应完全隐藏广告容器；非会员看广告解锁仍继续使用 `ad.reward.ad_unit_id` 激励视频广告位，两者不要混用。
+
+工具积分收费：每个工具可单独设置 `pointsEnabled` 与 `pointsCost`。默认关闭，开启后仅在免费次数耗尽且没有可用广告解锁时扣费；扣费成功后 `usageSource=points`，处理失败会自动退还。运营配置入口在「微信配置 → 工具页配置」。
 
 图片编辑支持主图 `uploadKeys`，并可额外传 `maskFileId/maskUrl`、`backgroundFileId/backgroundUrl`。视频任务会按 `videoMode` 自动匹配默认功能：文生视频、图生视频、首尾帧视频和视频编辑；视频编辑支持 `videoFileId`、`videoUrl` 或上传返回对象。
 
-视频任务参数链路会保留 `audioMode`、`preserveAudio`、`referenceMode`、可选高级参数 `seed/fps/audioUrl/audioFileId` 和清洗后的 `inputAssets`。档位能力表 `tier_capabilities` 包含 `supported_audio_modes/default_audio_mode` 和 `max_reference_images`；公开接口返回 `capabilities.audioModes/defaultAudioMode/maxReferenceImages/inputMode/referenceUploadMode/minReferenceImages/requiredReference`。`referenceUploadMode=first_frame` 表示单首图图生视频，`reference_images` 表示多参考图参考生视频，`first_last` 表示首尾帧，`source_video` 表示视频编辑；小程序的「图生视频」和「参考生视频」都提交后端 `image_to_video`，通过 `referenceMode` 区分 UI 和 provider 参数映射。单一能力项也要返回给前端并显示为锁定态，例如固定 `8s`、固定 `1080p`、固定 `audio/silent`。`minReferenceImages/maxReferenceImages` 控制图生图/图生视频参考图池，未配置最大值默认 4 张，后端创建任务时会按最少和最多张数二次校验；首尾帧固定首图/尾图 2 张，图片编辑和视频编辑走各自单素材逻辑。`inputAssets` 只用于结果页展示首尾帧/源视频素材，不作为供应商请求的素材来源。
+视频任务参数链路会保留 `audioMode`、`preserveAudio`、`referenceMode`、可选高级参数 `seed/fps/audioUrl/audioFileId` 和清洗后的 `inputAssets`。档位能力表 `tier_capabilities` 包含 `supported_audio_modes/default_audio_mode`、`max_reference_images`、`max_video_urls` 和 `max_audio_urls`；公开接口返回 `capabilities.audioModes/defaultAudioMode/maxReferenceImages/inputMode/referenceUploadMode/minReferenceImages/requiredReference/inputMediaTypes/maxVideoUrls/maxAudioUrls/advancedParams`。`advancedParams` 来自模型显式 `advanced_params/supported_advanced_params` 或 `param_names/input_keys`，只保留小程序可渲染的 `seed/fps/audioUrl`；为空时前端不展示高级参数入口，也不提交草稿里残留的高级参数。`referenceUploadMode=first_frame` 表示单首图图生视频，`reference_images` 表示多参考素材参考生视频，`first_last` 表示首尾帧，`source_video` 表示视频编辑；小程序的「图生视频」和「参考生视频」都提交后端 `image_to_video`，通过 `referenceMode` 区分 UI 和 provider 参数映射。单一能力项也要返回给前端并显示为锁定态，例如固定 `8s`、固定 `1080p`、固定 `audio/silent`。`minReferenceImages/maxReferenceImages/maxVideoUrls/maxAudioUrls` 控制图生视频素材池，后端创建任务时会按最少和最多数量二次校验；首尾帧固定首图/尾图 2 张，图片编辑和视频编辑走各自单素材逻辑。`inputAssets` 不再只是结果页展示数据：图片素材会进入参考图池，视频素材会进入 `videoUrl/videoUrls`，音频素材会进入 `audioUrl/audioUrls`，外链素材必须是公网 `http/https` URL。
 首批小马视频上线档位由 `20260609_005_bind_xiaoma_video_launch_tiers.sql` 写入。配置小马 Base URL/API Key 后，公开档位应能看到 `video_create`、`image_to_video`、`first_last_frame_video`、`video_edit` 四类入口；SD 2.0 参考生使用 `token_preauth` 预扣，不在本系统按 token 数量自动补扣或退款。
+小马媒体模型按最新 `API接口SKILL.md` 拉取的能力文档调用：创建仍为 `POST /v1/media/generate`，默认轮询端点为 `GET /v1/skills/task-status?task_id={task_id}`，以 `state/is_final` 判断终态；历史配置里写了 `queryTaskUrl` 时适配器仍会按该模板拼接，避免破坏后台手动配置。
+后台「供应商与模型」同步小马模型时会拉取 `type=image/video/audio` 三类媒体模型，并保留小马返回的媒体类型，避免 TTS/音乐模型被按名称猜成 `text`。当前小程序公开入口仍只覆盖图片和视频；音频模型已刷新后台字段，但真正开放音频创作入口前还需要补产品入口、任务类型路由和音频专用参数/音色选择流程。
 
 图片任务支持平台显式水印：`platformWatermarkEnabled` 缺省为 `true`，服务端会在最终图片左下角写入 `AI艺术生成工坊`。用户确认关闭后前端按账号偏好传 `false`，服务端不添加可见平台水印，并在 `files.platform_watermark_removed` 标记。图片编辑选择 `去水印` 时服务端强制不叠加平台水印。视频任务不支持平台水印开关，视频产物不做平台水印处理。
 
@@ -337,7 +402,11 @@ https://your-domain.com/api/v1/payments/wechat/notify
 
 法律协议种子包含三份必签协议：`user_agreement`、`privacy_policy`、`ai_content_rules`。涉及平台水印、关闭水印确认、生成内容合规和创作点/积分交易性质的更新应通过新版本 `legal_documents` 迁移发布，避免修改已经执行过的历史迁移。
 
-WellAPI 使用 `provider_type=wellapi`，Base URL 默认为 `https://wellapi.ai`。迁移会 seed 低价视频模型和 `qwen-image-2.0` 文生图模型，并为默认业务档位写入模型绑定。文本辅助功能会在 `system_configs` 为空时默认绑定 `xiaoma/gpt-5.2-chat-latest`，不覆盖后台已有配置。种子和迁移都不会把真实 API Key 写进 SQL；上线前可在后台「AI 模型管理 → 供应商与模型」填写，也可通过环境变量 `OPENAI_API_KEY/XIAOMA_API_KEY/BAGEGE_API_KEY/WELLAPI_API_KEY/CODESONLINE_IMAGE_API_KEY/APIMART_API_KEY` 在安装或 `db:migrate` 后加密同步到 `ai_model_providers`；迁移脚本只同步非占位值，不会把 `PLEASE_REPLACE`、`your_*` 这类模板值写入数据库。未配置 Key 时，小程序档位列表会跳过对应供应商绑定；如果某个档位没有任何可用绑定，创建任务会被后端明确拦截。
+WellAPI 使用 `provider_type=wellapi`，Base URL 默认为 `https://wellapi.ai`。迁移会 seed 低价视频模型和 `qwen-image-2.0` 文生图模型，并为默认业务档位写入模型绑定。文本辅助功能会在 `system_configs` 为空时默认绑定 `xiaoma/gpt-5.2-chat-latest`，不覆盖后台已有配置。种子和迁移都不会把真实 API Key 写进 SQL；上线前可在后台「AI 模型管理 → 供应商与模型」填写，也可通过环境变量 `OPENAI_API_KEY/XIAOMA_API_KEY/DEEPSEEK_API_KEY/BAGEGE_API_KEY/WELLAPI_API_KEY/CODESONLINE_IMAGE_API_KEY/APIMART_API_KEY/HONGNIAO_API_KEY` 在安装或 `db:migrate` 后加密同步到 `ai_model_providers`；迁移脚本只同步非占位值，不会把 `PLEASE_REPLACE`、`your_*` 这类模板值写入数据库。未配置 Key 时，小程序档位列表会跳过对应供应商绑定；如果某个档位没有任何可用绑定，创建任务会被后端明确拦截。
+
+DeepSeek 使用 `provider_type=openai_compatible`，Base URL 默认为 `https://api.deepseek.com`。迁移 `20260617_002_seed_deepseek_prompt_optimize.sql` seed `deepseek-v4-flash` 文本模型，能力包含 `text_chat/text_generation/prompt_optimize`，并绑定 `ai.prompt_optimize.model_id`。智能优化走 `/chat/completions`，模型默认参数可在 `ai_models.config.default_params` 中调整；上线前通过 `DEEPSEEK_API_KEY` 或后台供应商页面保存密钥。
+
+Hongniao AI 使用 `provider_type=hongniao`，Base URL 默认为 `https://open.hongniaoai.com/v1`，请求鉴权头为 `X-API-Key`。迁移 `20260707_002_hongniao_open_domain_and_sync_metadata.sql` 只把旧 `https://hongniaoai.com` 配置升级到新域名，不覆盖后台自定义的非旧域名配置，也不写入明文 API Key。后台「供应商与模型 → 同步模型」会实时请求 `GET /v1/models`（当前文档页显示 21 个可用模型），解析 `data.models/tasks[].parameters`，写入上游成本、计费单位、常用能力字段和 `config.remote_parameters` 原始参数快照；已有模型会保留后台配置的售卖价格、显示名和启停状态。若红鸟远端删除模型，预览会列入 `removals` 并展示受影响的档位绑定和 fallback 规则；确认 apply 后只软停用模型、写入 `config.upstream_removed_at`，并解除前台绑定/fallback，历史任务和模型记录不硬删。后台模型编辑页只可视化编辑常用能力字段，完整原始参数在详情页只读查看。视频创建走 `POST /v1/videos`，查询走 `GET /api/v1/videos/{id}`；图片创建走 `POST /v1/images`，查询走 `GET /api/v1/images/{id}`。上线前可在后台供应商配置粘贴 API Key，或通过 `HONGNIAO_API_KEY` / `HONGNIAOAI_API_KEY` 在安装或 `db:migrate` 后加密同步；普通验收优先使用 `npm run check:hongniao-video` 做非生成验证，「真实模型测试」会调用真实上游并可能消耗额度。
 
 启动后会非阻塞检查是否存在至少一个 active provider 同时配置了 Base URL 和 API Key；没有时会打印 warning，后台配置检查也会显示错误。真实 Key 不写入仓库、`.env.example` 或 SQL seed。
 
@@ -363,13 +432,14 @@ APIMart 使用 `provider_type=apimart`，Base URL 默认为 `https://api.apimart
 - 微信配置：小程序、微信支付、客服、使用帮助、底部导航、接口参考。
 
 后台「供应商与模型」列表使用 `GET /admin/models/providers?paginate=1` 和 `GET /admin/real-models?paginate=1` 做真实分页和筛选；旧调用不传 `paginate/page/pageSize` 时继续返回数组。供应商 API Key 和微信 AppSecret 只通过复制接口短暂返回明文，页面默认展示脱敏值，编辑时留空不覆盖原密钥。功能页入口删除使用 `DELETE /admin/model-tiers/:id`，会同时删除入口能力和模型绑定关系；停用入口仍使用 `PUT /admin/model-tiers/:id` 更新 `status`。
+后台用户管理的 `GET /admin/users` 和 `GET /admin/users/:id` 返回 `phone` 明文字段，列表和详情页直接展示用户绑定手机号；该展示只作用于登录后的后台管理接口，小程序用户侧仍按 `phoneBound`/脱敏口径处理。
 - 对象存储：COS、OSS、七牛、又拍云、移动云、本地存储。
 - 腾讯云 COS 服务端上传和删除使用官方 `cos-nodejs-sdk-v5`，不要在业务代码里手写 XML API 签名；Bucket 必须包含 APPID 后缀，Region 必须与存储桶地域一致。
 - 上线配置检查、功能开关、系统更新、备份管理、系统设置、操作日志。
 
 新增后台页面时，需要同时改 `Layout.tsx` 的菜单和 `<Routes>`，页面组件应使用 `React.lazy` 动态导入，不要在 `Layout.tsx` 顶部静态 import 业务页面，避免把所有后台页面打进首屏 JS 包。
 
-迁移 `20260531_008_seed_scraped_template_content.sql` 会写入 DoodleAI 提示词广场 30 条灵感种子和献丑活动 1 的 20 条视频模板种子。DoodleAI 的视频内容把视频地址写入 `templates.preview_url` 和 `params_json.videoUrl`；献丑公开接口没有独立生成提示词字段，入库提示词优先使用公开描述，描述为空时使用标题并在 `params_json.promptSource` 标记来源。
+迁移 `20260531_008_seed_scraped_template_content.sql` 会写入 DoodleAI 提示词广场 30 条灵感种子和献丑活动 1 的 20 条视频模板种子；`20260612_002_inspiration_templates_to_media_types.sql` 会把历史 DoodleAI `template_type=inspiration` 纠正为真实 `image`/`video` 类型，并保留 `display_config.inspiration`。DoodleAI 的视频内容把视频地址写入 `templates.preview_url` 和 `params_json.videoUrl`；献丑公开接口没有独立生成提示词字段，入库提示词优先使用公开描述，描述为空时使用标题并在 `params_json.promptSource` 标记来源。
 
 ## 会员和订单
 

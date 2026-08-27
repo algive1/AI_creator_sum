@@ -12,10 +12,19 @@
 - Logged-in users without `user.phoneBound` see a lightweight home-page phone binding prompt. The button uses WeChat `open-type="getPhoneNumber"` and posts `detail.code` to `POST /users/me/phone`; phone binding cannot be silent or automatic on app open.
 - Migration `20260610_003_seed_content_sensitive_words_multilingual.sql` adds Chinese and English seed words to `content_sensitive_words` with `INSERT IGNORE`, so updates and fresh installs can extend the compliance seed set without duplicating words.
 
+## Mini Program Session And Watermark Update (2026-06-26)
+
+- 小程序 access token 仍由 `JWT_EXPIRES_IN` 控制，默认 7200 秒；refresh token 改由 `JWT_REFRESH_EXPIRES_IN` 控制，默认 31536000 秒（365 天）。
+- 小程序端收到 401 后继续调用 `/auth/refresh-token` 静默刷新，并保存接口返回的新 `refreshToken`。只要用户未主动退出、未清理小程序缓存，通常不需要再次微信登录和手机号授权。
+- `refreshTokenExpiresIn` 返回 `JWT_REFRESH_EXPIRES_IN` 的实际秒数，供客户端或排查工具展示有效期。
+- 平台图片水印固定为 `AI艺术生成工坊`。服务端水印 SVG 内嵌中文字体子集，不依赖 Linux 服务器预装中文字体。
+
 ## Template Save/Use Member Gate (2026-06-10)
 
 - `GET /public/app` returns `membership.template_save_use_member_only` and `memberOnly.templateSaveUse`.
 - `GET /templates`, `GET /templates/inspirations`, `GET /templates/:id`, and `GET /public/templates` return `canView/canUse/canSave/lockReason`.
+- `GET /templates`, `GET /templates/home-inspirations`, `GET /templates/inspirations`, `GET /templates/inspirations/top`, `GET /templates/:id`, and `GET /templates/my-favorites` return `usageCount`, `favoriteCount`, `isFavorited`, `author/nickname`, and `avatarUrl/authorAvatar`. `usageCount` is the template use count, `favoriteCount` is the template favorite count, anonymous requests return `isFavorited=false`, official templates use `@官方灵感`, and user templates use the sharer's nickname.
+- `POST /templates/:id/favorite` and `DELETE /templates/:id/favorite` are idempotent. They return `{ templateId, isFavorited, favoriteCount, totalFavorites }`; `totalFavorites` is the personal-center favorite total. First-time favorites on another user's public template also create a template-favorite notification for the template owner.
 - If `membership.enabled=true` and `membership.template_save_use_member_only=true`, non-members may browse and preview templates but must be blocked from saving template media and from using a template to generate the same style.
 - Generated result saving remains independent: `scene=export_save` is only a compliance confirmation flow and must not be blocked by the template gate.
 - Legacy keys `membership.image_template_use_member_only` and `membership.save_to_album_member_only` are not the current template save/use policy.
@@ -25,6 +34,7 @@
 ### 鉴权
 
 通过 `/auth/wechat-login` 获取 token 和 refreshToken，过期后用 `/auth/refresh-token` 刷新。小程序端应保存新的 refreshToken。
+`token` 默认短期有效，`refreshToken` 默认 365 天有效；如需调整小程序免二次登录窗口，修改服务端 `JWT_REFRESH_EXPIRES_IN` 并重启后端。
 微信小程序工程 AppID 必须与后端 `wechat.app_id` 使用同一个小程序，否则 `uni.login` 返回的 code 无法通过后端 `jscode2session` 换取 openid。
 
 ### 响应格式
@@ -99,14 +109,28 @@
 | `featureKeys` | 所有启用功能的 key 数组 |
 | `modelTiers` | **按 feature 分组的完整档位信息**（名称 / 积分 / 能力配置 / 图片尺寸组合） |
 | `customerService` | 客服配置（标题 / 图标 / 卡片） |
-| `help` | 使用帮助配置：`enabled/title/contentHtml`，内容来自后台微信配置 |
+| `help` | 使用帮助配置：`enabled/title/contentHtml/items[]`，内容来自后台微信配置；`items[]` 每条支持 `title/subtitle/contentHtml/mediaType/mediaUrl/mediaRatio/copyText/copyLabel`，帮助目录只展示标题和副标题，点击进入详情页后媒体按固定比例完整展示，可复制内容用于客服号、模板文本或代码片段 |
+| `promptGuides` | 生成页提示词引导配置：`enabled/items`。`items` 按固定模式 key 下发，支持 `placeholder/title/subtitle/contentHtml/copyText/copyLabel/helpId/enabled`；小程序用 `placeholder` 覆盖主提示词输入框占位文字，点击“不会写提示词？”后展示轻量弹层，并可跳转完整帮助页 |
 | `visualAssets` | 小程序运营素材 URL：`homeBannerUrl/homeMemberUpsellUrl/inspirationBannerUrl/comicBannerUrl/profileMemberOfferBannerUrl`；为空时小程序使用本地 JPG 或 CSS 兜底 |
-| `tabBar` / `navigation.tabBar` | 底部导航栏；后台「微信配置 → 底部导航」保存，支持 `text/pagePath/iconPath/selectedIconPath` |
+| `homeEntrySwitches` | 首页三大创作入口维护开关，结构为 `{ image/video/comic: { enabled, message } }`；默认全部 `enabled=true`。任一入口关闭后，首页点击提示 `message` 且不跳转；不关闭生成接口或其它页面入口 |
+| `mediaDownload` | 模板素材可保存来源：`storageOrigins/origins` 为对象存储/CDN 下载域名；`fileProxyOrigins` 保留为空数组兼容旧字段 |
+| `toolsConfig` | 工具箱配置：`enabled/tools/usage/adUnitId/bannerAdUnitId`。工具项包含 `key/title/description/category/memberDailyQuota/guestDailyQuota/adUnlockEnabled/pointsEnabled/pointsCost/featureKey/modelBound` |
+| `freeImageQuota` | 非会员免费生图轻量配置：`enabled/showInDailyTasks/dailyLimit/totalLimit/allowedTierKeys/exhaustedMessage`；不包含用户剩余额度，剩余额度用 `/free-image-quota/me` 查询 |
+| `tabBar` / `navigation.tabBar` | 底部导航栏；后台「微信配置 → 底部导航」保存，支持 `text/pagePath/icon/iconPath/selectedIconPath/enabled` |
+| `profileWorkbenchEnabled` / `miniapp.profile_workbench_enabled` | 我的页“我的创作台”入口开关；后台「微信配置 → 底部导航」保存，默认 `true`，关闭后只隐藏入口区块 |
+| `profilePointsTasksEnabled` / `miniapp.profile_points_tasks_enabled` | 我的页“今日积分任务”卡片开关；后台「微信配置 → 底部导航」保存，默认 `true`，关闭后只隐藏任务卡片 |
+| `profileMemberEntryEnabled` / `miniapp.profile_member_entry_enabled` | 我的页会员卡片入口开关；后台「微信配置 → 底部导航」保存，默认 `true`，关闭后只隐藏会员套餐入口卡片，不影响会员状态 |
 | `membershipEnabled` / `inviteEnabled` / `paymentEnabled` | 功能开关 |
 
 `visualAssets` 中的图片必须使用公网 HTTPS，并在微信公众平台配置到 `downloadFile` 合法域名。首页 3 个核心入口图保留本地 JPG，不依赖后台配置。
 
-底部导航由小程序自定义组件 `AppTabBar` 渲染。小程序启动时调用 `/public/app` 并缓存配置；如果接口下发的 `tabBar` 少于 2 项或解析失败，会使用本地默认导航。后台填写的图标 URL 必须是 HTTPS 或小程序本地 `/static/...` 路径，未填写时继续使用 CSS 图标兜底。
+`promptGuides.items` 的固定模式 key 为：`ai_image.text2img`、`ai_image.img2img`、`ai_image.edit`、`ai_video.text2video`、`ai_video.img2video`、`ai_video.reference`、`ai_video.first_last_frame`、`ai_video.edit`、`comic.story`。后台配置位置是「微信配置 → 使用帮助 → 生成页提示词引导」；配置缺失或关闭时，小程序保留页面原默认占位文字并隐藏帮助按钮。
+
+首页生图、生视频、生漫剧入口维护态由后台「功能开关 → 首页入口维护」维护，配置键分别为 `miniapp.home_entry.image.enabled/message`、`miniapp.home_entry.video.enabled/message`、`miniapp.home_entry.comic.enabled/message`。任一入口关闭后只拦截首页入口点击，不关闭对应任务接口，也不影响用户从其他页面进入已存在的功能页。`ai.storyboard_generate.enabled` 仍用于控制漫剧页内的分镜生成能力。
+
+后台文件管理上传并保存到模板的素材会优先通过对象存储/CDN 地址下发。微信公众平台 `downloadFile` 合法域名配置当前对象存储/CDN 域名即可；后端 API 域名只用于 `request/uploadFile`，除非主动启用文件代理兜底，否则不要依赖它保存模板素材。外部种子素材不应加入可保存来源，只用于灵感预览和生成同款。
+
+底部导航由小程序自定义组件 `AppTabBar` 渲染。小程序启动时会强制刷新 `/public/app`，缓存配置只作为接口失败时兜底；如果接口下发的 `tabBar` 少于 2 项或解析失败，会使用本地默认导航。默认导航是 `首页 / 灵感 / 工具 / 作品库 / 我的`。后台可以保存超过 5 个导航项，小程序端只渲染排序靠前的 5 个启用项。历史页 `/pages/history/index` 继续保留旧路由；旧文案“资产”或“记录”会在小程序显示层归一为“作品库”。后台把首个导航页改成灵感页后，小程序会先拿配置再跳转，避免默认首页入口先闪一下。后台填写的图标 URL 必须是 HTTPS 或小程序本地 `/static/...` 路径，未填写时使用内置 SVG 图标或 CSS 图标兜底。
 
 ### 本机配置 AppID/AppSecret 测试小程序
 
@@ -120,15 +144,19 @@
 
 按单个 feature 获取档位列表。也可直接从 `/public/app` 的 `modelTiers` 字段取。
 
-**参数：** `?feature=image_create`
+**参数：** `?feature=image_create`。PC 网页端可额外传 `clientType=web` 使用网页端展示过滤；小程序不要传该参数。
 
-**返回：** `{ list: [{ id, tierId, tierName, tierKey, basePointsCost, pointsCost, memberDiscountPercent, memberDiscountApplied, isDefault, pricing, capabilities: { ratios, qualities, resolutionPresets, sizeOptions, defaultSizeKey, styles, durations, audioModes, defaultAudioMode, supportedSizeModes, maxImages, maxReferenceImages, maxDurationSeconds, inputMode, referenceUploadMode, minReferenceImages, requiredReference } }] }`
+**返回：** `{ list: [{ id, tierId, tierName, tierKey, modelName, apiModelName, upstreamModelCode, providerType, webVisible, webDisplayName, webSortOrder, basePointsCost, pointsCost, memberDiscountPercent, memberDiscountApplied, isDefault, pricing, capabilities: { ratios, qualities, resolutionPresets, sizeOptions, defaultSizeKey, styles, durations, audioModes, defaultAudioMode, supportedSizeModes, maxImages, maxReferenceImages, maxDurationSeconds, inputMode, referenceUploadMode, minReferenceImages, requiredReference } }] }`
+
+`modelName/apiModelName/upstreamModelCode/providerType` 来自该入口绑定的主模型。`webVisible/webDisplayName/webSortOrder` 是 PC 网页端专用运营字段；仅当请求 `clientType=web` 时后端会按 `webVisible` 过滤、按 `webSortOrder` 排序。小程序继续使用 `tierName` 展示业务入口名，创建任务仍提交 `tierKey`，不要直接提交真实 `modelId`。
 
 图片档位的 `sizeOptions` 是可提交的合法尺寸组合，格式示例：`{ key:"16:9_2K", ratio:"16:9", resolutionPreset:"2K", label:"2K 16:9" }`。小程序应按 `ratio` 分组展示比例，再只展示该比例下存在的 `resolutionPreset`；`defaultSizeKey` 是默认选中项。GPT Image 2 的自动尺寸是 `{ key:"auto", ratio:"auto", resolutionPreset:"auto" }`，非自动尺寸按上游 `size` 枚举下发：`1K/2K/4K` 均支持 `1:1/2:3/3:2/3:4/4:3/9:16/16:9`，其中 `16:9_4K` 会提交 `size:"3840x2160"`。小马 Nano Banana Pro 返回 11 个比例与 `1K/2K/4K`；小马 Nano Banana 2 返回 15 个比例与 `0.5K/1K/2K/4K`，后端固定提交 `thinkingLevel:"high"`，小程序不展示该参数。Seedream 5.0 这类模型应按模型配置展示 `aspect_ratio` 与 `size=2K/3K`，不要前端自行追加 1K/4K。`qualities` 仅作为旧版清晰度字段兼容，新的清晰度字段用 `resolutionPresets`。
 
 视频档位能力以后台档位和绑定主模型配置为准：小程序只展示返回的 `ratios/qualities/durations/audioModes`，不要自行追加默认比例或声音模式。单一能力项也要展示，但以锁定态呈现，例如固定 `8秒`、固定 `1080p`、固定 `有声/无声`。`audioModes` 为空时不显示声音模式；返回单项时显示锁定态。小程序支持可选高级参数 `seed/fps/audioUrl`，后端会归一化为小马常用字段透传；这些参数只在用户填写时提交，不保证所有模型都生效。仍有供应商专属必填字段时，必须在后台 `request_template/default_params` 中补齐默认值后再绑定到小程序档位。视频档位可能返回 `pricing`：`mode=fixed/matrix/per_second_matrix/token_preauth`，小程序可按当前时长、清晰度、声音等参数展示预计创作点；`token_preauth` 只展示并冻结后台配置的预扣点数，任务完成后不按 token 自动补扣或退款。
 
 小马首批视频档位由迁移 `20260609_005_bind_xiaoma_video_launch_tiers.sql` 写入，覆盖 Sora/Grok/即梦/可灵/Veo 3.1/Omni Flash/SD 2.0 首尾帧/SD 2.0 参考生。SD 2.0 参考生和全能参考使用 `referenceUploadMode=reference_images`，小程序应按 `maxReferenceImages` 允许多图上传；其中全能参考最多 9 张。固定 8 秒、固定有声/无声、固定清晰度这类单项也要展示为锁定态。
+
+迁移 `20260614_005_refresh_xiaoma_media_model_configs.sql` 会刷新小马视频/音频模型后台字段。小程序仍以公开档位返回为准：SD 2.0 参考生不展示 `version` 高级参数，`21:9` 原样展示，未返回 `advancedParams` 的模型不显示高级参数入口。
 
 若请求带有效用户 token，`pointsCost` 为当前用户会员折扣后的实际扣费积分；`basePointsCost` 为档位原始积分；`memberDiscountPercent=100` 表示无折扣。
 
@@ -138,15 +166,15 @@
 
 ### GET /public/templates 🔓
 
-按展示位置筛选模板，置顶优先。
+按展示位置筛选模板，置顶优先；非置顶模板按 `createdAt DESC, id DESC` 返回最新内容。
 
 **参数：** `?type=image&feature=text_to_image&page=1&pageSize=10`
 
-`feature` 会归一化并兼容旧值：`image_create -> text_to_image`、`video_create -> text_to_video`、`image_editing -> image_edit`。服务端会优先匹配模板 `displayConfig` 中的展示位置，置顶模板按 `pinned=true`、`pinOrder` 较大优先。
+`feature` 会归一化并兼容旧值：`image_create -> text_to_image`、`video_create -> text_to_video`、`image_editing -> image_edit`。服务端会优先匹配模板 `displayConfig` 中的展示位置，置顶模板按 `pinned=true`、`pinOrder` 较大优先，非置顶模板按创建时间倒序；未传 `feature` 时使用 `isRecommended` 兼容旧置顶，之后同样按创建时间倒序。
 
 ### GET /app/home 🔓
 
-首页聚合：弹窗公告、首页公告、功能入口、推荐/热门模板、灵感分类、用户摘要、最近作品、积分中心、会员入口。
+首页聚合：弹窗公告、首页公告、功能入口、推荐/热门模板、灵感分类、用户摘要、最近作品、积分中心、会员入口。`recommendedTemplates` 按推荐/置顶优先，其余按 `createdAt DESC, id DESC`；`hotTemplates` 按使用和收藏热度排序，同分时最新模板优先。
 
 `popupAnnouncement` 返回当前用户可弹出的第一条首页弹窗公告。服务端会按后台启用状态、有效期、投放目标和 `show_frequency` 频率规则过滤：`once` 每个用户一次，`once_per_day` 每天一次，`every_open` 每次打开可弹，`list_only` 不返回为弹窗。登录用户会记录 `lastPopupAt/popupCount/readAt/closedAt`；未登录用户由小程序本地按公告 ID 做兜底限频。
 
@@ -163,6 +191,31 @@
 
 ## 三、AI 创作
 
+### GET /free-image-quota/me 🔒
+
+查询当前登录用户的非会员免费生图额度状态。该接口只查用户额度汇总表、配置和会员状态，不扫描历史任务。
+
+返回：
+```json
+{
+  "enabled": true,
+  "eligible": true,
+  "canUseFreeQuota": true,
+  "dailyRemaining": 1,
+  "dailyLimit": 1,
+  "totalRemaining": 3,
+  "totalLimit": 3,
+  "remaining": 1,
+  "allowedTierKeys": ["image_standard", "image_pro"],
+  "showInDailyTasks": true,
+  "exhaustedMessage": "今日免费生图额度已用完，可以开通会员获得积分，或使用已有积分继续生成。",
+  "membershipEnabled": true,
+  "purchaseEnabled": true
+}
+```
+
+`GET /public/app` 只返回 `freeImageQuota.enabled/showInDailyTasks/dailyLimit/totalLimit/allowedTierKeys/exhaustedMessage` 这类轻量配置，不返回用户剩余额度。小程序生图页进入时可拉取 `/free-image-quota/me`，并结合当前选中 `tierKey` 判断是否展示“免费生成”状态；默认 `allowedTierKeys=["image_standard","image_pro"]`，`image_top` 等未列入白名单的入口仍展示并走积分。我的页“今日积分任务”卡片可在 `enabled && showInDailyTasks && eligible` 时展示“免费生图 今日剩余 Y/Z 张”。会员用户不消耗免费额度，仍走会员折扣和积分体系。
+
 ### POST /tasks/image 🔒
 
 **文生图 text2img：** `{ prompt, tierKey:"image_standard", sizeKey?, ratio?, resolutionPreset?, imageCount?, style?, negativePrompt?, platformWatermarkEnabled? }`
@@ -171,7 +224,7 @@
 
 **图片编辑 edit：** `{ prompt, subType:"edit", tierKey:"image_edit_standard", uploadKeys:["待编辑图fileNo"], editTool:"eraser", maskFileId?, maskUrl?, backgroundFileId?, backgroundUrl?, platformWatermarkEnabled? }`
 
-图生图和图生视频的普通参考图数量由所选档位 `capabilities.maxReferenceImages` 控制；未返回该字段时小程序按最多 4 张处理。视频档位额外返回 `capabilities.referenceUploadMode` 与 `capabilities.minReferenceImages`：`first_frame` 表示单首图图生视频，`reference_images` 表示多参考图参考生视频，`first_last` 表示首尾帧，`source_video` 表示视频编辑。小程序提交前应按 `min/maxReferenceImages` 校验，后端创建任务时也会二次校验。首尾帧视频固定首图/尾图 2 张；图片编辑固定 1 张待编辑图；视频编辑固定 1 个源视频。
+图生图和图生视频的普通参考图数量由所选档位 `capabilities.maxReferenceImages` 控制；未返回该字段时小程序按最多 4 张处理。视频档位额外返回 `capabilities.referenceUploadMode`、`capabilities.minReferenceImages`、`capabilities.inputMediaTypes`、`capabilities.maxVideoUrls` 与 `capabilities.maxAudioUrls`：`first_frame` 表示单首图图生视频，`reference_images` 表示多素材参考生视频，`first_last` 表示首尾帧，`source_video` 表示视频编辑。小程序提交前应按 `min/maxReferenceImages`、`maxVideoUrls`、`maxAudioUrls` 校验，后端创建任务时也会二次校验。首尾帧视频固定首图/尾图 2 张；图片编辑固定 1 张待编辑图；视频编辑固定 1 个源视频。
 
 图生图、图片编辑、图生视频的参考素材不要直接传 `base64/data:`、本地路径、`localhost` 或内网地址。小程序应先通过 `/files/upload` 上传，并把生成用素材按 `visibility=public` 上传，再把返回的 `fileNo` 放入 `uploadKeys/referenceKeys`；后端提交给第三方模型前也会把对应素材兜底转为 `public`。生产环境必须确保后端返回的文件地址是第三方模型可访问的公网 HTTPS URL。
 
@@ -181,13 +234,17 @@
 
 `platformWatermarkEnabled` 缺省为 `true`。开启时服务端会在生成图片左下角写入 `AI艺术生成工坊`；关闭时不添加可见平台水印，并在文件记录中标记已关闭平台水印。图片编辑选择 `去水印` 时后端会强制不叠加平台水印。该参数仅用于图片任务，视频任务不支持。
 
-图片清晰度请传 `resolutionPreset`，不要把 `1K/2K/4K` 放进 provider `quality`。旧版 `quality=standard/hd/1K/2K/4K/auto` 会被后端兼容为清晰度；`quality=high/medium/low` 等 provider 原生质量值不会被转换。`resolutionPreset` 不影响单张价格；`imageCount` 会按“档位单张积分 × 张数”计费。若模型返回图片数少于 `imageCount`，任务会失败并退款。
+图片清晰度请传 `resolutionPreset`，不要把 `1K/2K/4K` 放进 provider `quality`。旧版 `quality=standard/hd/1K/2K/4K/auto` 会被后端兼容为清晰度；`quality=high/medium/low` 等 provider 原生质量值不会被转换。`resolutionPreset` 会参与 `pricing_rules` 分辨率定价；`imageCount` 会按“所选分辨率单张积分 × 张数”预冻结，完成时按实际成功张数扣减。若模型返回图片数少于 `imageCount` 但至少有 1 张，任务仍为 `completed`，`outputs` 返回实际成功图片，未生成张数对应积分通过 `pointsRefunded` 退回；0 张结果才失败并退款。
+
+免费生图额度开启时，非会员图片任务默认优先尝试使用免费额度，但只覆盖后台 `free_image_quota.allowed_tier_keys` 白名单内的 `tierKey`。提交成功响应会增加 `billingSource`（`free_quota` 或 `points`）；例如默认标准生图 `image_standard` 和专业生图 `image_pro` 可免费，顶级/超分生图 `image_top` 继续走积分。如果本次 `imageCount` 超过今日或总剩余额度，后端不会创建任务，也不会做“部分免费 + 部分积分”的混合支付，返回 `code=4606`、`errorCode=FREE_QUOTA_INSUFFICIENT`，并在 `data` 中带 `requestedImages/dailyRemaining/totalRemaining/estimatedPointsCost/canUsePoints/membershipEnabled/purchaseEnabled`。小程序应提示用户减少张数，或在用户确认后用 `billingSource:"points"` 重试积分支付。
+
+图片任务传入固定 `ratio/sizeKey` 时，服务端以页面选择的比例作为最终尺寸约束；提示词中的 `320x100`、`16:9`、`横版/竖版` 等尺寸描述只作为冲突提示来源，不会覆盖页面参数。只有 `ratio` 为空或 `auto` 时，服务端才会从提示词推断尺寸。小程序提交前应在检测到提示词比例与页面选择不一致时弹窗确认，继续生成则按页面选择比例提交。
 
 ### POST /tasks/video 🔒
 
-`{ prompt, tierKey:"video_standard", subType?:"text_to_video"/"image_to_video"/"first_last_frame_video"/"video_edit", referenceMode?, ratio?, duration?, resolution?, quality?, audioMode?, preserveAudio?, seed?, fps?, audioUrl?, audioFileId?, inputAssets?, uploadKeys?, firstFrameFileId?, lastFrameFileId?, videoFileId?, videoUrl? }`
+`{ prompt, tierKey:"video_standard", subType?:"text_to_video"/"image_to_video"/"first_last_frame_video"/"video_edit", referenceMode?, ratio?, duration?, resolution?, quality?, audioMode?, preserveAudio?, seed?, fps?, audioUrl?, audioUrls?, audioFileId?, inputAssets?, uploadKeys?, firstFrameFileId?, lastFrameFileId?, videoFileId?, videoUrl?, videoUrls? }`
 
-`audioMode` should be one of the selected tier `capabilities.audioModes`; the backend forwards it as `audioMode/audio_mode` only when provided. `preserveAudio` is for video edit and is forwarded as `preserveAudio/preserve_audio`. `seed/fps/audioUrl/audioFileId` are optional advanced passthrough fields; empty values should not be submitted. `referenceMode` is used by the mini program to distinguish 单首图/多参考图 图生视频 UI, while the backend still routes both through `image_to_video`. `inputAssets` is stored after whitelist cleanup for result-page display only; only `type/typeLabel/path/uploadKey/fileId/mediaType` are retained.
+`audioMode` 应来自所选档位 `capabilities.audioModes`；后端只在有值时转发为 `audioMode/audio_mode`。`preserveAudio` 用于视频编辑，会转发为 `preserveAudio/preserve_audio`。`seed/fps/audioUrl/audioFileId` 是可选高级透传字段，空值不要提交。`referenceMode` 用于区分小程序单首图/多参考素材图生视频 UI，后端仍统一路由到 `image_to_video`。`inputAssets` 会白名单保留 `type/typeLabel/path/url/sourceType/uploadKey/fileId/fileNo/mediaType`，其中图片素材会进入参考图池，视频素材会进入 `videoUrl/videoUrls`，音频素材会进入 `audioUrl/audioUrls`；所有外链素材必须是公网 `http/https` URL。
 
 图生视频、首尾帧视频和视频编辑如使用第三方异步模型，上传素材最终必须能转为公网可访问 HTTPS URL。
 
@@ -223,7 +280,7 @@
 
 我的任务列表。筛选：`?type=image/video&status=pending/queued/processing/completed/failed`
 
-返回列表字段包含 `id/taskId/taskNo/title/type/subType/status/progress/prompt/optimizedPrompt/formData/params/editTool/generationMode/tierName/tierKey/outputs/thumbnail/coverUrl/pointsCost/pointsRefunded/ratio/size/auditStatus/failReason/errorMessage/createdAt/completedAt`。`outputs[].url` is the saved media URL, `outputs[].video` is set for video outputs, and `outputs[].thumbnail` is the preview image. 图片输出的 `thumbnail` 复用最终产物地址；视频输出只有上游返回缩略图时使用缩略图，否则用视频地址兜底。`generationMode` 为任务创建入口/档位展示名，例如 `专业生图`；`pointsCost` 为任务创建时实际冻结和扣减的积分。
+返回列表字段包含 `id/taskId/taskNo/title/type/subType/status/progress/prompt/optimizedPrompt/formData/params/editTool/generationMode/tierName/tierKey/outputs/thumbnail/coverUrl/pointsCost/pointsRefunded/billingSource/ratio/size/auditStatus/failReason/errorMessage/createdAt/completedAt`。`outputs[].url` is the saved media URL, `outputs[].video` is set for video outputs, and `outputs[].thumbnail` is the preview image. 图片输出的 `thumbnail` 复用最终产物地址；视频输出只有上游返回缩略图时使用缩略图，否则用视频地址兜底。`generationMode` 为任务创建入口/档位展示名，例如 `专业生图`；`billingSource=free_quota` 表示本任务使用免费生图额度；`pointsCost` 为任务创建时冻结积分，部分成功时最终消费为 `pointsCost - pointsRefunded`。
 
 本人任务完成后，小程序结果页可直接使用 `outputs[0].image/video/url` 或 `thumbnail/coverUrl` 展示结果。`auditStatus=pending` 不会隐藏本人输出；只有 `auditStatus=rejected` 或 `blocked` 时后端返回空输出。生产环境必须使用对象存储或 CDN，返回完整公网 `https://` 媒体地址；后端不会把相对路径、`localhost`、HTTP 地址作为可用结果下发。若转存后的媒体 URL 无法公网下载，任务会失败并退回积分，不会标记为 completed。
 
@@ -232,8 +289,8 @@
 | 类型 | 域名 |
 | --- | --- |
 | request 合法域名 | 后端 API 域名，例如 `https://mini.thtapi.com` |
-| uploadFile 合法域名 | 后端 API 域名；若启用云存储直传，还要加入对象存储上传域名 |
-| downloadFile 合法域名 | 对象存储/CDN 域名；如使用后台运营图片外链，也要加入对应 HTTPS 域名 |
+| uploadFile 合法域名 | 后端 API 域名；若启用腾讯云 COS 直传，还要加入 COS 存储桶域名，例如 `https://ai-creator-1301433202.cos.ap-chengdu.myqcloud.com`；若启用七牛直传，还要加入七牛上传域名 |
+| downloadFile 合法域名 | 对象存储/CDN 域名；如使用后台运营图片外链，也要加入对应 HTTPS 域名。只有主动使用 `/api/v1/files/:fileNo/content` 文件代理兜底时，才需要额外加入后端 API 域名 |
 
 ### GET /tasks/:id 🔒
 
@@ -244,6 +301,47 @@
 ### POST /tasks/:id/cancel 🔒
 
 取消尚未完成的任务，成功返回 `{ cancelled: true }`。已完成、失败、已取消或不属于当前用户的任务不可取消。
+
+## 工具箱 🔒
+
+工具页入口默认位于底部导航第三项。小程序上传图片后调用工具接口；上传建议使用 `fileCategory=tool_source`、`visibility=private`。
+
+### GET /tools/config
+
+返回 `{ enabled, tools, usage, adUnitId, bannerAdUnitId }`。后台「微信配置 → 工具页配置」通过 `tools.visible_keys` 控制工具箱内工具集合和顺序；移出工具不会返回，直接访问运行页也会被后端拦截。`adUnitId` 是非会员广告解锁使用的激励视频广告位；`bannerAdUnitId` 是工具执行页底部横幅广告位，未配置时小程序不展示横幅广告。当前工具 key：
+
+- `prompt_reverse`：反推提示词，单图输入，返回 `prompt`。
+- `grid_cut`：九宫格切图，单图输入，返回 9 张图片。
+- `image_compress`：图片压缩，单图输入，参数 `quality=30..95`。
+- `watermark`：图片加水印，单图输入，参数 `text/opacity`。
+- `compare`：双图对比，双图输入，参数 `width/height`。
+- `cutout`：智能抠图，单图输入，参数 `tolerance`。
+- `resize`：尺寸调整，单图输入，参数 `width/height/fit`。
+- `phone_frame`：截图加手机壳，单图输入，无需额外参数；上传截图会展示在 iPhone 17 Pro Max 正面屏幕框内。
+
+`usage[toolKey]` 包含 `usedToday/freeQuota/remainingFree/unlocked`。工具项包含 `pointsEnabled/pointsCost`：免费次数或广告解锁不可用时，若开启积分收费且 `pointsCost>0`，`/tools/process` 会扣对应积分；处理失败后端会自动退款。`tools[].featureKey` 当前可能为 `tool_prompt_reverse` 或 `tool_cutout`，对应后台「微信配置 → 工具页配置」里的工具模型绑定区域；`AI 模型管理 → 功能页配置` 默认隐藏工具功能。
+
+### POST /tools/process
+
+请求：
+
+```json
+{ "toolKey": "prompt_reverse", "fileIds": [123], "params": { "scene": "产品海报" } }
+```
+
+成功返回 `{ toolKey, outputs, prompt, usageSource }`。图片输出是私有文件地址，需要携带当前用户 token 下载或预览。
+
+返回 `{ toolKey, outputs, prompt?, usageSource, pointsCost }`。`usageSource` 可能是 `member_quota/guest_quota/ad_unlock/points`。非会员免费次数耗尽、未开启工具积分收费且工具开启广告解锁时，接口返回 `code=1004`，并带 `data.needAd=true`。小程序收到后不要直接展示错误 toast，应先调用广告会话接口，完整播放微信激励视频后再重试处理。
+
+### POST /tools/ad-session
+
+请求 `{ toolKey }`，返回 `{ sessionId, adUnitId, expiresAt }`。`adUnitId` 复用后台 `ad.reward.ad_unit_id`。
+
+### POST /tools/ad-unlock
+
+请求 `{ toolKey, sessionId, completed }`。完整观看后返回 `{ unlocked:true }`，下一次 `/tools/process` 会消耗一次解锁。
+
+反推提示词会优先尝试后台绑定的 `tool_prompt_reverse` 模型；供应商需要兼容 OpenAI `chat/completions` 图片输入。失败时后端返回本地兜底提示词，避免用户卡死。智能抠图当前是本地轻量算法，`tool_cutout` 绑定入口用于后续替换为供应商抠图/图片编辑能力。
 
 ---
 
@@ -262,6 +360,8 @@
 返回列表字段包含 `id/type/amount/balance_before/balance_after/source/ref_type/ref_id/title/remark/created_at`，并额外兼容返回 `refType/refId/balanceBefore/balanceAfter/createdAt`。
 
 ### GET /checkin/status 🔒
+
+`todayReward/normal.todayReward`：未签到时为今日可领取积分；已签到时为今日实际已领取积分，来自签到记录。
 
 ### POST /checkin 🔒 普通签到
 
@@ -315,18 +415,34 @@
 
 ### GET /templates/categories 🔓 → `{ list: [{ id, name, categoryKey, icon }] }`
 
-### GET /templates 🔓 筛选：`?templateType=image/video/inspiration&targetFeature=&categoryId=&keyword=&sortBy=recommended/hot/new`
+### GET /templates 🔓 筛选：`?templateType=image/video/inspiration&targetFeature=&categoryId=&keyword=&sortBy=recommended/hot/new&random=true`
 
 返回含 `usageType`（generate=文生图 / reference=图生图 / edit=编辑）、`targetFeature`、`displayConfig`、`coverUrl`、`previewUrl`。本地存储返回的 `/static/...` 等相对媒体地址会按后端公网域名补全，便于小程序 `<image>/<video>` 直接显示。
 
 生图和生视频创作页优先使用此接口返回的后台模板。生产环境接口为空时不展示 mock 模板，运营需要在后台图片模板/视频模板中创建并审核通过。
-小程序顶部模板按功能位传 `targetFeature` 获取；服务端会同时匹配 `targetFeature` 和 `displayConfig` 中的 `text_to_image/image_to_image/image_edit/text_to_video/image_to_video/first_last_frame_video/video_edit` 展示位，并按展示位置顶排序。
+小程序顶部模板按功能位传 `targetFeature` 获取；服务端会同时匹配 `targetFeature` 和 `displayConfig` 中的 `text_to_image/image_to_image/image_edit/text_to_video/image_to_video/first_last_frame_video/video_edit` 展示位。默认排序为置顶模板最前，其余按 `createdAt DESC, id DESC`；`random=true` 时置顶模板仍固定在前，其余模板随机排序。
 
 ### GET /templates/recommended 🔓 前 8 条
 
 ### GET /templates/search 🔓 `?keyword=xxx`
 
 ### GET /templates/inspirations 🔓 灵感广场
+
+返回公开图片/视频模板；`template.user_public_enabled=true` 时包含后台审核通过的用户分享模板，否则仅返回官方模板。登录态会带 `isFavorited`，匿名固定为 `false`；`usageCount` 表示使用次数，`favoriteCount` 表示收藏次数；`author/nickname` 为展示来源，`avatarUrl/authorAvatar` 为来源头像。竖版/横版展示可优先读取 `ratio`，没有比例时客户端可从 `width/height` 或 prompt 尾部尺寸推断。
+
+支持 `random=true`，用于灵感页“换一换”随机刷新瀑布流。置顶模板仍固定在前，非置顶模板随机。
+
+### GET /templates/home-inspirations 🔓 首页灵感推荐
+
+返回配置了 `display_config.home_inspiration` 的首页模板卡片；当首页展示位为空时，后端回退到灵感广场模板并返回 `fallback=true`。置顶模板固定在前，非置顶模板默认按最新优先。字段语义与灵感广场一致，首页可直接使用 `title/coverUrl/previewUrl/author/favoriteCount/isFavorited` 渲染大图卡片和收藏状态。
+
+支持 `random=true`，规则同灵感广场。
+
+### GET /templates/inspirations/top 🔓 灵感页顶部推荐
+
+返回配置了 `display_config.inspiration_top` 的图片/视频模板，`template.user_public_enabled=true` 时包含后台审核通过的用户分享模板，字段语义与灵感广场一致。
+
+支持 `random=true`，用于灵感页“推荐灵感”换一换。置顶模板仍固定在前，非置顶模板随机。
 
 ### GET /templates/:id 🔓 含会员权限校验
 
@@ -338,7 +454,25 @@
 
 优先传 `outputId`；如果任务详情输出缺少数据库 ID，可传 `outputIndex`，后端按任务输出序号兜底查询。
 
+分享前用户必须设置非默认昵称；未设置时返回 `code=4610`，小程序应弹窗让用户填写昵称后再重试。头像不强制，未设置时客户端可继续使用默认头像展示。
+
 ### POST /templates/:id/cancel-public 🔒 取消公开
+
+### POST /templates/:id/favorite 🔒 收藏模板
+
+幂等接口。首次收藏会写入 `template_favorites`，并同步 `templates.favorite_count + 1`、`user_assets.total_favorites + 1`；重复收藏不重复计数。若收藏的是其他用户分享的模板，会给模板作者写入一条未读模板收藏通知；收藏自己的模板不通知。返回：
+
+```json
+{ "templateId": 1, "isFavorited": true, "favoriteCount": 12, "totalFavorites": 4 }
+```
+
+### DELETE /templates/:id/favorite 🔒 取消收藏模板
+
+幂等接口。已收藏时删除关系并安全递减模板收藏数和个人收藏总数，计数不会小于 0；重复取消不重复递减。返回字段同收藏接口。
+
+### GET /templates/my-favorites 🔒 `?page=1&pageSize=20`
+
+返回当前用户收藏的模板列表，按收藏时间倒序，包含图片和视频模板；视频模板会返回 `coverUrl` 与可播放的 `previewUrl/mediaUrl`。
 
 ### GET /templates/my-templates 🔒
 
@@ -438,9 +572,11 @@
 
 ## 十、文件管理
 
-### GET /files/upload-config 🔒 → `{ uploadMode, storageProvider, maxFileSize, maxImageSize, maxVideoSize, allowedMimeTypes }`
+### GET /files/upload-config 🔒 → `{ uploadMode, storageProvider, directUploadProviders, fallbackUploadUrl, maxFileSize, maxImageSize, maxVideoSize, maxAudioSize, allowedMimeTypes, allowedAudioMimeTypes }`
 
-`maxFileSize` 是上传入口允许接收的最大体积，即图片/视频上限中的较大值；业务校验仍按 MIME 分开执行：图片最大 `maxImageSize`（默认 10MB），视频最大 `maxVideoSize`（默认 200MB）。视频 MIME 支持 `video/mp4`、`video/quicktime`、`video/webm`、`video/x-msvideo`。
+`maxFileSize` 是上传入口允许接收的最大体积，即图片/视频/音频上限中的较大值；业务校验仍按 MIME 分开执行：图片最大 `maxImageSize`（默认 10MB），视频最大 `maxVideoSize`（默认 200MB），音频最大 `maxAudioSize`（默认 50MB）。视频 MIME 支持 `video/mp4`、`video/quicktime`、`video/webm`、`video/x-msvideo`；音频 MIME 支持 `audio/mpeg`、`audio/wav`、`audio/x-wav`、`audio/mp4`、`audio/aac`、`audio/ogg`。
+
+生产环境启用对象存储时，`local` 返回 `server_relay`，非 `local` 返回 `direct_client`。当前小程序直传优先支持 `qiniu_kodo` 和 `tencent_cos`；其他 provider 或直传上传阶段失败时，客户端会回退到 `fallbackUploadUrl` 对应的 `/files/upload` 中转接口。
 
 ### GET /files/credential 🔒 `?fileCategory=&originalName=&fileSize=&contentType=&visibility=`
 
@@ -448,11 +584,12 @@
 
 ### POST /files/upload 🔒 multipart/form-data。字段：`file` + `fileCategory` + `visibility`
 
-常用 `fileCategory`：`ref_image`（参考图）、`ref_video`（参考视频）、`avatar`、`template_cover`、`general`。AI 生成结果由后端写入 `ai_output/ai_video`；小程序上传参考视频时应使用 `ref_video`，不要混用 `ai_video`。
+常用 `fileCategory`：`ref_image`（参考图）、`ref_video`（参考视频）、`ref_audio`（参考音频）、`avatar`、`template_cover`、`general`。AI 生成结果由后端写入 `ai_output/ai_video`；小程序上传参考视频时应使用 `ref_video`，上传参考音频时应使用 `ref_audio`，不要混用 `ai_video`。
+返回包含 `{ fileId, fileNo, url, deliveryUrl, publicUrl, publicProxyUrl, storageUrl, cdnUrl, accessUrl, mimeType, fileSize, width, height, reused }`。同一用户重复上传相同内容、相同分类和可见性的未删除文件时，后端会直接复用已有资源并返回 `reused=true`，不再重复写入对象存储和资源记录。小程序展示和提交生成任务优先使用 `fileNo`；需要直接展示地址时优先使用 `deliveryUrl` 或 `url`。后端内容代理 `/files/:fileNo/content` 支持 `Range` 分段请求，视频播放和拖动可复用该地址作为兜底。
 
-### POST /files/notify 🔒 `{ storageKey, provider, etag, fileSize }`
+### POST /files/notify 🔒 `{ storageKey, provider?, etag?, fileSize, mimeType?, durationMs? }`
 
-直传上传成功后调用。后端只确认 `/files/credential` 已创建的占位文件，防止陌生 `storageKey` 被绑定到用户。
+直传上传成功后调用。后端只确认 `/files/credential` 已创建的占位文件，防止陌生 `storageKey` 被绑定到用户。`durationMs` 会写入 `file_upload_logs`，用于排查真实上传耗时。
 
 ### GET /files/:fileNo 🔒
 
@@ -488,7 +625,33 @@
 
 ---
 
-## 十二、法律与合规
+## 十二、消息通知
+
+我的页消息红点应同时检查公告未读、模板收藏通知未读和模板审核通知未读。模板收藏通知只记录“别人收藏了我分享的模板”，取消收藏不会删除历史通知；用户提交模板审核通过后会收到 `template_review_approved` 通知。
+
+### GET /notifications/unread-count 🔒
+
+返回：
+
+```json
+{ "total": 2, "templateFavoriteCount": 1, "templateReviewCount": 1 }
+```
+
+### GET /notifications 🔒 `?page=1&pageSize=20`
+
+返回当前用户的模板通知，按最新时间倒序。`type` 可能为 `template_favorite` 或 `template_review_approved`；列表项包含 `id/type/title/content/actorNickname/actorAvatarUrl/templateId/templateTitle/readAt/createdAt`。
+
+### POST /notifications/:id/read 🔒
+
+标记单条通知已读，返回 `{ id, read: true }`。
+
+### POST /notifications/read-all 🔒
+
+标记当前用户所有模板通知已读，返回 `{ read: true, affected }`。
+
+---
+
+## 十三、法律与合规
 
 ### GET /legal/documents 🔓 → `{ list, requiredDocTypes }`
 

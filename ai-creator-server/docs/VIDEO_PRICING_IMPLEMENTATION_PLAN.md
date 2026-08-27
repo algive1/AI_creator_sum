@@ -48,7 +48,7 @@
 后台档位管理：
 
 - `ai-creator-server/server/src/routes/admin-tiers.ts`
-  - 当前只保存 `pointsCost` 和历史 `qualityMultipliers`
+  - 早期只保存 `pointsCost` 和历史 `qualityMultipliers`，当前生效价格应以 `pricing_mode/pricing_rules` 为准
 - `ai-creator-server/admin-web/src/pages/FeatureConfig.tsx`
   - 已支持动态定价 JSON，并提供按次矩阵、按秒矩阵、token 预扣的辅助编辑器
 

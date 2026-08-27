@@ -439,8 +439,8 @@ I:\AI_creator_sum\uni-app\dist\build\mp-weixin
 ```text
 request 合法域名：https://你的后端域名
 uploadFile 合法域名：https://你的后端域名
-downloadFile 合法域名：https://你的后端域名
 downloadFile 合法域名：对象存储 CDN HTTPS 域名
+如果主动使用后端文件代理兜底，再额外加入：https://你的后端域名
 ```
 
 ## 15. 真机验收
