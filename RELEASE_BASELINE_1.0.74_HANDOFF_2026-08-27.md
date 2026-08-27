@@ -68,6 +68,8 @@
   - `c1b2d36`：冻结 admin-web 候选。
   - `244aaef`：冻结 uni-app 候选。
   - `1959b7b`：统一品牌默认值并增加兼容迁移。
+  - `3ddb747`：收紧 app_releases 版本识别和独立发布包真实环境文件检查。
+  - `1ff5aaa`：记录最终发布包校验值。
 - 这些提交均未纳入 `dist`、`node_modules`、日志、tsbuildinfo、真实环境文件、备份、截图或压缩包；根目录的历史 `PRODUCT.md`/`README.md` 工作区变更也未被覆盖。
 - 发布压缩包是本地生成物，保持未纳入版本控制。
 
@@ -87,14 +89,17 @@
 - 发布脚本和静态 Host 相关测试：5 tests passed
 - `bash scripts/build-release.sh 1.0.74`
 - `bash scripts/inspect-release.sh ai-creator-release-1.0.74.tar.gz`
+- 从干净 detached checkpoint `3ddb747` 构建发布包；另以包含 `server/.env.backup.*` 的临时恶意包验证 inspect 失败
 - 最终包结构、package type、禁止文件和 SHA256 已复核
 - 本地 `check-deploy`：新增 user-web 源码与构建产物检查均为 OK；在临时 APP_ROOT 下通过，保留 6 条环境/数据库 warning
 - `server` 的 TSX 测试：113 个 JavaScript 测试、4 个 TypeScript 测试全部通过
 - `uni-app`：typecheck、全量 118 个 TSX 静态测试、微信小程序构建和体积检查全部通过；产物 1615.73KB / 上限 1806.64KB
 - MySQL 隔离 staging 完整流程：
-  `env DB_PASSWORD= CHECK_DB_PASSWORD= CHECK_DB_NAME=ai_creator_install_update_check_1074_brand CHECK_RELEASE_VERSION=1.0.73 CHECK_UPDATE_VERSION=1.0.74 npm run check:install-update-flow`
+  `env DB_PASSWORD= CHECK_DB_PASSWORD= CHECK_DB_NAME=ai_creator_install_update_check_1074_final CHECK_RELEASE_VERSION=1.0.73 CHECK_UPDATE_VERSION=1.0.74 npm run check:install-update-flow`
   已通过；验证首次初始化、迁移/种子数据、管理员密码校验、安装完成记录、更新包预检查，以及 `app_releases`/更新日志从 `1.0.73` 推进到 `1.0.74`
-- MySQL staging 额外确认 `20260827_001_unify_app_brand_name` 成功记录为 `success=1`，旧品牌默认值已按条件更新，用户自定义站点名保持不变
+- MySQL staging 额外确认 `20260803_001_creation_workspace`、`20260827_001_unify_app_brand_name` 成功记录为 `success=1`，`app_releases` 已记录 `1.0.73` 和 `1.0.74`；旧品牌默认值已按条件更新，用户自定义站点名保持不变
+
+代码审查结论：按 correctness、readability、architecture、security、performance 五个维度完成发布范围审查，无阻断项；最后补充的版本值校验和真实 `.env.*` 拦截已重新通过 build、lint、完整 server tests、发布包检查和 MySQL 安装更新流程。
 
 未完成或受环境限制：
 
