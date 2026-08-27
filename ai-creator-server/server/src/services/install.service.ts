@@ -502,6 +502,7 @@ function pathExistsOrSymlink(targetPath: string): boolean {
 
 function initialReleaseVersion(): string {
   const version =
+    tryReadReleaseVersion(path.join(currentReleasePath(), 'release.json')) ||
     tryReadReleaseVersion(path.join(appRootDir(), 'release.json')) ||
     tryReadReleaseVersion(path.join(serverDir(), 'package.json'));
   return SEMVER_VERSION_RE.test(version) ? version : '0.0.0';
@@ -580,7 +581,7 @@ function linkInitialServerNodeModules(releaseDir: string): string | null {
 function createInitialReleaseSnapshot(releaseDir: string): void {
   const appRoot = appRootDir();
   fs.mkdirSync(releaseDir, { recursive: false });
-  for (const item of ['server', 'admin-web', 'scripts', 'docs']) {
+  for (const item of ['server', 'admin-web', 'user-web', 'scripts', 'docs']) {
     const source = path.join(appRoot, item);
     if (!fs.existsSync(source)) continue;
     fs.cpSync(source, path.join(releaseDir, item), {
@@ -590,9 +591,10 @@ function createInitialReleaseSnapshot(releaseDir: string): void {
     });
   }
   linkInitialServerNodeModules(releaseDir);
+  const packageType = fs.existsSync(path.join(releaseDir, 'user-web')) ? 'server-admin-user-web' : 'server-admin';
   fs.writeFileSync(path.join(releaseDir, 'release.json'), JSON.stringify({
     version: initialReleaseVersion(),
-    packageType: 'server-admin',
+    packageType,
     buildTime: new Date().toISOString(),
     name: 'AI Creator initial install',
     description: 'Initial runtime snapshot created by install wizard',

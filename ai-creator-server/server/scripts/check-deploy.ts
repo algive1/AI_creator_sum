@@ -22,6 +22,7 @@ const serverNodeModules = path.join(serverRoot, 'node_modules');
 const adminWebNodeModules = path.join(repoRoot, 'admin-web', 'node_modules');
 const serverDist = path.join(serverRoot, 'dist');
 const adminWebDist = path.join(repoRoot, 'admin-web', 'dist');
+const userWebDist = path.join(repoRoot, 'user-web', 'dist');
 const envFile = path.join(serverRoot, '.env');
 
 function addCheck(name: string, status: CheckStatus, message: string, details?: Record<string, unknown>): void {
@@ -216,8 +217,14 @@ async function checkNodeModules(): Promise<void> {
 }
 
 function checkBuildOutputs(): void {
-  addCheck('server build output', fs.existsSync(path.join(serverDist, 'index.js')) ? 'ok' : 'fail', fs.existsSync(path.join(serverDist, 'index.js')) ? 'server/dist/index.js exists' : 'server/dist/index.js is missing');
-  addCheck('admin-web build output', fs.existsSync(path.join(adminWebDist, 'index.html')) ? 'ok' : 'fail', fs.existsSync(path.join(adminWebDist, 'index.html')) ? 'admin-web/dist/index.html exists' : 'admin-web/dist/index.html is missing');
+  const serverIndex = path.join(serverDist, 'index.js');
+  const adminIndex = path.join(adminWebDist, 'index.html');
+  const userIndex = path.join(userWebDist, 'index.html');
+  const userAssets = path.join(userWebDist, 'assets');
+  addCheck('server build output', fs.existsSync(serverIndex) ? 'ok' : 'fail', fs.existsSync(serverIndex) ? 'server/dist/index.js exists' : 'server/dist/index.js is missing');
+  addCheck('admin-web build output', fs.existsSync(adminIndex) ? 'ok' : 'fail', fs.existsSync(adminIndex) ? 'admin-web/dist/index.html exists' : 'admin-web/dist/index.html is missing');
+  const userBuildOk = fs.existsSync(userIndex) && fs.existsSync(userAssets);
+  addCheck('user-web build output', userBuildOk ? 'ok' : 'fail', userBuildOk ? 'user-web/dist/index.html and assets exist' : 'user-web/dist/index.html or assets is missing');
 }
 
 function readJsonVersion(filePath: string): string {
@@ -263,6 +270,13 @@ function checkRequiredFiles(): void {
     ['server/package-lock.json', path.join(serverRoot, 'package-lock.json')],
     ['server/tsconfig.json', path.join(serverRoot, 'tsconfig.json')],
     ['server/.env.production.example', path.join(serverRoot, '.env.production.example')],
+    ['user-web/package.json', path.join(repoRoot, 'user-web', 'package.json')],
+    ['user-web/package-lock.json', path.join(repoRoot, 'user-web', 'package-lock.json')],
+    ['user-web/tsconfig.json', path.join(repoRoot, 'user-web', 'tsconfig.json')],
+    ['user-web/eslint.config.js', path.join(repoRoot, 'user-web', 'eslint.config.js')],
+    ['user-web/vite.config.ts', path.join(repoRoot, 'user-web', 'vite.config.ts')],
+    ['user-web/index.html', path.join(repoRoot, 'user-web', 'index.html')],
+    ['user-web/src', path.join(repoRoot, 'user-web', 'src')],
   ] as const;
   const advisoryFiles = [
     ['docs/DEPLOYMENT.md', path.join(repoRoot, 'docs', 'DEPLOYMENT.md')],

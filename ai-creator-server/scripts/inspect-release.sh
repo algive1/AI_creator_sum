@@ -86,7 +86,7 @@ check_archive_entries() {
 }
 
 check_release_json() {
-  local release_json version
+  local release_json version package_type
   release_json="$(tar -xOzf "$PACKAGE_PATH" ./release.json 2>/dev/null || tar -xOzf "$PACKAGE_PATH" release.json 2>/dev/null || true)"
   if [[ -z "$release_json" ]]; then
     fail_check "release.json is missing"
@@ -102,12 +102,23 @@ check_release_json() {
 const data = JSON.parse(process.env.RELEASE_JSON || "{}");
 if (typeof data.version === "string") process.stdout.write(data.version);
 ' 2>/dev/null || true)"
+  package_type="$(RELEASE_JSON="$release_json" node -e '
+const data = JSON.parse(process.env.RELEASE_JSON || "{}");
+if (typeof data.packageType === "string") process.stdout.write(data.packageType);
+' 2>/dev/null || true)"
 
   if [[ "$version" =~ $SEMVER_PATTERN ]]; then
     ok "release.json version: $version"
   else
     fail_check "release.json version must be semver"
   fi
+
+  case "$package_type" in
+    server-admin-user-web) ok "release.json packageType: server-admin-user-web" ;;
+    server-admin) printf '[WARN] release.json uses legacy packageType server-admin; accepted for backward compatibility\n' ;;
+    '') printf '[WARN] release.json packageType is absent; accepted for backward compatibility\n' ;;
+    *) printf '[WARN] release.json packageType is unrecognized: %s; continuing compatibility checks\n' "$package_type" ;;
+  esac
 }
 
 check_sql_locations() {
@@ -123,9 +134,9 @@ check_sql_locations() {
 
 check_dist_locations() {
   local matches
-  matches="$(printf '%s\n' "$LISTING" | grep -E '(^|/)dist(/|$)' | grep -Ev '^admin-web/dist(/|$)' || true)"
+  matches="$(printf '%s\n' "$LISTING" | grep -E '(^|/)dist(/|$)' | grep -Ev '^(admin-web|user-web)/dist(/|$)' || true)"
   if [[ -n "$matches" ]]; then
-    fail_check "only admin-web/dist is allowed in release package:"
+    fail_check "only admin-web/dist and user-web/dist are allowed in release package:"
     printf '%s\n' "$matches" | sed 's/^/[FAIL] - /' >&2
   else
     ok "dist location check passed"
@@ -160,6 +171,15 @@ require_entry "admin-web/index.html" '^admin-web/index\.html$'
 require_entry "admin-web/src" '^admin-web/src(/|$)'
 require_entry "admin-web/dist/index.html" '^admin-web/dist/index\.html$'
 require_entry "admin-web/dist/assets" '^admin-web/dist/assets(/|$)'
+require_entry "user-web/package.json" '^user-web/package\.json$'
+require_entry "user-web/package-lock.json" '^user-web/package-lock\.json$'
+require_entry "user-web/tsconfig.json" '^user-web/tsconfig\.json$'
+require_entry "user-web/eslint.config.js" '^user-web/eslint\.config\.js$'
+require_entry "user-web/vite.config.ts" '^user-web/vite\.config\.ts$'
+require_entry "user-web/index.html" '^user-web/index\.html$'
+require_entry "user-web/src" '^user-web/src(/|$)'
+require_entry "user-web/dist/index.html" '^user-web/dist/index\.html$'
+require_entry "user-web/dist/assets" '^user-web/dist/assets(/|$)'
 
 check_release_json
 

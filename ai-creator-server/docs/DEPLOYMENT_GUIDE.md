@@ -18,6 +18,6 @@
 
 - 服务端发布包由 `scripts/build-release.sh` 生成。
 - 发布包生成在 `ai-creator-server/ai-creator-release-<版本号>.tar.gz`。
-- 发布包不包含 `dist`、`node_modules`、真实 `.env`、上传文件、日志、备份和小程序。
+- 发布包包含 `admin-web/dist` 和 `user-web/dist`，不包含 `server/dist`、`node_modules`、真实 `.env`、上传文件、日志、备份和小程序。
 - 首次安装完成后运行入口是 `/www/wwwroot/ai-creator/current/server/dist/index.js`。
 - 安装锁统一写入 `/www/wwwroot/ai-creator/shared/.env.installed`。

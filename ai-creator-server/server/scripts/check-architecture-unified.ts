@@ -108,6 +108,7 @@ function assertMainlineRoutes(): void {
   ]);
   assertRoutes('server/src/routes/tasks.ts', [
     'GET /',
+    'POST /quote',
     'POST /optimize-prompt',
     'POST /script',
     'POST /prompt',
@@ -116,6 +117,7 @@ function assertMainlineRoutes(): void {
     'POST /video',
     'GET /:id(\\\\d+)',
     'POST /:id(\\\\d+)/cancel',
+    'POST /:id(\\\\d+)/retry',
   ]);
 }
 

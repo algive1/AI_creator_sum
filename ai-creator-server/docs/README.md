@@ -25,10 +25,13 @@
 
 - 发布包只支持 `.tar.gz`，由 `scripts/build-release.sh` 生成。
 - 发布包检查使用 `scripts/inspect-release.sh`。
-- 打包阶段会重新安装依赖并执行后台 lint/build、后端 lint/编码检查/build。
-- 发布包不包含 `dist`、`node_modules`、真实 `.env`、上传文件、日志、备份和本地压缩包。
+- 打包阶段会重新安装依赖并执行 `admin-web`、`user-web` 的 lint/build，以及后端 lint/编码检查/build。
+- 发布包包含从 staging 源码树生成的 `admin-web/dist` 和 `user-web/dist`；不包含 `server/dist`、`node_modules`、真实 `.env`、上传文件、日志、备份和本地压缩包。
 - 发布包不包含 `uni-app`，小程序必须单独构建。
-- 目标服务器在部署/更新时构建 `server` 和 `admin-web`。
+- 目标服务器在部署/更新时构建 `server` 和 `admin-web`，直接使用包内预构建并经预检查的 `user-web/dist`。
 - 默认运行目录是 `/www/wwwroot/ai-creator`。
 - 默认更新包目录是 `/www/wwwroot/ai-creator/update-packages`。
 - 后台更新使用 `current` 软链接运行当前版本，安装锁统一在 `shared/.env.installed`。
+## 专项运维
+
+- [TASK_TIMEOUT_RECOVERY_20260619.md](TASK_TIMEOUT_RECOVERY_20260619.md)：图片/视频异步生成超时误判后的补查、补保存、积分纠正和 dry-run/apply 脚本说明。

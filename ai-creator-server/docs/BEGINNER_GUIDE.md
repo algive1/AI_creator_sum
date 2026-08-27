@@ -11,7 +11,7 @@
 3. 宝塔网站反向代理到 `http://127.0.0.1:3000`，并配置 HTTPS。
 4. 在 WSL 里打服务端发布包。
 5. 把 `ai-creator-release-<版本号>.tar.gz` 上传到 `/www/wwwroot/ai-creator/update-packages/`。
-6. 在服务器解压、安装依赖、构建 `server` 和 `admin-web`。
+6. 在服务器解压、安装依赖、构建 `server` 和 `admin-web`；`user-web/dist` 使用发布包内预构建产物。
 7. 临时启动 PM2，打开 `https://你的域名/install`。
 8. 跟着安装向导填写数据库、管理员和系统配置。
 9. 登录后台 `/login`，配置微信、模型、功能开关、支付和模板。

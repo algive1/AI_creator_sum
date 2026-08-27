@@ -12,6 +12,7 @@
 APP_ROOT_DIR/
   server/
   admin-web/
+  user-web/
   shared/.env
   shared/.env.installed
   releases/
@@ -34,14 +35,14 @@ APP_ROOT_DIR/
 
 ## 系统更新
 
-后台系统更新只接受 `ai-creator-release-<semver>.tar.gz`。发布包由 `scripts/build-release.sh` 生成，包内包含源码、迁移和文档，不包含 `dist`、`node_modules`、真实 `.env`、上传文件、日志或备份。安装时会在目标服务器执行 `npm run build` 生成 `server/dist` 和 `admin-web/dist`，因此生产不依赖包内旧 `dist`。
+后台系统更新只接受 `ai-creator-release-<semver>.tar.gz`。发布包由 `scripts/build-release.sh` 生成，包内包含源码、迁移、文档，以及从 staging 源码树全新构建的 `admin-web/dist` 和 `user-web/dist`。发布包仍不包含 `server/dist`、`node_modules`、真实 `.env`、上传文件、日志或备份；升级预检查只允许 `admin-web/dist` 和 `user-web/dist` 这两个前端构建产物目录，其他 `dist` 会继续被拦截。
 
 安装更新包时，系统会：
 
 1. 备份数据库和当前代码。
 2. 解压新版本到 `releases/<version>`。
 3. 链接或复制 `shared/.env` 到新版本的 `server/.env`。
-4. 安装依赖、构建后端和后台前端。
+4. 安装依赖、构建后端和后台前端，并校验包内预构建的 `user-web/dist`（服务器不额外构建用户端）。
 5. 执行数据库迁移。
 6. 切换 `current` 到新版本。
 7. 重新从 `current/server/dist/index.js` 启动 PM2。

@@ -89,13 +89,19 @@ run_build_checks() {
   local run_tmp="$STAGING_DIR/.tmp"
   mkdir -p "$run_tmp"
 
-  log "building admin-web dist from source"
-  (cd "$PROJECT_ROOT/admin-web" && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm ci --no-audit --no-fund && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run build)
+  log "building admin-web dist from staged source"
   rm -rf "$STAGING_DIR/admin-web/dist"
-  copy_dir "$PROJECT_ROOT/admin-web/dist" "$STAGING_DIR/admin-web/dist"
+  (cd "$STAGING_DIR/admin-web" && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm ci --include=dev --no-audit --no-fund && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run build)
 
   log "checking admin-web lint"
   (cd "$STAGING_DIR/admin-web" && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm ci --include=dev --no-audit --no-fund && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run lint)
+
+  log "building user-web dist from staged source"
+  rm -rf "$STAGING_DIR/user-web/dist"
+  (cd "$STAGING_DIR/user-web" && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm ci --include=dev --no-audit --no-fund && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run build)
+
+  log "checking user-web lint"
+  (cd "$STAGING_DIR/user-web" && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm ci --include=dev --no-audit --no-fund && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run lint)
 
   log "checking server lint, architecture, payment, encoding, migrations, video pricing, Xiaoma video params and build"
   (cd "$STAGING_DIR/server" && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm ci --include=dev --no-audit --no-fund && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run lint && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run check:architecture-unified && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run check:payment && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run check:encoding && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run check:migrations-idempotent && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run check:video-pricing && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run check:xiaoma-video-params && TMPDIR="$run_tmp" TMP="$run_tmp" TEMP="$run_tmp" npm run build)
@@ -103,6 +109,7 @@ run_build_checks() {
 
 remove_build_artifacts() {
   rm -rf "$STAGING_DIR/admin-web/node_modules"
+  rm -rf "$STAGING_DIR/user-web/node_modules"
   rm -rf "$STAGING_DIR/server/node_modules" "$STAGING_DIR/server/dist"
   rm -rf "$STAGING_DIR/.tmp"
   find "$STAGING_DIR" -name '*.tsbuildinfo' -type f -delete
@@ -114,10 +121,10 @@ write_release_json() {
   cat > "$STAGING_DIR/release.json" <<EOF
 {
   "version": "$VERSION",
-  "packageType": "server-admin",
+  "packageType": "server-admin-user-web",
   "buildTime": "$build_time",
   "name": "AI Creator",
-  "description": "AI Creator server and admin source release"
+  "description": "AI Creator server, admin, and user web source release"
 }
 EOF
 }
@@ -151,6 +158,15 @@ stage_release() {
   copy_file "$PROJECT_ROOT/admin-web/index.html" "$STAGING_DIR/admin-web/index.html"
   copy_dir "$PROJECT_ROOT/admin-web/src" "$STAGING_DIR/admin-web/src"
   copy_optional_dir "$PROJECT_ROOT/admin-web/public" "$STAGING_DIR/admin-web/public"
+
+  copy_file "$PROJECT_ROOT/user-web/package.json" "$STAGING_DIR/user-web/package.json"
+  copy_file "$PROJECT_ROOT/user-web/package-lock.json" "$STAGING_DIR/user-web/package-lock.json"
+  copy_file "$PROJECT_ROOT/user-web/tsconfig.json" "$STAGING_DIR/user-web/tsconfig.json"
+  copy_file "$PROJECT_ROOT/user-web/eslint.config.js" "$STAGING_DIR/user-web/eslint.config.js"
+  copy_file "$PROJECT_ROOT/user-web/vite.config.ts" "$STAGING_DIR/user-web/vite.config.ts"
+  copy_file "$PROJECT_ROOT/user-web/index.html" "$STAGING_DIR/user-web/index.html"
+  copy_dir "$PROJECT_ROOT/user-web/src" "$STAGING_DIR/user-web/src"
+  copy_optional_dir "$PROJECT_ROOT/user-web/public" "$STAGING_DIR/user-web/public"
 
   find "$STAGING_DIR" -name '.DS_Store' -type f -delete
 }

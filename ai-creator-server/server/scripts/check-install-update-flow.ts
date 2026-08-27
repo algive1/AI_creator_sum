@@ -111,12 +111,15 @@ async function runInstallInit(): Promise<void> {
 async function createRuntimeSnapshot(): Promise<void> {
   const releaseDir = path.join(APP_ROOT, 'releases', `initial-${RELEASE_VERSION}`);
   fs.mkdirSync(path.join(releaseDir, 'server/dist'), { recursive: true });
+  fs.mkdirSync(path.join(releaseDir, 'user-web/dist/assets'), { recursive: true });
   writeJson(path.join(releaseDir, 'release.json'), {
     version: RELEASE_VERSION,
     packageType: 'server-admin',
     name: 'AI Creator check initial release',
   });
   fs.writeFileSync(path.join(releaseDir, 'server/dist/index.js'), 'module.exports = {};\n', 'utf8');
+  fs.writeFileSync(path.join(releaseDir, 'user-web/dist/index.html'), '<script type="module" src="/assets/app-check.js"></script>\n', 'utf8');
+  fs.writeFileSync(path.join(releaseDir, 'user-web/dist/assets/app-check.js'), 'console.log("check");\n', 'utf8');
   fs.mkdirSync(path.join(APP_ROOT, 'shared'), { recursive: true });
   fs.writeFileSync(path.join(APP_ROOT, 'shared/.env'), `DB_NAME=${cfg.database}\n`, 'utf8');
   fs.symlinkSync(releaseDir, path.join(APP_ROOT, 'current'), process.platform === 'win32' ? 'junction' : 'dir');
@@ -158,7 +161,7 @@ async function createMinimalUpdatePackage(): Promise<string> {
   fs.mkdirSync(stageDir, { recursive: true });
   writeJson(path.join(stageDir, 'release.json'), {
     version: UPDATE_VERSION,
-    packageType: 'server-admin',
+    packageType: 'server-admin-user-web',
     name: 'AI Creator check update release',
   });
   const files = [
@@ -179,6 +182,15 @@ async function createMinimalUpdatePackage(): Promise<string> {
     'admin-web/src/App.tsx',
     'admin-web/dist/index.html',
     'admin-web/dist/assets/app-check.js',
+    'user-web/package.json',
+    'user-web/package-lock.json',
+    'user-web/tsconfig.json',
+    'user-web/eslint.config.js',
+    'user-web/vite.config.ts',
+    'user-web/index.html',
+    'user-web/src/App.tsx',
+    'user-web/dist/index.html',
+    'user-web/dist/assets/app-check.js',
     'docs/INSTALL_UPDATE_RUNTIME.md',
   ];
   for (const file of files) {

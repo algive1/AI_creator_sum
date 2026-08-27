@@ -1,5 +1,68 @@
 # 部署指南
 
+## ooa8.com 用户网页端
+
+本项目现在包含三个线上部分：
+
+- `server`：后端 API、静态 Host 分流和任务运行时。
+- `admin-web`：管理后台，继续由非用户网页端域名访问。
+- `user-web`：PC 用户创作工作台，域名 `ooa8.com`、`www.ooa8.com`。
+
+DNS 和 SSL：
+
+- `ooa8.com`、`www.ooa8.com` 解析到服务器公网 IP。
+- Nginx/宝塔为 `ooa8.com` 和 `www.ooa8.com` 配置 HTTPS 证书。
+- 用户端和后台可以共用同一个 Node 服务，Host 命中 `WEB_APP_HOSTS` 时服务端返回 `user-web/dist`，其他 Host 仍返回 `admin-web/dist`。
+
+`.env` 必须包含：
+
+```env
+WEB_APP_HOSTS=ooa8.com,www.ooa8.com
+```
+
+如果用户网页端、后台和 API 都走同源反代，不需要额外 CORS。若拆成不同域名，`CORS_ALLOWED_ORIGINS` 需要加入浏览器来源，例如：
+
+```env
+CORS_ALLOWED_ORIGINS=https://ooa8.com,https://www.ooa8.com,https://admin.example.com
+```
+
+默认 CSP 的 `connect-src 'self' https:` 能覆盖同源 API 和 HTTPS 对象存储/CDN。如需更严格 CSP，覆盖 `CONTENT_SECURITY_POLICY` 时必须显式允许网页端调用的 API 域名、媒体域名和对象存储/CDN 域名。
+
+Nginx 仍统一反代到后端：
+
+```nginx
+server {
+  server_name ooa8.com www.ooa8.com;
+  client_max_body_size 200m;
+
+  location / {
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_pass http://127.0.0.1:3000;
+  }
+}
+```
+
+发布包会从 staging 源码树分别构建 `admin-web/dist` 和 `user-web/dist`，不要手动复制本机旧 dist。生产验收：
+
+```bash
+cd ai-creator-server/server && npm run build
+cd ai-creator-server/admin-web && npm run build && npm run lint
+cd ai-creator-server/user-web && npm run build && npm run lint
+curl -I -H "Host: ooa8.com" http://127.0.0.1:3000/
+curl -I -H "Host: your-admin-domain.com" http://127.0.0.1:3000/login
+curl http://127.0.0.1:3000/health
+```
+
+确认项：
+
+- `https://ooa8.com` 显示用户创作工作台。
+- 手机宽度只显示“建议使用电脑访问，或打开小程序继续创作”。
+- 原后台域名 `/login` 仍显示管理后台。
+- `/api/v1/*` 不被前端 SPA 回退吞掉。
+- 小程序 API 和上传静态权限校验保持现状。
+
 本文是服务端和后台的唯一主部署文档。旧的 `DEPLOYMENT_GUIDE.md` 不再维护，小白快速顺序见 `BEGINNER_GUIDE.md`。
 
 适用范围：
@@ -86,7 +149,7 @@ location / {
 }
 ```
 
-视频上传默认允许到 200MB，Nginx/宝塔反向代理需要配置：
+视频上传默认允许到 200MB，音频上传默认允许到 50MB。Nginx/宝塔反向代理按最大视频体积配置即可：
 
 ```nginx
 client_max_body_size 200m;
@@ -96,6 +159,10 @@ proxy_read_timeout 300s;
 ```
 
 后端文件内容代理默认读取超时为 `FILE_CONTENT_PROXY_TIMEOUT_MS=120000`。如果生产环境跨地域 COS 或大视频预览容易超时，可在 `/www/wwwroot/ai-creator/current/server/.env` 和共享 `.env` 中调大后重启 PM2。
+
+小程序登录态默认使用短 access token + 长 refresh token：`JWT_EXPIRES_IN=7200`，`JWT_REFRESH_EXPIRES_IN=31536000`。需要调整“仅登录一次”的有效窗口时，只改 `JWT_REFRESH_EXPIRES_IN` 并重启 PM2；不要为了小程序免登录而拉长 `JWT_EXPIRES_IN`，否则后台管理登录态也会同步变长。
+
+平台图片水印由后端生成，固定文字为 `AI艺术生成工坊`，并内嵌中文字体子集。生产服务器不需要额外安装中文字体即可渲染该平台水印。
 
 服务器安全组只需要开放 80、443 和宝塔面板端口。后端只监听 `127.0.0.1:3000`，不要对公网开放 3000。
 
@@ -125,6 +192,7 @@ ai-creator-release-<版本号>.tar.gz
 打包脚本会执行：
 
 - `admin-web` 依赖安装、build、lint，并把全新 `admin-web/dist` 放入发布包
+- `user-web` 依赖安装、build、lint，并把全新 `user-web/dist` 放入发布包
 - `server` 依赖安装、lint、`check:architecture-unified`、`check:payment`、`check:encoding`、`check:migrations-idempotent`、`check:video-pricing`、`check:xiaoma-video-params`、build
 - 发布包结构检查 `scripts/inspect-release.sh`
 
@@ -133,13 +201,15 @@ ai-creator-release-<版本号>.tar.gz
 - `server` 源码、迁移、脚本
 - `admin-web` 源码
 - `admin-web/dist` 全新构建产物
+- `user-web` 源码
+- `user-web/dist` 全新构建产物
 - `docs`
 - `scripts`
 - `release.json`
 
 发布包不包含：
 
-- `server/dist` 或其他运行时 `dist`
+- `server/dist` 或除 `admin-web/dist`、`user-web/dist` 之外的其他运行时 `dist`
 - `node_modules`
 - 真实 `.env`
 - 上传文件
@@ -147,7 +217,7 @@ ai-creator-release-<版本号>.tar.gz
 - 备份
 - 小程序 `uni-app`
 
-WSL 打包默认临时目录是 `/tmp/ai-creator-release`。不要把 `RELEASE_STAGING_ROOT` 指到 `/mnt/c/...`，否则 `tsx` 可能出现 IPC socket 错误。
+WSL 打包默认临时目录是 `/tmp/ai-creator-release`。不要把 `RELEASE_STAGING_ROOT` 指到 `/mnt/c/...`，否则 `tsx` 可能出现 IPC socket 错误。`admin-web/dist` 会从 staging 源码树构建，发布脚本不要回到 `/mnt/*` 源码目录执行 `npm ci`，避免删除 Windows 版 `node_modules` 时触发 esbuild 可执行文件锁或 drvfs I/O 错误。
 
 ---
 
@@ -259,6 +329,7 @@ https://你的域名/login
 /www/wwwroot/ai-creator/
   server/
   admin-web/
+  user-web/
   shared/.env
   shared/.env.installed
   releases/
@@ -274,6 +345,7 @@ https://你的域名/login
 - `shared/.env` 是后续更新复用的运行配置。
 - `shared/.env.installed` 是统一安装锁。
 - `current` 是当前运行版本。
+- `current/user-web/dist` 是线上用户网页端的预构建静态产物；更新时必须随 release 一起切换。
 - PM2 应从 `current/server/dist/index.js` 启动，并使用 `current/server/.env` 中的运行配置。
 - 旧的 `server/.env.installed` 只作为兼容读取来源，不要再手工维护。
 - 不要把旧服务器的 `current`、`shared/.env`、`shared/.env.installed`、`.pm2` 混到新部署里。
@@ -302,6 +374,8 @@ https://你的域名/login
 10. 上线配置检查
 
 腾讯云 COS 配置必须使用完整 Bucket 名（例如 `examplebucket-1250000000`），`Region` 必须与存储桶所在地域一致。服务端 COS 上传和删除依赖官方 `cos-nodejs-sdk-v5`，生产更新后需重新安装依赖、构建并重启服务。
+
+上传性能要求：生产环境若继续使用 `STORAGE_PROVIDER=local`，系统会自动走服务端中转上传，无法达到大文件几秒可用的目标。当前浏览器/小程序直传优先支持 `qiniu_kodo` 和 `tencent_cos`，图片、视频、音频参考素材都会复用同一上传链路。启用腾讯云 COS 时需同时配置 `COS_*` 环境变量、CDN/存储桶访问域名、COS Bucket CORS，并把对应 COS 存储桶域名加入微信 `uploadFile` 合法域名。启用七牛时需同时配置 `QINIU_*` 环境变量、CDN 域名、七牛 Bucket CORS，并把对应七牛上传域名加入微信 `uploadFile` 合法域名。
 
 没有可用供应商 API Key 时，小程序不会展示对应模型档位。
 
@@ -342,8 +416,8 @@ uni-app/dist/build/mp-weixin
 微信公众平台需要配置：
 
 - request 合法域名：`https://你的后端域名`
-- uploadFile 合法域名：`https://你的后端域名`
-- downloadFile 合法域名：`https://你的后端域名` 和对象存储 CDN 域名
+- uploadFile 合法域名：`https://你的后端域名`；启用腾讯云 COS 直传时还要加入 COS 存储桶域名，例如 `https://ai-creator-1301433202.cos.ap-chengdu.myqcloud.com`；启用七牛直传时还要加入七牛上传域名，例如 `https://upload-z0.qiniup.com`、`https://upload-z1.qiniup.com`、`https://upload-z2.qiniup.com` 或实际 zone 对应域名
+- downloadFile 合法域名：对象存储/CDN 域名，用于加载参考图、参考视频、参考音频和生成结果；只有主动使用后端文件代理兜底时才额外加入 `https://你的后端域名`
 
 真机至少确认：
 
@@ -555,3 +629,14 @@ mysql -u root -p ai_creator -e "UPDATE admin_users SET password_hash='刚才复�
 - `grantStatus=granted`
 
 如果 `grantStatus=pending`，在后台支付订单页补发权益。
+
+### 10.8 安装更新执行 `db:migrate` 失败
+
+后台更新包安装会在切换 release 前执行 `npm run db:migrate`。迁移日志里的 `skip` 表示该文件已写入 `schema_migrations`，`run <filename>` 表示正在执行新迁移；失败后同一个迁移不会写入成功记录，修复代码或 SQL 后再次安装/执行迁移会从失败文件继续。
+
+新版迁移运行器会输出失败迁移文件名、SQL 序号、MySQL `code/errno/sqlState` 和 SQL preview。看到 `Illegal mix of collations` 时，优先检查失败 SQL 里的临时表、字符串字面量和业务表字段是否使用了不同 `COLLATE`。`20260615_003_seed_hongniao_image_models.sql` 已显式使用 `utf8mb4_unicode_ci` 与 `ai_models` 对齐，修复后重新执行：
+
+```bash
+cd /www/wwwroot/ai-creator/current/server
+npm run db:migrate
+```

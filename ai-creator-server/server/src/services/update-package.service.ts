@@ -148,7 +148,9 @@ const ZIP_PACKAGE_HINT = '检测到 zip 更新包，但当前仅支持 .tar.gz�
 const SENSITIVE_KEYS = /(password|secret|token|privatekey|api[-_]?key|apikey)/i;
 const ALLOWED_ENV_FILES = new Set(['server/.env.example', 'server/.env.production.example']);
 const DANGEROUS_DIR = /(^|\/)(node_modules|uploads|logs|backups|\.git|\.release-staging|\.codex-qa|update-packages|codex[^/]*)(\/|$)/;
-const ALLOWED_ADMIN_DIST = 'admin-web/dist';
+const ALLOWED_DIST_DIRS = ['admin-web/dist', 'user-web/dist'];
+const CANONICAL_PACKAGE_TYPE = 'server-admin-user-web';
+const LEGACY_PACKAGE_TYPE = 'server-admin';
 const ASSET_REFERENCE_PATTERN = /(?:^|["'(\s])\/?assets\/([^"'()<>\s]+?\.(?:js|css|mjs))(?:\?[^"'()<>\s]*)?/gi;
 const JS_IMPORT_REFERENCE_PATTERN = /(?:from|import)\s*\(?\s*["']\.\/([^"']+?\.(?:js|css|mjs))(?:\?[^"']*)?["']/g;
 const HASHED_BUILD_ASSET = /-[A-Za-z0-9_-]{8,}\.(?:js|css|mjs)(?:\.gz)?$/i;
@@ -224,14 +226,14 @@ function isDangerousFile(entryPath: string): boolean {
   return basename.endsWith('~');
 }
 
-function isAllowedAdminDistPath(entryPath: string): boolean {
+function isAllowedReleaseDistPath(entryPath: string): boolean {
   const normalized = normalizeEntryPath(entryPath).replace(/\/$/, '');
-  return normalized === ALLOWED_ADMIN_DIST || normalized.startsWith(`${ALLOWED_ADMIN_DIST}/`);
+  return ALLOWED_DIST_DIRS.some(distDir => normalized === distDir || normalized.startsWith(`${distDir}/`));
 }
 
 function isForbiddenDistPath(entryPath: string): boolean {
   const normalized = normalizeEntryPath(entryPath);
-  return /(^|\/)dist(\/|$)/.test(normalized) && !isAllowedAdminDistPath(normalized);
+  return /(^|\/)dist(\/|$)/.test(normalized) && !isAllowedReleaseDistPath(normalized);
 }
 
 function normalizeAssetRelativePath(value: string): string {
@@ -325,6 +327,17 @@ async function tableExists(tableName: string): Promise<boolean> {
   return Number(row?.cnt || 0) > 0;
 }
 
+function readSemverReleaseVersion(filePath: string): string {
+  try {
+    if (!fs.existsSync(filePath)) return '';
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    const version = typeof parsed?.version === 'string' ? parsed.version.trim() : '';
+    return SEMVER_PATTERN.test(version) ? version : '';
+  } catch {
+    return '';
+  }
+}
+
 export async function getCurrentReleaseVersion(): Promise<{ version: string; warnings: string[] }> {
   const warnings: string[] = [];
   try {
@@ -333,13 +346,27 @@ export async function getCurrentReleaseVersion(): Promise<{ version: string; war
         "SELECT version FROM app_releases WHERE status = 'installed' ORDER BY installed_at DESC, id DESC LIMIT 1",
       );
       if (row?.version) return { version: String(row.version), warnings };
-      warnings.push('app_releases has no installed release record; using package.json version');
+      warnings.push('app_releases has no installed release record; checking runtime release.json');
     } else {
-      warnings.push('app_releases table not found; using package.json version');
+      warnings.push('app_releases table not found; checking runtime release.json');
     }
   } catch (err: any) {
     warnings.push(`failed to read app_releases: ${safeError(err)}`);
   }
+
+  const appRoot = appRootPath();
+  const runtimeReleaseCandidates = [
+    path.join(appRoot, 'current', 'release.json'),
+    path.join(appRoot, 'release.json'),
+  ];
+  for (const candidate of runtimeReleaseCandidates) {
+    const version = readSemverReleaseVersion(candidate);
+    if (version) {
+      warnings.push(`using runtime release.json version: ${version}`);
+      return { version, warnings };
+    }
+  }
+  warnings.push('runtime release.json has no valid semver version; falling back to package.json');
 
   try {
     const pkgPath = path.resolve(__dirname, '../../package.json');
@@ -480,6 +507,15 @@ function checkArchiveShape(result: PrecheckResult, entries: ArchiveEntryInfo[]) 
   addCheck(result, 'admin-web/src', hasPath(entries, 'admin-web/src') ? 'ok' : 'fail', hasPath(entries, 'admin-web/src') ? '存在' : '缺少 admin-web/src');
   addCheck(result, 'admin-web/dist/index.html', hasFile(entries, 'admin-web/dist/index.html') ? 'ok' : 'fail', hasFile(entries, 'admin-web/dist/index.html') ? 'exists' : 'missing admin-web/dist/index.html');
   addCheck(result, 'admin-web/dist/assets', hasPath(entries, 'admin-web/dist/assets') ? 'ok' : 'fail', hasPath(entries, 'admin-web/dist/assets') ? 'exists' : 'missing admin-web/dist/assets');
+  addCheck(result, 'user-web/package.json', hasFile(entries, 'user-web/package.json') ? 'ok' : 'fail', hasFile(entries, 'user-web/package.json') ? '存在' : '缺少 user-web/package.json');
+  addCheck(result, 'user-web/package-lock.json', hasFile(entries, 'user-web/package-lock.json') ? 'ok' : 'fail', hasFile(entries, 'user-web/package-lock.json') ? '存在' : '缺少 user-web/package-lock.json');
+  addCheck(result, 'user-web/tsconfig.json', hasFile(entries, 'user-web/tsconfig.json') ? 'ok' : 'fail', hasFile(entries, 'user-web/tsconfig.json') ? '存在' : '缺少 user-web/tsconfig.json');
+  addCheck(result, 'user-web/eslint.config.js', hasFile(entries, 'user-web/eslint.config.js') ? 'ok' : 'fail', hasFile(entries, 'user-web/eslint.config.js') ? '存在' : '缺少 user-web/eslint.config.js');
+  addCheck(result, 'user-web/vite.config.ts', hasFile(entries, 'user-web/vite.config.ts') ? 'ok' : 'fail', hasFile(entries, 'user-web/vite.config.ts') ? '存在' : '缺少 user-web/vite.config.ts');
+  addCheck(result, 'user-web/index.html', hasFile(entries, 'user-web/index.html') ? 'ok' : 'fail', hasFile(entries, 'user-web/index.html') ? '存在' : '缺少 user-web/index.html');
+  addCheck(result, 'user-web/src', hasPath(entries, 'user-web/src') ? 'ok' : 'fail', hasPath(entries, 'user-web/src') ? '存在' : '缺少 user-web/src');
+  addCheck(result, 'user-web/dist/index.html', hasFile(entries, 'user-web/dist/index.html') ? 'ok' : 'fail', hasFile(entries, 'user-web/dist/index.html') ? 'exists' : 'missing user-web/dist/index.html');
+  addCheck(result, 'user-web/dist/assets', hasPath(entries, 'user-web/dist/assets') ? 'ok' : 'fail', hasPath(entries, 'user-web/dist/assets') ? 'exists' : 'missing user-web/dist/assets');
 }
 
 function checkReleaseJson(result: PrecheckResult, releaseJsonText: string): ReleaseInfo | null {
@@ -501,10 +537,12 @@ function checkReleaseJson(result: PrecheckResult, releaseJsonText: string): Rele
     else if (!SEMVER_PATTERN.test(info.version)) addCheck(result, '版本号', 'fail', `release.json version 不是 semver 格式: ${info.version}，应使用 1.0.3 这种格式`);
     else addCheck(result, '版本号', 'ok', `版本号: ${info.version}`);
 
-    if (info.packageType && info.packageType !== 'server-admin') {
-      addCheck(result, '包类型', 'warning', `packageType 为 ${info.packageType}，建议为 server-admin`);
-    } else {
+    if (!info.packageType || info.packageType === CANONICAL_PACKAGE_TYPE) {
       addCheck(result, '包类型', 'ok', info.packageType || '未填写 packageType');
+    } else if (info.packageType === LEGACY_PACKAGE_TYPE) {
+      addCheck(result, '包类型', 'warning', '兼容旧包类型 server-admin；新包应使用 server-admin-user-web');
+    } else {
+      addCheck(result, '包类型', 'warning', `未识别 packageType: ${info.packageType}；将按兼容模式继续检查`);
     }
     return info;
   } catch (err: any) {
@@ -981,7 +1019,7 @@ function nextLegacyCurrentDir(): string {
 
 function copyLegacyFlatDeployment(targetDir: string) {
   const appRoot = appRootPath();
-  const items = ['server', 'admin-web', 'scripts', 'docs'];
+  const items = ['server', 'admin-web', 'user-web', 'scripts', 'docs'];
   fs.mkdirSync(targetDir, { recursive: false });
   for (const item of items) {
     const source = path.join(appRoot, item);
@@ -1023,6 +1061,15 @@ function assertServerEntryExists(releaseDir: string) {
   const entry = path.join(releaseDir, 'server/dist/index.js');
   if (!fs.existsSync(entry)) throw new Error(`新版本启动文件不存在：${entry}`);
   return entry;
+}
+
+function assertUserWebDistExists(releaseDir: string) {
+  const index = path.join(releaseDir, 'user-web/dist/index.html');
+  const assets = path.join(releaseDir, 'user-web/dist/assets');
+  if (!fs.existsSync(index) || !fs.existsSync(assets)) {
+    throw new Error(`用户端预构建产物不完整：需要 ${index} 和 ${assets}`);
+  }
+  return index;
 }
 
 function addReferencedAsset(referenced: Set<string>, assetPath: string): void {
@@ -2054,7 +2101,8 @@ async function runInstall(ctx: InstallContext) {
     cleanupOrphanAdminAssetsBestEffort(ctx, 'build_or_check');
     assertReleaseVersion(ctx.releaseDir, ctx.version);
     assertServerEntryExists(ctx.releaseDir);
-    appendInstallLog(ctx, 'info', 'build_or_check', '构建完成：server/dist/index.js 已生成，release.json 版本已确认');
+    assertUserWebDistExists(ctx.releaseDir);
+    appendInstallLog(ctx, 'info', 'build_or_check', '构建完成：server/dist/index.js 和 user-web/dist 已生成，release.json 版本已确认');
 
     if (process.platform === 'linux') {
       appendInstallLog(ctx, 'info', 'build_or_check', 'running deploy self-check');
