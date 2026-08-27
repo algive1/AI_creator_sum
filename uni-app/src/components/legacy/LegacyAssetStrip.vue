@@ -3,28 +3,33 @@
     <view class="asset-strip-tip">{{ tip }}</view>
     <scroll-view scroll-x class="asset-thumb-scroll" :show-scrollbar="false">
       <view class="asset-thumb-grid">
-        <view v-for="slot in normalizedSlots" :key="slot.slotIndex" class="asset-thumb-item" :class="slot.asset ? 'filled' : 'empty'">
-        <block v-if="slot.asset">
-          <button class="asset-thumb-preview" @tap="$emit('replace', slot.slotIndex)">
-            <image v-if="slot.asset.mediaType !== 'video'" class="asset-thumb-img" :src="slot.asset.path" mode="aspectFill" />
-            <view v-else class="asset-video-placeholder">
-              <view class="asset-video-mark">▶</view>
-              <view class="asset-video-text">源视频</view>
+        <view
+          v-for="slot in normalizedSlots"
+          :key="slot.slotIndex"
+          class="asset-thumb-item"
+          :class="{ filled: Boolean(slot.asset), disabled: slot.disabled }"
+        >
+          <block v-if="slot.asset">
+            <button class="asset-thumb-preview" @tap="$emit('replace', slot.slotIndex)">
+              <image v-if="slot.asset.mediaType === 'image' || !slot.asset.mediaType" class="asset-thumb-img" :src="slot.asset.path" mode="aspectFill" />
+              <view v-else class="asset-video-placeholder" :class="{ audio: slot.asset.mediaType === 'audio' }">
+                <view class="asset-video-mark">{{ slot.asset.mediaType === 'audio' ? '♪' : '▶' }}</view>
+                <view class="asset-video-text">{{ slot.asset.mediaType === 'audio' ? assetAudioTitle(slot.asset) : '源视频' }}</view>
+              </view>
+              <view class="asset-replace-mask">
+                <text class="asset-replace-icon">↻</text>
+                <text>替换</text>
+              </view>
+              <text class="asset-type-tag" :class="assetTagClass(slot.asset)">{{ slot.asset.typeLabel }}</text>
+            </button>
+            <view class="asset-delete" @tap.stop="$emit('remove', slot.slotIndex)">
+              <text class="asset-delete-icon">×</text>
             </view>
-            <view class="asset-replace-mask">
-              <text class="asset-replace-icon">↻</text>
-              <text>替换</text>
-            </view>
-            <text class="asset-type-tag" :class="assetTagClass(slot.asset)">{{ slot.asset.typeLabel }}</text>
+          </block>
+          <button v-else class="asset-empty-slot" :class="{ disabled: slot.disabled }" :disabled="slot.disabled" @tap="$emit('hint')">
+            <text class="asset-empty-text">{{ slot.disabled ? '不可用' : '待上传' }}</text>
+            <text class="asset-empty-index">{{ slot.disabled ? '模型限制' : `槽位 ${slot.displayIndex}` }}</text>
           </button>
-          <view class="asset-delete" @tap.stop="$emit('remove', slot.slotIndex)">
-            <text class="asset-delete-icon">×</text>
-          </view>
-        </block>
-        <view v-else class="asset-empty-slot" @tap="$emit('hint')">
-          <view class="asset-empty-text">待上传</view>
-          <view class="asset-empty-index">{{ slot.displayIndex }}/{{ max }}</view>
-        </view>
         </view>
       </view>
     </scroll-view>
@@ -36,10 +41,24 @@ import { computed } from 'vue';
 
 export interface LegacyAsset {
   path: string;
+  url?: string;
   type: string;
   typeLabel: string;
-  mediaType?: 'image' | 'video';
+  sourceType?: 'upload' | 'url';
+  uploadKey?: unknown;
+  fileId?: number;
+  fileNo?: string;
+  mediaType?: 'image' | 'video' | 'audio';
 }
+
+type NormalizedSlot = {
+  slotIndex: number;
+  displayIndex: number;
+  asset?: LegacyAsset | null;
+  disabled: boolean;
+};
+
+const MIN_VISIBLE_SLOTS = 4;
 
 const props = withDefaults(defineProps<{
   assets: Array<LegacyAsset | null | undefined>;
@@ -56,16 +75,29 @@ defineEmits<{
   hint: [];
 }>();
 
-const normalizedSlots = computed(() => Array.from({ length: props.max }, (_, index) => ({
-  slotIndex: index,
-  displayIndex: index + 1,
-  asset: props.assets[index] || null
-})));
+const visibleSlotCount = computed(() => Math.max(MIN_VISIBLE_SLOTS, props.max, props.assets.length));
+
+const normalizedSlots = computed<NormalizedSlot[]>(() => Array.from({ length: visibleSlotCount.value }, (_, index) => {
+  const asset = props.assets[index] || null;
+  return {
+    slotIndex: index,
+    displayIndex: index + 1,
+    asset,
+    disabled: index >= props.max
+  };
+}));
 
 function assetTagClass(asset: LegacyAsset) {
   if (asset.type === 'product' || asset.type === 'start_frame') return 'product';
   if (asset.mediaType === 'video' || asset.type === 'source_video') return 'video';
+  if (asset.mediaType === 'audio') return 'audio';
   return 'reference';
+}
+
+function assetAudioTitle(asset: LegacyAsset) {
+  const source = asset.path || asset.url || '';
+  const name = source.split(/[\\/]/).pop() || source.replace(/^https?:\/\//, '').split('/')[0];
+  return name ? name.slice(0, 18) : '音频';
 }
 </script>
 
@@ -112,12 +144,20 @@ function assetTagClass(asset: LegacyAsset) {
   overflow: hidden;
   width: 100%;
   height: 100%;
+  padding: 0;
+  border: 0;
   border-radius: 18rpx;
+  line-height: 1;
 }
 
 .asset-thumb-preview {
   position: relative;
   display: block;
+}
+
+.asset-thumb-preview::after,
+.asset-empty-slot::after {
+  border: 0;
 }
 
 .asset-thumb-img {
@@ -134,6 +174,10 @@ function assetTagClass(asset: LegacyAsset) {
   height: 100%;
   background: linear-gradient(135deg, #101827, #2f345f);
   color: #ffffff;
+}
+
+.asset-video-placeholder.audio {
+  background: linear-gradient(135deg, #172033, #4f3f8f);
 }
 
 .asset-video-mark {
@@ -199,6 +243,10 @@ function assetTagClass(asset: LegacyAsset) {
   background: rgba(15, 23, 42, 0.84);
 }
 
+.asset-type-tag.audio {
+  background: rgba(114, 88, 255, 0.88);
+}
+
 .asset-delete {
   position: absolute;
   top: -10rpx;
@@ -230,10 +278,21 @@ function assetTagClass(asset: LegacyAsset) {
   color: #7d8797;
 }
 
+.asset-empty-slot.disabled {
+  border-style: solid;
+  border-color: #dfe5ee;
+  background: #eef2f7;
+  color: #a8b1c0;
+}
+
 .asset-empty-text {
   color: #2f3848;
   font-size: 23rpx;
   font-weight: 900;
+}
+
+.asset-empty-slot.disabled .asset-empty-text {
+  color: #8d99a8;
 }
 
 .asset-empty-index {
@@ -241,5 +300,9 @@ function assetTagClass(asset: LegacyAsset) {
   color: #7a5cff;
   font-size: 21rpx;
   font-weight: 800;
+}
+
+.asset-empty-slot.disabled .asset-empty-index {
+  color: #a8b1c0;
 }
 </style>

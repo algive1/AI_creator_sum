@@ -341,22 +341,26 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 .reward-days-scroll {
   width: 100%;
-  margin: 42rpx 0 40rpx;
+  height: 182rpx;
+  margin: 34rpx 0 28rpx;
   white-space: nowrap;
 }
 
 .reward-days {
   display: inline-flex;
+  align-items: stretch;
   gap: 16rpx;
+  height: 168rpx;
   min-width: 100%;
+  padding-bottom: 18rpx;
 }
 
 .day-card {
   position: relative;
   flex: 0 0 132rpx;
   width: 132rpx;
-  height: 140rpx;
-  padding-top: 20rpx;
+  height: 150rpx;
+  padding-top: 18rpx;
   border: 2rpx solid rgba(255, 255, 255, 0.8);
   border-radius: 24rpx;
   background: rgba(255, 255, 255, 0.92);
@@ -411,7 +415,7 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 .primary-action {
   height: 76rpx;
-  margin: 0 64rpx 42rpx;
+  margin: 0 64rpx 36rpx;
   border-radius: 38rpx;
   background: linear-gradient(135deg, #7a5cff, #6d55f0);
   color: #ffffff;
@@ -430,7 +434,7 @@ function asRecord(value: unknown): Record<string, unknown> {
 .extra-actions {
   display: grid;
   gap: 18rpx;
-  margin: -18rpx 64rpx 42rpx;
+  margin: -12rpx 64rpx 36rpx;
 }
 
 .secondary-action {

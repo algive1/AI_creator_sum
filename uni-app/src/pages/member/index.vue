@@ -1,5 +1,5 @@
 <template>
-  <view class="member-page">
+  <view v-if="purchasePageReady && purchaseEnabled" class="member-page">
     <AppTopbar class="app-nav-root" title="会员中心" back transparent />
 
     <view class="member-hero">
@@ -117,6 +117,7 @@
       <text>随时可取消</text>
       <text>虚拟权益商品，购买后按平台规则处理</text>
     </view>
+    <AppDialogHost />
   </view>
 </template>
 
@@ -126,12 +127,15 @@ import { onShow } from '@dcloudio/uni-app';
 import { getMembershipMe, getPlanDetail, getPlans, getPublicMemberPlans } from '@/api/member';
 import { createOrder, payOrder } from '@/api/payment';
 import AppTopbar from '@/components/common/AppTopbar.vue';
+import AppDialogHost from '@/components/common/AppDialogHost.vue';
 import { appEnv } from '@/env/index';
 import { useAuthStore } from '@/stores/auth';
 import { useConfigStore } from '@/stores/config';
 import { PAGE_ROUTES } from '@/utils/constants';
 import { memberPackages, memberRights } from '@/utils/mock';
 import { isDevFallbackEnabled, warnDevFallback } from '@/utils/dev-fallback';
+import { isPurchaseEnabled, showPurchaseUnavailable } from '@/utils/purchase-guard';
+import { ensureLoggedIn } from '@/utils/login-guard';
 
 type RawRecord = Record<string, any>;
 type VersionTabKey = string;
@@ -233,11 +237,13 @@ const allPlanRecords = ref<RawRecord[]>([]);
 const packages = ref<MemberPlan[]>([]);
 const selectedPackageId = ref('');
 const loading = ref(false);
+const purchasePageReady = ref(false);
 const authStore = useAuthStore();
 const configStore = useConfigStore();
 const failedBenefitIcons = ref<Record<string, boolean>>({});
 
 const membershipEnabled = computed(() => configStore.publicConfig?.membershipEnabled !== false);
+const purchaseEnabled = computed(() => isPurchaseEnabled(configStore.publicConfig));
 const versionTabs = computed(() => versions.value.map((item) => ({ key: item.versionKey, label: item.name })));
 const versionSwitchStyle = computed(() => `grid-template-columns: repeat(${Math.max(versionTabs.value.length, 1)}, minmax(0, 1fr));`);
 const activeVersion = computed(() => versions.value.find((item) => item.versionKey === activeVersionTab.value));
@@ -279,6 +285,7 @@ onShow(() => {
 });
 
 async function refreshMemberEntry() {
+  purchasePageReady.value = false;
   configStore.hydrate();
   try {
     await configStore.loadPublicConfig();
@@ -289,7 +296,28 @@ async function refreshMemberEntry() {
     handleMembershipDisabled();
     return;
   }
+  if (!purchaseEnabled.value) {
+    handlePurchaseDisabled();
+    return;
+  }
+  purchasePageReady.value = true;
   loadMemberPage();
+}
+
+function handlePurchaseDisabled() {
+  loading.value = false;
+  versions.value = [];
+  packages.value = [];
+  selectedPackageId.value = '';
+  showPurchaseUnavailable(configStore.publicConfig);
+  setTimeout(() => {
+    const pages = getCurrentPages();
+    if (pages.length > 1) {
+      uni.navigateBack();
+      return;
+    }
+    uni.reLaunch({ url: PAGE_ROUTES.profile });
+  }, 300);
 }
 
 function handleMembershipDisabled() {
@@ -757,6 +785,10 @@ function formatRightValue(value: unknown) {
 }
 
 async function choosePackage(item: MemberPlan) {
+  if (!purchaseEnabled.value) {
+    showPurchaseUnavailable(configStore.publicConfig);
+    return;
+  }
   if (!membershipEnabled.value) {
     uni.showToast({ title: '会员功能已关闭', icon: 'none' });
     return;
@@ -771,8 +803,11 @@ async function choosePackage(item: MemberPlan) {
     return;
   }
   if (!authStore.isLoggedIn) {
-    uni.navigateTo({ url: `${PAGE_ROUTES.login}?redirect=${encodeURIComponent(PAGE_ROUTES.member)}` });
-    return;
+    const loggedIn = await ensureLoggedIn({
+      title: '登录后开通会员',
+      subtitle: '登录并授权手机号后，可创建订单并同步会员权益。'
+    });
+    if (!loggedIn) return;
   }
   const order = await createOrder<RawRecord>('membership', item.planId);
   const orderNo = String(order.orderNo || '');

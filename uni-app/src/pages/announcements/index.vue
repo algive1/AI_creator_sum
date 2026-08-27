@@ -13,11 +13,25 @@
 
       <view v-if="loading" class="state-card state-loading">
         <text class="state-spinner"></text>
-        <text>正在加载公告...</text>
+        <text>正在加载消息...</text>
       </view>
-      <view v-else-if="announcements.length === 0" class="state-card">暂无公告</view>
+      <view v-else-if="announcements.length === 0 && notifications.length === 0" class="state-card">暂无消息</view>
 
-      <view v-else class="announcement-list">
+      <view v-if="!loading && notifications.length" class="notification-list">
+        <view v-for="item in notifications" :key="item.id" class="notification-card" @tap="openNotification(item)">
+          <image class="notification-avatar" :src="item.actorAvatarUrl || defaultAvatar" mode="aspectFill" />
+          <view class="notification-body">
+            <view class="notification-title">
+              <text v-if="!item.readAt" class="unread-dot"></text>
+              <text>{{ item.title }}</text>
+            </view>
+            <view class="notification-content">{{ item.content }}</view>
+            <view class="announcement-time">{{ formatTime(item.createdAt) }}</view>
+          </view>
+        </view>
+      </view>
+
+      <view v-if="!loading && announcements.length" class="announcement-list">
         <view v-for="item in announcements" :key="item.id" class="announcement-card" @tap="openAnnouncement(item)">
           <view class="announcement-top">
             <view class="announcement-title">
@@ -59,6 +73,7 @@
 import { computed, ref } from 'vue';
 import { onPullDownRefresh, onShow } from '@dcloudio/uni-app';
 import { getAnnouncementDetail, getAnnouncements, markAnnouncementRead } from '@/api/config';
+import { getNotifications, markNotificationRead } from '@/api/template';
 import { useAuthStore } from '@/stores/auth';
 
 interface AnnouncementItem {
@@ -71,12 +86,27 @@ interface AnnouncementItem {
   createdAt?: string | null;
 }
 
+interface NotificationItem {
+  id: number;
+  type: string;
+  title: string;
+  content: string;
+  actorNickname: string;
+  actorAvatarUrl: string;
+  templateId: number;
+  templateTitle: string;
+  readAt: string | null;
+  createdAt?: string | null;
+}
+
 const auth = useAuthStore();
 const loading = ref(false);
 const announcements = ref<AnnouncementItem[]>([]);
+const notifications = ref<NotificationItem[]>([]);
 const detailVisible = ref(false);
 const detailAnnouncement = ref<AnnouncementItem | null>(null);
 const detailContentHtml = computed(() => renderAnnouncementHtml(detailAnnouncement.value?.content || ''));
+const defaultAvatar = '/static/visuals/avatar/default_avatar_3d.png';
 
 onShow(() => {
   loadAnnouncements();
@@ -89,11 +119,18 @@ onPullDownRefresh(() => {
 async function loadAnnouncements() {
   loading.value = true;
   try {
-    const res = await getAnnouncements<{ list?: Array<Record<string, unknown>> }>({ page: 1, pageSize: 50 });
+    const [res, noticeRes] = await Promise.all([
+      getAnnouncements<{ list?: Array<Record<string, unknown>> }>({ page: 1, pageSize: 50 }),
+      auth.isLoggedIn
+        ? getNotifications<{ list?: Array<Record<string, unknown>> }>({ page: 1, pageSize: 50 })
+        : Promise.resolve({ list: [] })
+    ]);
     announcements.value = (Array.isArray(res.list) ? res.list : []).map(normalizeAnnouncement);
+    notifications.value = (Array.isArray(noticeRes.list) ? noticeRes.list : []).map(normalizeNotification);
   } catch {
     announcements.value = [];
-    uni.showToast({ title: '公告加载失败', icon: 'none' });
+    notifications.value = [];
+    uni.showToast({ title: '消息加载失败', icon: 'none' });
   } finally {
     loading.value = false;
   }
@@ -109,6 +146,42 @@ function normalizeAnnouncement(row: Record<string, unknown>): AnnouncementItem {
     startAt: String(row.startAt || row.start_at || '') || null,
     createdAt: String(row.createdAt || row.created_at || '') || null
   };
+}
+
+function normalizeNotification(row: Record<string, unknown>): NotificationItem {
+  return {
+    id: Number(row.id || 0),
+    type: String(row.type || row.notificationType || row.notification_type || 'template_favorite'),
+    title: String(row.title || '模板收藏消息'),
+    content: String(row.content || ''),
+    actorNickname: String(row.actorNickname || row.actor_nickname || ''),
+    actorAvatarUrl: String(row.actorAvatarUrl || row.actor_avatar_url || ''),
+    templateId: Number(row.templateId || row.template_id || 0),
+    templateTitle: String(row.templateTitle || row.template_title || ''),
+    readAt: String(row.readAt || row.read_at || '') || null,
+    createdAt: String(row.createdAt || row.created_at || '') || null
+  };
+}
+
+function openNotification(item: NotificationItem) {
+  const fallbackContent = item.type === 'template_review_approved'
+    ? `「${item.templateTitle || '模板'}」已通过审核，可在模板列表中展示。`
+    : `${item.actorNickname || '有用户'}收藏了你的模板《${item.templateTitle || '模板'}》`;
+  detailAnnouncement.value = {
+    id: item.id,
+    title: item.title,
+    content: item.content || fallbackContent,
+    type: item.type || 'template_favorite',
+    readAt: item.readAt,
+    createdAt: item.createdAt || null
+  };
+  detailVisible.value = true;
+  if (auth.isLoggedIn && item.id && !item.readAt) {
+    markNotificationRead(item.id).catch(() => undefined);
+    const now = new Date().toISOString();
+    notifications.value = notifications.value.map((row) => row.id === item.id ? { ...row, readAt: now } : row);
+    detailAnnouncement.value = detailAnnouncement.value ? { ...detailAnnouncement.value, readAt: now } : detailAnnouncement.value;
+  }
 }
 
 async function openAnnouncement(item: AnnouncementItem) {
@@ -174,15 +247,26 @@ function typeLabel(type: string) {
     activity: '活动',
     maintenance: '维护'
   };
+  if (type === 'template_favorite' || type === 'template_review_approved') return '模板';
   return map[type] || '公告';
 }
 
 function formatTime(value?: string | null) {
   if (!value) return '';
+  const raw = String(value).trim().replace(/\//g, '-');
+  const hasTimeZone = /(?:z|[+-]\d{2}:?\d{2})$/i.test(raw);
+  const match = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2})(?::(\d{1,2})(?::(\d{1,2}))?)?)?/);
+  if (match && !hasTimeZone) {
+    const [, year, month, day, hour = '0', minute = '0', second = '0'] = match;
+    return `${year}-${padDateTime(month)}-${padDateTime(day)} ${padDateTime(hour)}:${padDateTime(minute)}:${padDateTime(second)}`;
+  }
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  const pad = (num: number) => String(num).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  if (!Number.isFinite(date.getTime())) return String(value);
+  return `${date.getFullYear()}-${padDateTime(date.getMonth() + 1)}-${padDateTime(date.getDate())} ${padDateTime(date.getHours())}:${padDateTime(date.getMinutes())}:${padDateTime(date.getSeconds())}`;
+}
+
+function padDateTime(value: string | number) {
+  return String(value).padStart(2, '0');
 }
 </script>
 
@@ -244,7 +328,8 @@ function formatTime(value?: string | null) {
 }
 
 .state-card,
-.announcement-card {
+.announcement-card,
+.notification-card {
   border: 2rpx solid rgba(255, 255, 255, 0.86);
   border-radius: 24rpx;
   background: rgba(255, 255, 255, 0.94);
@@ -282,7 +367,8 @@ function formatTime(value?: string | null) {
   }
 }
 
-.announcement-list {
+.announcement-list,
+.notification-list {
   display: flex;
   flex-direction: column;
   gap: 18rpx;
@@ -292,6 +378,26 @@ function formatTime(value?: string | null) {
   padding: 26rpx 28rpx;
 }
 
+.notification-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 18rpx;
+  padding: 24rpx 26rpx;
+}
+
+.notification-avatar {
+  flex-shrink: 0;
+  width: 72rpx;
+  height: 72rpx;
+  border-radius: 50%;
+  background: #f2f0fb;
+}
+
+.notification-body {
+  flex: 1;
+  min-width: 0;
+}
+
 .announcement-top {
   display: flex;
   align-items: center;
@@ -299,7 +405,8 @@ function formatTime(value?: string | null) {
   gap: 16rpx;
 }
 
-.announcement-title {
+.announcement-title,
+.notification-title {
   display: flex;
   align-items: center;
   min-width: 0;
@@ -310,7 +417,19 @@ function formatTime(value?: string | null) {
   line-height: 1.3;
 }
 
-.announcement-title text:last-child {
+.announcement-title text:last-child,
+.notification-title text:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notification-content {
+  margin: 10rpx 0 12rpx;
+  color: #596177;
+  font-size: 24rpx;
+  font-weight: 700;
+  line-height: 1.5;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

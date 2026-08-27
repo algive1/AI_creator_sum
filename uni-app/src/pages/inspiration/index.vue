@@ -8,9 +8,9 @@
 
     <view class="inspiration-hero">
       <view class="hero-copy">
-        <view class="hero-title">激发创作灵感 ✨</view>
+        <view class="hero-title">激发创作灵感</view>
         <view class="hero-subtitle">探索热门创意，发现更多可能</view>
-        <button class="hero-action" @tap="goCreate">去创作 <text>→</text></button>
+        <button class="hero-action" @tap="goCreate">去创作<text>→</text></button>
       </view>
       <view class="hero-bulb" aria-hidden="true">
         <view class="bulb-glass">
@@ -36,6 +36,39 @@
         @focus="openCategoryPanel"
       />
       <button v-if="searchKeyword" class="inspiration-search-clear" hover-class="none" @tap.stop="clearSearch">×</button>
+    </view>
+
+    <view v-if="topTemplates.length" class="top-template-section">
+      <view class="top-template-head">
+        <view class="top-template-title">推荐灵感</view>
+        <button class="top-template-refresh" hover-class="none" :class="{ loading: loadingRandomInspirations, cycling: cyclingRandomInspirations }" :disabled="loadingRandomInspirations" @tap="refreshRandomInspirations">
+          <text>{{ loadingRandomInspirations ? '刷新中' : '换一换' }}</text>
+          <text class="top-template-refresh-icon"></text>
+        </button>
+      </view>
+      <scroll-view scroll-x class="top-template-scroll" :show-scrollbar="false">
+        <view class="top-template-row">
+          <view
+            v-for="item in topTemplates"
+            :key="item.id"
+            class="top-template-card"
+            @tap="openWork(item)"
+          >
+            <view class="top-template-cover-wrap">
+              <image v-if="item.cover" class="top-template-cover" :src="item.cover" mode="aspectFill" lazy-load />
+              <view v-else class="top-template-cover fallback" :class="'theme-' + item.theme"></view>
+              <view v-if="item.kind === 'video'" class="top-template-video-icon"></view>
+            </view>
+            <view class="top-template-name">{{ item.title }}</view>
+            <view class="top-template-tags">
+              <text v-for="tag in topTemplateTags(item)" :key="tag" class="top-template-tag">{{ tag }}</text>
+            </view>
+            <button class="top-template-generate" hover-class="none" @tap.stop="useTopTemplate(item)">
+              <text>一键生成</text>
+            </button>
+          </view>
+        </view>
+      </scroll-view>
     </view>
 
     <view v-if="showCategoryPanel" class="category-panel">
@@ -140,40 +173,54 @@
 
     <view v-if="filteredWorks.length" class="create-waterfall">
       <view class="waterfall-column">
-        <button v-for="item in leftWorks" :key="item.id" class="feed-card" :class="item.size" @tap="openWork(item)">
-          <view class="feed-art" :class="`theme-${item.theme}`">
-            <image v-if="item.cover" class="feed-cover" :src="item.cover" mode="aspectFill" lazy-load />
+        <button v-for="item in leftWorks" :key="item.id" class="feed-card" :class="item.aspectClass" @tap="openWork(item)">
+          <view class="feed-art" :class="'theme-' + item.theme" :style="{ height: `${item.coverHeightRpx}rpx` }">
+            <image v-if="item.cover" class="feed-cover" :src="item.cover" mode="aspectFill" lazy-load @load="onCoverLoad(item.id, $event)" />
             <view v-else class="feed-scene"></view>
             <view class="feed-badge">{{ item.tag }}</view>
-            <view v-if="item.kind === 'video'" class="feed-play"></view>
+            <view v-if="item.kind === 'video'" class="feed-video-mark">
+              <view class="feed-play"></view>
+              <text v-if="item.durationText" class="feed-duration">{{ item.durationText }}</text>
+            </view>
           </view>
           <view class="feed-title">{{ item.title }}</view>
           <view class="feed-meta">
-            <view class="feed-author">
-              <image v-if="item.avatar" class="feed-avatar" :src="item.avatar" mode="aspectFill" lazy-load />
-              <view v-else class="feed-avatar fallback"></view>
-              <text>{{ item.author }}</text>
+            <view class="feed-actions">
+              <button class="feed-favorite" :class="{ active: item.isFavorited }" hover-class="none" @tap.stop="toggleFavorite(item)">
+                <image :src="item.isFavorited ? '/static/icons/icon_favorite_filled.svg' : '/static/icons/icon_favorite_line.svg'" mode="aspectFit" />
+                <text v-if="hasFavoriteCount(item.favoriteCount)">{{ item.favoriteText }}</text>
+              </button>
+              <view class="feed-usage">
+                <image src="/static/icons/icon_usage_line.svg" mode="aspectFit" />
+                <text>{{ item.usageText }}</text>
+              </view>
             </view>
-            <view class="feed-like"><text class="heart-icon"></text>{{ item.likes }}</view>
           </view>
         </button>
       </view>
       <view class="waterfall-column">
-        <button v-for="item in rightWorks" :key="item.id" class="feed-card" :class="item.size" @tap="openWork(item)">
-          <view class="feed-art" :class="`theme-${item.theme}`">
-            <image v-if="item.cover" class="feed-cover" :src="item.cover" mode="aspectFill" lazy-load />
+        <button v-for="item in rightWorks" :key="item.id" class="feed-card" :class="item.aspectClass" @tap="openWork(item)">
+          <view class="feed-art" :class="'theme-' + item.theme" :style="{ height: `${item.coverHeightRpx}rpx` }">
+            <image v-if="item.cover" class="feed-cover" :src="item.cover" mode="aspectFill" lazy-load @load="onCoverLoad(item.id, $event)" />
             <view v-else class="feed-scene"></view>
             <view class="feed-badge">{{ item.tag }}</view>
-            <view v-if="item.kind === 'video'" class="feed-play"></view>
+            <view v-if="item.kind === 'video'" class="feed-video-mark">
+              <view class="feed-play"></view>
+              <text v-if="item.durationText" class="feed-duration">{{ item.durationText }}</text>
+            </view>
           </view>
           <view class="feed-title">{{ item.title }}</view>
           <view class="feed-meta">
-            <view class="feed-author">
-              <image v-if="item.avatar" class="feed-avatar" :src="item.avatar" mode="aspectFill" lazy-load />
-              <view v-else class="feed-avatar fallback"></view>
-              <text>{{ item.author }}</text>
+            <view class="feed-actions">
+              <button class="feed-favorite" :class="{ active: item.isFavorited }" hover-class="none" @tap.stop="toggleFavorite(item)">
+                <image :src="item.isFavorited ? '/static/icons/icon_favorite_filled.svg' : '/static/icons/icon_favorite_line.svg'" mode="aspectFit" />
+                <text v-if="hasFavoriteCount(item.favoriteCount)">{{ item.favoriteText }}</text>
+              </button>
+              <view class="feed-usage">
+                <image src="/static/icons/icon_usage_line.svg" mode="aspectFit" />
+                <text>{{ item.usageText }}</text>
+              </view>
             </view>
-            <view class="feed-like"><text class="heart-icon"></text>{{ item.likes }}</view>
           </view>
         </button>
       </view>
@@ -187,6 +234,7 @@
     <TemplatePreviewSheet
       :template="previewTemplate"
       @close="previewTemplate = null"
+      @favorite="togglePreviewFavorite"
       @use="usePreviewTemplate"
     />
     <AppDialogHost />
@@ -196,29 +244,41 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { onShow } from '@dcloudio/uni-app';
+import { onLoad, onShareAppMessage, onShareTimeline, onShow } from '@dcloudio/uni-app';
 import AppTabBar from '@/components/common/AppTabBar.vue';
 import AppTopbar from '@/components/common/AppTopbar.vue';
 import AppDialogHost from '@/components/common/AppDialogHost.vue';
 import TemplatePreviewSheet from '@/components/business/TemplatePreviewSheet.vue';
-import { getInspirations, getTemplateCategories, useTemplate as useContentTemplate } from '@/api/template';
+import { favoriteTemplate, getInspirations, getTemplateCategories, getTopInspirations, unfavoriteTemplate, useTemplate as useContentTemplate } from '@/api/template';
+import { useAuthStore } from '@/stores/auth';
 import { useConfigStore } from '@/stores/config';
+import { useUserStore } from '@/stores/user';
 import { PAGE_ROUTES } from '@/utils/constants';
 import { isDevFallbackEnabled, warnDevFallback } from '@/utils/dev-fallback';
 import { normalizeBackendMediaUrl } from '@/utils/media-url';
 import { showMemberRequiredDialog } from '@/utils/app-dialog';
 import type { CreativeTemplate } from '@/utils/mock';
+import { createShareMessage, createShareTimeline, enableShareMenu } from '@/utils/share';
+import { ensureLoggedIn } from '@/utils/login-guard';
 
 interface WorkItem {
   id: string;
   title: string;
   author: string;
-  likes: string;
+  usageCount: number;
+  favoriteCount: number;
+  usageText: string;
+  favoriteText: string;
+  isFavorited: boolean;
   category: string;
   tag: string;
   tags?: string[];
   kind: 'image' | 'video';
-  size: 'short' | 'tall';
+  ratio: string;
+  aspectRatio: number;
+  coverHeightRpx: number;
+  aspectClass: 'aspect-short' | 'aspect-standard' | 'aspect-tall' | 'aspect-poster';
+  durationText?: string;
   theme: string;
   avatar?: string;
   cover?: string;
@@ -246,15 +306,19 @@ const fallbackCategories: TemplateCategory[] = [
   { key: 'wallpaper', name: '壁纸' }
 ];
 const fallbackWorks: WorkItem[] = [
-  { id: 'work_cloud_video', title: '云端之上 · 梦幻城堡', author: '星辰大海', likes: '1.2w', category: 'AI视频', tag: '视频', kind: 'video', size: 'short', theme: 'sky' },
-  { id: 'work_comic_girl', title: '治愈系少女日常', author: '糯米团子', likes: '8563', category: 'AI漫剧', tag: '漫画', kind: 'image', size: 'short', theme: 'flower' },
-  { id: 'work_pink_illustration', title: '粉色少女心', author: '桃子味汽水', likes: '6234', category: 'AI绘画', tag: '绘画', kind: 'image', size: 'short', theme: 'pink' },
-  { id: 'work_future_city', title: '未来城市科幻风', author: 'AI创作者', likes: '1.8w', category: 'AI视频', tag: '视频', kind: 'video', size: 'short', theme: 'neon' },
-  { id: 'work_wallpaper_sakura', title: '春日樱花壁纸', author: '小鹿森林', likes: '4210', category: '壁纸', tag: '壁纸', kind: 'image', size: 'short', theme: 'sakura' },
-  { id: 'work_photo_light', title: '柔光人像摄影', author: '光影实验室', likes: '3892', category: '摄影', tag: '摄影', kind: 'image', size: 'short', theme: 'photo' }
+  fallbackWork('work_cloud_video', '云端之上 · 梦幻城堡', 'AI视频', '视频', 'video', '9:16', 1280, 120, 'sky'),
+  fallbackWork('work_comic_girl', '治愈系少女日常', 'AI漫剧', '漫画', 'image', '4:5', 8563, 72, 'flower'),
+  fallbackWork('work_pink_illustration', '粉色少女心', 'AI绘画', '绘画', 'image', '3:4', 6234, 44, 'pink'),
+  fallbackWork('work_future_city', '未来城市科幻风', 'AI视频', '视频', 'video', '16:9', 1800, 88, 'neon'),
+  fallbackWork('work_wallpaper_sakura', '春日樱花壁纸', '壁纸', '壁纸', 'image', '9:16', 4210, 31, 'sakura'),
+  fallbackWork('work_photo_light', '柔光人像摄影', '摄影', '摄影', 'image', '1:1', 3892, 22, 'photo')
 ];
 const MAX_WORK_TAGS = 8;
 const MAX_FILTER_TAGS = 24;
+const WATERFALL_CARD_WIDTH_RPX = 342;
+const COVER_MAX_HEIGHT_RPX = 720;
+const COVER_RATIO_PRELOAD_LIMIT = 12;
+const COVER_RATIO_PRELOAD_TIMEOUT_MS = 500;
 
 const activeTab = ref('推荐');
 const mediaFilter = ref<'all' | 'image' | 'video'>('all');
@@ -264,10 +328,17 @@ const showFilterPanel = ref(false);
 const showCategoryPanel = ref(false);
 const searchKeyword = ref('');
 const works = ref<WorkItem[]>([]);
+const topTemplates = ref<WorkItem[]>([]);
+const loadingRandomInspirations = ref(false);
+const cyclingRandomInspirations = ref(false);
 const categories = ref<TemplateCategory[]>(fallbackCategories);
 const previewTemplate = ref<CreativeTemplate | null>(null);
 const configStore = useConfigStore();
+const authStore = useAuthStore();
+const userStore = useUserStore();
 const bannerFailed = ref(false);
+const favoritePending = ref<Record<string, boolean>>({});
+const pendingFavoriteId = ref('');
 const mediaFilters: Array<{ label: string; value: 'all' | 'image' | 'video' }> = [
   { label: '全部', value: 'all' },
   { label: '图片', value: 'image' },
@@ -307,12 +378,28 @@ const filteredWorks = computed(() => {
 const leftWorks = computed(() => filteredWorks.value.filter((_, index) => index % 2 === 0));
 const rightWorks = computed(() => filteredWorks.value.filter((_, index) => index % 2 === 1));
 
+onLoad((query) => {
+  pendingFavoriteId.value = String(query?.favoriteId || '');
+});
+
 onShow(() => {
+  enableShareMenu();
   configStore.hydrate();
   configStore.loadPublicConfig().catch(() => undefined);
   loadCategories();
+  loadTopTemplates();
   loadWorks();
 });
+
+onShareAppMessage(() => createShareMessage({
+  title: '来 AI艺术生成工坊找灵感模板',
+  path: PAGE_ROUTES.inspiration
+}));
+
+onShareTimeline(() => createShareTimeline({
+  title: '来 AI艺术生成工坊找灵感模板',
+  path: PAGE_ROUTES.inspiration
+}));
 
 async function loadCategories() {
   try {
@@ -333,19 +420,21 @@ async function loadCategories() {
   }
 }
 
-async function loadWorks() {
+async function loadWorks(random = false) {
   try {
-    const res = await getInspirations<{ list?: Record<string, unknown>[] }>();
+    const res = await getInspirations<{ list?: Record<string, unknown>[] }>({ random: random });
     const list = Array.isArray(res.list) ? res.list : [];
     if (list.length) {
-      works.value = list.map((item, index) => inspirationToWork(item, index));
+      works.value = await primeCoverRatios(list.map((item, index) => inspirationToWork(item, index)));
       ensureSelectedTagExists();
+      consumePendingFavorite();
       return;
     }
     if (isDevFallbackEnabled) {
       warnDevFallback('inspiration', 'GET /templates/inspirations returned empty list');
       works.value = fallbackWorks;
       ensureSelectedTagExists();
+      consumePendingFavorite();
       return;
     }
     works.value = [];
@@ -355,11 +444,45 @@ async function loadWorks() {
       warnDevFallback('inspiration', 'GET /templates/inspirations failed');
       works.value = fallbackWorks;
       ensureSelectedTagExists();
+      consumePendingFavorite();
       return;
     }
     works.value = [];
     ensureSelectedTagExists();
   }
+}
+
+async function loadTopTemplates(random = false) {
+  try {
+    const res = await getTopInspirations<{ list?: Record<string, unknown>[] }>({ pageSize: 12, random: random });
+    const list = Array.isArray(res.list) ? res.list : [];
+    topTemplates.value = await primeCoverRatios(list.map((item, index) => inspirationToWork(item, index)));
+  } catch {
+    if (isDevFallbackEnabled) {
+      warnDevFallback('inspiration-top', 'GET /templates/inspirations/top failed');
+      topTemplates.value = fallbackWorks.slice(0, 6);
+      return;
+    }
+    topTemplates.value = [];
+  }
+}
+
+async function refreshRandomInspirations() {
+  if (loadingRandomInspirations.value) return;
+  playRandomInspirationRefreshMotion();
+  loadingRandomInspirations.value = true;
+  try {
+    await Promise.all([loadTopTemplates(true), loadWorks(true)]);
+  } finally {
+    loadingRandomInspirations.value = false;
+  }
+}
+
+function playRandomInspirationRefreshMotion() {
+  cyclingRandomInspirations.value = true;
+  setTimeout(() => {
+    cyclingRandomInspirations.value = false;
+  }, 420);
 }
 
 function showHot() {
@@ -384,6 +507,10 @@ function openWork(work: WorkItem) {
   previewTemplate.value = workToTemplate(work);
 }
 
+function useTopTemplate(work: WorkItem) {
+  usePreviewTemplate(workToTemplate(work));
+}
+
 async function usePreviewTemplate(template: CreativeTemplate) {
   if (template.canUse === false) {
     showMemberRequiredDialog({
@@ -392,7 +519,7 @@ async function usePreviewTemplate(template: CreativeTemplate) {
     });
     return;
   }
-  const backendTemplateId = template.mediaType === 'image' ? numericTemplateId(template.id) : 0;
+  const backendTemplateId = numericTemplateId(template.id);
   if (backendTemplateId) {
     try {
       await useContentTemplate(backendTemplateId);
@@ -422,41 +549,246 @@ function workToTemplate(work: WorkItem): CreativeTemplate {
     mediaUrl: work.mediaUrl || '',
     mode: work.kind === 'video' ? 'text2video' : 'text2img',
     category: work.category,
-    duration: work.kind === 'video' ? '10s' : undefined,
+    duration: work.kind === 'video' ? work.durationText || '10s' : undefined,
+    ratio: work.ratio,
+    aspectRatio: work.aspectRatio,
+    usageCount: work.usageCount,
+    favoriteCount: work.favoriteCount,
+    isFavorited: work.isFavorited,
     canUse: work.canUse !== false,
     canSave: work.canSave !== false && work.canUse !== false,
     lockReason: work.lockReason || ''
   };
 }
 
+function workFromTemplate(template: CreativeTemplate) {
+  const id = String(template.id || '');
+  return works.value.find((item) => item.id === id) || topTemplates.value.find((item) => item.id === id) || null;
+}
+
+function togglePreviewFavorite(template: CreativeTemplate) {
+  const work = workFromTemplate(template);
+  if (!work) {
+    uni.showToast({ title: '该内容暂不支持收藏', icon: 'none' });
+    return;
+  }
+  toggleFavorite(work);
+}
+
 function inspirationToWork(item: Record<string, unknown>, index: number): WorkItem {
   const templateType = String(item.templateType || item.template_type || item.mediaType || item.type || 'image');
-  const title = String(item.title || '灵感模板');
+  const title = String(item.title || item.prompt || '灵感模板');
   const category = String(item.categoryName || item.category || item.scene || defaultCategory(templateType, title));
   const backendTags = templateTagsOf(item);
   const kind = inferMediaKind(item, templateType, backendTags);
   const fallbackTag = labelOf(kind, category, title);
   const tags = (backendTags.length ? backendTags : [fallbackTag]).slice(0, MAX_WORK_TAGS);
+  const prompt = String(item.prompt || item.description || item.title || '');
+  const width = numericValue(item.width || item.coverWidth || item.cover_width);
+  const height = numericValue(item.height || item.coverHeight || item.cover_height);
+  const params = templateParamsOf(item);
+  const ratio = normalizeRatio(String(item.ratio || item.aspectRatio || item.aspect_ratio || ''), width, height, prompt, params);
+  const aspectRatio = aspectRatioValue(ratio);
+  const usageCount = Math.max(0, Math.floor(Number(item.usageCount || item.usage_count || 0) || 0));
+  const favoriteCount = Math.max(0, Math.floor(Number(item.favoriteCount || item.favorite_count || 0) || 0));
   return {
     id: String(item.id || `inspiration_${index}`),
     title,
     author: String(item.author || item.nickname || '@官方灵感'),
-    likes: formatCount(Number(item.favoriteCount || item.favorite_count || item.usageCount || item.usage_count || 0)),
+    usageCount,
+    favoriteCount,
+    usageText: formatCount(usageCount),
+    favoriteText: formatCount(favoriteCount),
+    isFavorited: item.isFavorited === true || item.is_favorited === true,
     category,
     tag: tags[0],
     tags,
     kind,
-    size: 'short',
+    ratio,
+    aspectRatio,
+    coverHeightRpx: coverHeightOf(aspectRatio),
+    aspectClass: aspectClassOf(ratio),
+    durationText: durationTextOf(item),
     theme: ['sky', 'flower', 'pink', 'neon', 'sakura', 'photo'][index % 6],
     avatar: String(item.avatarUrl || item.avatar_url || item.authorAvatar || item.author_avatar || ''),
     cover: normalizeBackendMediaUrl(item.coverUrl || item.cover_url || item.thumbnail),
     mediaUrl: normalizeBackendMediaUrl(item.previewUrl || item.preview_url || item.mediaUrl || item.media_url),
-    prompt: String(item.prompt || item.description || item.title || ''),
+    prompt,
     createdAt: String(item.createdAt || item.created_at || item.updatedAt || item.updated_at || ''),
     sourceIndex: index,
     canUse: item.canUse !== false,
     canSave: item.canSave !== false && item.canUse !== false,
     lockReason: String(item.lockReason || '')
+  };
+}
+
+async function toggleFavorite(item: WorkItem) {
+  const templateId = numericTemplateId(item.id);
+  if (!templateId) {
+    uni.showToast({ title: '该内容暂不支持收藏', icon: 'none' });
+    return;
+  }
+  if (!authStore.isLoggedIn) {
+    const loggedIn = await ensureLoggedIn({
+      title: '登录后收藏灵感',
+      subtitle: '登录并授权手机号后，可同步收藏到你的账号。'
+    });
+    if (!loggedIn) return;
+  }
+  if (favoritePending.value[item.id]) return;
+  favoritePending.value = { ...favoritePending.value, [item.id]: true };
+  const before = { isFavorited: item.isFavorited, favoriteCount: item.favoriteCount };
+  applyFavoriteState(item.id, !item.isFavorited, item.favoriteCount + (item.isFavorited ? -1 : 1));
+  try {
+    const res = item.isFavorited
+      ? await unfavoriteTemplate<{ isFavorited?: boolean; favoriteCount?: number }>(templateId)
+      : await favoriteTemplate<{ isFavorited?: boolean; favoriteCount?: number }>(templateId);
+    applyFavoriteState(item.id, res.isFavorited === true, Number(res.favoriteCount || 0));
+    userStore.loadFullProfile().catch(() => undefined);
+  } catch (error) {
+    applyFavoriteState(item.id, before.isFavorited, before.favoriteCount);
+    const message = error instanceof Error ? error.message : '';
+    uni.showToast({ title: message || '收藏失败，请稍后重试', icon: 'none' });
+  } finally {
+    const next = { ...favoritePending.value };
+    delete next[item.id];
+    favoritePending.value = next;
+  }
+}
+
+function consumePendingFavorite() {
+  if (!pendingFavoriteId.value || !authStore.isLoggedIn) return;
+  const target = works.value.find((item) => item.id === pendingFavoriteId.value);
+  if (!target) return;
+  pendingFavoriteId.value = '';
+  if (target.isFavorited) return;
+  toggleFavorite(target);
+}
+
+function applyFavoriteState(id: string, isFavorited: boolean, count: number) {
+  const update = (item: WorkItem) => {
+    if (item.id !== id) return item;
+    const favoriteCount = Math.max(0, Math.floor(Number(count) || 0));
+    return { ...item, isFavorited, favoriteCount, favoriteText: formatCount(favoriteCount) };
+  };
+  works.value = works.value.map(update);
+  topTemplates.value = topTemplates.value.map(update);
+  if (previewTemplate.value?.id === id) {
+    const favoriteCount = Math.max(0, Math.floor(Number(count) || 0));
+    previewTemplate.value = {
+      ...previewTemplate.value,
+      isFavorited,
+      favoriteCount
+    };
+  }
+}
+
+function onCoverLoad(id: string, event: unknown) {
+  const detail = (event as { detail?: { width?: number; height?: number } } | null)?.detail;
+  const width = numericValue(detail?.width);
+  const height = numericValue(detail?.height);
+  if (!id || width <= 0 || height <= 0) return;
+  applyCoverRatio(id, width, height);
+}
+
+function applyCoverRatio(id: string, width: number, height: number) {
+  const update = (item: WorkItem) => {
+    if (item.id !== id) return item;
+    const next = withCoverRatio(item, width, height);
+    if (
+      item.coverHeightRpx === next.coverHeightRpx &&
+      Math.abs(item.aspectRatio - next.aspectRatio) < 0.001
+    ) {
+      return item;
+    }
+    return next;
+  };
+  works.value = works.value.map(update);
+  topTemplates.value = topTemplates.value.map(update);
+}
+
+async function primeCoverRatios(items: WorkItem[]) {
+  const targets = items
+    .map((item, index) => ({ item, index }))
+    .filter(({ item, index }) => index < COVER_RATIO_PRELOAD_LIMIT && !!item.cover);
+  if (!targets.length) return items;
+  const resolved = await Promise.all(targets.map(async ({ item, index }) => {
+    const size = await getCoverImageSize(item.cover || '');
+    return size ? { index, item: withCoverRatio(item, size.width, size.height) } : null;
+  }));
+  if (!resolved.some(Boolean)) return items;
+  const next = [...items];
+  resolved.forEach((entry) => {
+    if (entry) next[entry.index] = entry.item;
+  });
+  return next;
+}
+
+function getCoverImageSize(src: string): Promise<{ width: number; height: number } | null> {
+  if (!src || typeof uni.getImageInfo !== 'function') return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (size: { width: number; height: number } | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(size);
+    };
+    const timer = setTimeout(() => finish(null), COVER_RATIO_PRELOAD_TIMEOUT_MS);
+    uni.getImageInfo({
+      src,
+      success: (res) => {
+        const width = numericValue(res.width);
+        const height = numericValue(res.height);
+        finish(width > 0 && height > 0 ? { width, height } : null);
+      },
+      fail: () => finish(null)
+    });
+  });
+}
+
+function withCoverRatio(item: WorkItem, width: number, height: number): WorkItem {
+  const ratio = `${Math.round(width)}:${Math.round(height)}`;
+  const aspectRatio = width / height;
+  return {
+    ...item,
+    ratio,
+    aspectRatio,
+    coverHeightRpx: coverHeightOf(aspectRatio),
+    aspectClass: aspectClassOf(ratio)
+  };
+}
+
+function fallbackWork(
+  id: string,
+  title: string,
+  category: string,
+  tag: string,
+  kind: WorkItem['kind'],
+  ratio: string,
+  usageCount: number,
+  favoriteCount: number,
+  theme: string,
+): WorkItem {
+  return {
+    id,
+    title,
+    author: '@官方灵感',
+    usageCount,
+    favoriteCount,
+    usageText: formatCount(usageCount),
+    favoriteText: formatCount(favoriteCount),
+    isFavorited: false,
+    category,
+    tag,
+    tags: [tag, category],
+    kind,
+    ratio,
+    aspectRatio: aspectRatioValue(ratio),
+    coverHeightRpx: coverHeightOf(aspectRatioValue(ratio)),
+    aspectClass: aspectClassOf(ratio),
+    durationText: kind === 'video' ? '10s' : '',
+    theme,
   };
 }
 
@@ -488,25 +820,94 @@ function formatCount(value: number) {
   return String(value || 0);
 }
 
-function sortWorks(list: WorkItem[], mode: 'default' | 'hot' | 'new') {
-  const source = [...list];
-  if (mode === 'hot') return source.sort((a, b) => likeValue(b.likes) - likeValue(a.likes));
-  if (mode === 'new') return source.sort((a, b) => createdValue(b) - createdValue(a));
-  return source.sort((a, b) => Number(a.sourceIndex || 0) - Number(b.sourceIndex || 0));
+function hasFavoriteCount(value: number) {
+  return Math.max(0, Math.floor(Number(value || 0) || 0)) > 0;
 }
 
-function likeValue(value: string) {
-  const text = String(value || '').trim().toLowerCase();
-  const number = Number.parseFloat(text);
-  if (!Number.isFinite(number)) return 0;
-  if (text.endsWith('w')) return number * 10000;
-  if (text.endsWith('k')) return number * 1000;
-  return number;
+function sortWorks(list: WorkItem[], mode: 'default' | 'hot' | 'new') {
+  const source = [...list];
+  if (mode === 'hot') return source.sort((a, b) => (b.usageCount + b.favoriteCount) - (a.usageCount + a.favoriteCount));
+  if (mode === 'new') return source.sort((a, b) => createdValue(b) - createdValue(a));
+  return source.sort((a, b) => Number(a.sourceIndex || 0) - Number(b.sourceIndex || 0));
 }
 
 function createdValue(item: WorkItem) {
   const time = item.createdAt ? new Date(item.createdAt).getTime() : NaN;
   return Number.isFinite(time) ? time : Number.MAX_SAFE_INTEGER - Number(item.sourceIndex || 0);
+}
+
+function numericValue(value: unknown) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : 0;
+}
+
+function normalizeRatio(value: string, width: number, height: number, prompt: string, params?: Record<string, unknown> | null) {
+  const text = normalizeRatioText(value);
+  if (/^\d+(\.\d+)?:\d+(\.\d+)?$/.test(text)) return text;
+  if (width > 0 && height > 0) return `${width}:${height}`;
+  const paramsRatio = normalizeRatioText(params?.aspect_ratio || params?.aspectRatio || params?.ratio || '');
+  if (/^\d+(\.\d+)?:\d+(\.\d+)?$/.test(paramsRatio)) return paramsRatio;
+  const paramsSize = String(params?.size || params?.resolution || '').trim();
+  const sizeMatched = paramsSize.match(/(\d{2,5})\s*[xX*]\s*(\d{2,5})/);
+  if (sizeMatched) return `${sizeMatched[1]}:${sizeMatched[2]}`;
+  const paramsWidth = numericValue(params?.width || params?.w);
+  const paramsHeight = numericValue(params?.height || params?.h);
+  if (paramsWidth > 0 && paramsHeight > 0) return `${paramsWidth}:${paramsHeight}`;
+  const matched = String(prompt || '').match(/\|(\d{2,5})\|(\d{2,5})\s*$/);
+  if (matched) return `${matched[1]}:${matched[2]}`;
+  return '4:5';
+}
+
+function normalizeRatioText(value: unknown) {
+  return String(value || '').trim().replace(/：/g, ':');
+}
+
+function templateParamsOf(item: Record<string, unknown>) {
+  const raw = item.paramsJson || item.params_json || item.defaultParams || item.default_params;
+  if (!raw) return null;
+  if (typeof raw === 'object') return raw as Record<string, unknown>;
+  return parseMaybeJson(String(raw)) as Record<string, unknown> | null;
+}
+
+function aspectRatioValue(ratio: string) {
+  const [w, h] = ratio.split(':').map((item) => Number(item));
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return 0.8;
+  return w / h;
+}
+
+function coverHeightOf(aspectRatio: number) {
+  const ratio = Number.isFinite(aspectRatio) && aspectRatio > 0 ? aspectRatio : 0.8;
+  const rawHeight = WATERFALL_CARD_WIDTH_RPX / ratio;
+  return Math.round(Math.min(COVER_MAX_HEIGHT_RPX, rawHeight));
+}
+
+function aspectClassOf(ratio: string): WorkItem['aspectClass'] {
+  const [w, h] = ratio.split(':').map((item) => Number(item));
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return 'aspect-tall';
+  const value = h / w;
+  if (value >= 1.65) return 'aspect-poster';
+  if (value >= 1.18) return 'aspect-tall';
+  if (value <= 0.82) return 'aspect-short';
+  return 'aspect-standard';
+}
+
+function durationTextOf(item: Record<string, unknown>) {
+  const direct = String(item.durationLabel || item.durationText || '').trim();
+  if (direct) return direct;
+  const duration = Number(item.duration || item.durationSeconds || item.duration_seconds || 0);
+  if (Number.isFinite(duration) && duration > 0) return `${Math.floor(duration)}s`;
+  const params = item.paramsJson || item.params_json || item.defaultParams || item.default_params;
+  const parsed = typeof params === 'string' ? parseMaybeJson(params) : params;
+  const value = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>).duration || (parsed as Record<string, unknown>).durationSeconds : '';
+  return value ? String(value) : '';
+}
+
+function parseMaybeJson(value: string) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
 }
 
 function fallbackCover(work: WorkItem) {
@@ -626,6 +1027,10 @@ function uniqueTags(values: string[]) {
 
 function workTagsOf(item: WorkItem) {
   return item.tags?.length ? item.tags : [item.tag];
+}
+
+function topTemplateTags(item: WorkItem) {
+  return uniqueTags([item.category, ...workTagsOf(item)]).slice(0, 2);
 }
 
 function topFilterTags(list: WorkItem[]) {
@@ -1012,210 +1417,6 @@ function ensureSelectedCategoryExists() {
   content: "";
 }
 
-.create-waterfall {
-  display: flex;
-  align-items: flex-start;
-  gap: 16rpx;
-  width: 100%;
-}
-
-.waterfall-column {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 22rpx;
-}
-
-.feed-card {
-  display: block;
-  width: 100%;
-  min-width: 0;
-  padding: 0;
-  background: transparent;
-  text-align: left;
-}
-
-.feed-art {
-  position: relative;
-  overflow: hidden;
-  width: 100%;
-  height: 300rpx;
-  border-radius: 20rpx;
-  background: #e8f0ff;
-  box-shadow: 0 18rpx 34rpx rgba(0, 0, 0, 0.28);
-}
-
-.feed-card.tall .feed-art { height: 430rpx; }
-.feed-card.short .feed-art { height: 260rpx; }
-
-.feed-art::after {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0.16) 56%, rgba(255, 255, 255, 0.58));
-  content: "";
-}
-
-.feed-scene,
-.feed-cover {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-}
-
-.feed-scene::before,
-.feed-scene::after {
-  position: absolute;
-  content: "";
-}
-
-.theme-lantern {
-  background:
-    radial-gradient(circle at 30% 36%, rgba(255, 213, 130, 0.54), rgba(118, 36, 29, 0) 32%),
-    linear-gradient(145deg, #411616, #a94c2f 48%, #22121b);
-}
-
-.theme-street {
-  background:
-    radial-gradient(circle at 68% 32%, rgba(255, 241, 112, 0.48), rgba(255, 241, 112, 0) 26%),
-    linear-gradient(160deg, #2a3355, #d3a15e 50%, #402b31);
-}
-
-.theme-kitchen {
-  background:
-    radial-gradient(circle at 22% 18%, rgba(255, 255, 255, 0.38), rgba(255, 255, 255, 0) 28%),
-    linear-gradient(155deg, #eddcc8, #b97d64 44%, #2b1b1d);
-}
-
-.theme-studio {
-  background:
-    radial-gradient(circle at 50% 20%, rgba(103, 245, 219, 0.36), rgba(103, 245, 219, 0) 30%),
-    linear-gradient(145deg, #e8f0ff, #7a5cff 52%, #ff7acb);
-}
-
-.theme-neon {
-  background:
-    radial-gradient(circle at 70% 28%, rgba(255, 83, 192, 0.5), rgba(255, 83, 192, 0) 30%),
-    linear-gradient(145deg, #7a5cff, #8fb7ff 56%, #ff7acb);
-}
-
-.theme-green {
-  background:
-    radial-gradient(circle at 48% 36%, rgba(200, 255, 104, 0.4), rgba(30, 114, 60, 0) 34%),
-    linear-gradient(145deg, #e8f0ff, #ff7acb 50%, #7a5cff);
-}
-
-.theme-lantern .feed-scene::before,
-.theme-street .feed-scene::before,
-.theme-kitchen .feed-scene::before,
-.theme-studio .feed-scene::before,
-.theme-neon .feed-scene::before,
-.theme-green .feed-scene::before {
-  left: 32rpx;
-  top: 54rpx;
-  width: 150rpx;
-  height: 150rpx;
-  border-radius: 34rpx;
-  border: 3rpx solid rgba(255, 255, 255, 0.34);
-  background: rgba(255, 255, 255, 0.24);
-  box-shadow: 0 0 24rpx rgba(255, 255, 255, 0.18);
-  transform: rotate(8deg);
-}
-
-.theme-lantern .feed-scene::after,
-.theme-street .feed-scene::after,
-.theme-kitchen .feed-scene::after,
-.theme-studio .feed-scene::after,
-.theme-neon .feed-scene::after,
-.theme-green .feed-scene::after {
-  right: 26rpx;
-  bottom: 36rpx;
-  width: 120rpx;
-  height: 80rpx;
-  border-radius: 22rpx;
-  background: linear-gradient(135deg, #ff5fc6, #6dfde7);
-}
-
-.feed-play {
-  position: absolute;
-  top: 14rpx;
-  right: 14rpx;
-  z-index: 2;
-  width: 40rpx;
-  height: 40rpx;
-  border-radius: 20rpx;
-  background: rgba(255, 255, 255, 0.24);
-  backdrop-filter: blur(10rpx);
-}
-
-.feed-play::after {
-  position: absolute;
-  top: 11rpx;
-  left: 15rpx;
-  width: 0;
-  height: 0;
-  border-top: 9rpx solid transparent;
-  border-bottom: 9rpx solid transparent;
-  border-left: 13rpx solid rgba(255, 255, 255, 0.92);
-  content: "";
-}
-
-.feed-title {
-  overflow: hidden;
-  margin-top: 12rpx;
-  color: #ffffff;
-  font-size: 27rpx;
-  font-weight: 900;
-  line-height: 1.22;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.feed-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10rpx;
-  margin-top: 10rpx;
-  color: #9b95ab;
-  font-size: 21rpx;
-  font-weight: 700;
-}
-
-.feed-meta text:first-child {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.feed-like {
-  flex-shrink: 0;
-  color: #bdb6cc;
-}
-
-.create-empty {
-  padding: 56rpx 24rpx;
-  border: 1rpx solid rgba(255, 255, 255, 0.08);
-  border-radius: 24rpx;
-  background: rgba(255, 255, 255, 0.06);
-  color: #c8c3d5;
-  font-size: 26rpx;
-  font-weight: 800;
-  text-align: center;
-}
-
-.create-empty-action {
-  width: 176rpx;
-  height: 56rpx;
-  margin: 24rpx auto 0;
-  border-radius: 28rpx;
-  background: linear-gradient(90deg, #ffe55d, #70ff8c);
-  color: #252a3d;
-  line-height: 56rpx;
-}
-
 .inspiration-page {
   position: relative;
   min-height: 100vh;
@@ -1486,6 +1687,195 @@ function ensureSelectedCategoryExists() {
   font-size: 34rpx;
   font-weight: 700;
   line-height: 48rpx;
+}
+
+.top-template-section {
+  margin: 0 -24rpx 22rpx;
+}
+
+.top-template-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18rpx;
+  padding: 0 24rpx 14rpx;
+}
+
+.top-template-title {
+  color: #172033;
+  font-size: 30rpx;
+  font-weight: 900;
+  line-height: 1.2;
+}
+
+.top-template-refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8rpx;
+  min-width: 92rpx;
+  height: 46rpx;
+  margin: 0;
+  padding: 0 18rpx;
+  box-sizing: border-box;
+  border-radius: 23rpx;
+  background: #f0edff;
+  color: #6c4bff;
+  font-size: 22rpx;
+  font-weight: 900;
+  line-height: 46rpx;
+}
+
+.top-template-refresh.loading {
+  color: #7a5cff;
+  opacity: 0.86;
+}
+
+.top-template-refresh-icon {
+  position: relative;
+  width: 22rpx;
+  height: 22rpx;
+  box-sizing: border-box;
+  border: 4rpx solid currentColor;
+  border-left-color: transparent;
+  border-radius: 50%;
+}
+
+.top-template-refresh-icon::after {
+  position: absolute;
+  right: -5rpx;
+  top: -1rpx;
+  width: 0;
+  height: 0;
+  border-top: 7rpx solid currentColor;
+  border-left: 7rpx solid transparent;
+  content: "";
+  transform: rotate(28deg);
+}
+
+.top-template-refresh.loading .top-template-refresh-icon {
+  animation: pull-refresh-spin 0.82s linear infinite;
+}
+
+.top-template-refresh.cycling .top-template-refresh-icon {
+  animation: pull-refresh-spin 0.42s ease-out;
+}
+
+.top-template-scroll {
+  width: 100%;
+  white-space: nowrap;
+}
+
+.top-template-row {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 18rpx;
+  padding: 0 24rpx 6rpx;
+}
+
+.top-template-card {
+  flex-shrink: 0;
+  overflow: hidden;
+  width: 246rpx;
+  padding: 0 0 14rpx;
+  box-sizing: border-box;
+  border-radius: 16rpx;
+  background: #ffffff;
+  box-shadow: 0 6rpx 14rpx rgba(70, 55, 120, 0.08);
+}
+
+.top-template-cover-wrap {
+  position: relative;
+  overflow: hidden;
+  width: 100%;
+  height: 246rpx;
+  background: #f0edff;
+}
+
+.top-template-cover {
+  width: 100%;
+  height: 100%;
+}
+
+.top-template-cover.fallback {
+  background: linear-gradient(135deg, #8c55ff, #ff7dbd);
+}
+
+.top-template-video-icon {
+  position: absolute;
+  top: 10rpx;
+  right: 10rpx;
+  width: 34rpx;
+  height: 34rpx;
+  border-radius: 17rpx;
+  background: rgba(23, 32, 51, 0.7);
+}
+
+.top-template-video-icon::after {
+  position: absolute;
+  top: 9rpx;
+  left: 13rpx;
+  width: 0;
+  height: 0;
+  border-top: 8rpx solid transparent;
+  border-bottom: 8rpx solid transparent;
+  border-left: 12rpx solid #ffffff;
+  content: "";
+}
+
+.top-template-name {
+  height: 32rpx;
+  margin: 12rpx 16rpx 0;
+  color: #172033;
+  font-size: 26rpx;
+  font-weight: 900;
+  line-height: 32rpx;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.top-template-tags {
+  display: flex;
+  align-items: center;
+  gap: 8rpx;
+  height: 36rpx;
+  margin: 8rpx 16rpx 10rpx;
+  overflow: hidden;
+}
+
+.top-template-tag {
+  flex-shrink: 0;
+  max-width: 104rpx;
+  height: 34rpx;
+  padding: 0 12rpx;
+  box-sizing: border-box;
+  border-radius: 10rpx;
+  background: #f0eaff;
+  color: #7b5cff;
+  font-size: 20rpx;
+  font-weight: 800;
+  line-height: 34rpx;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.top-template-generate {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(100% - 32rpx);
+  height: 60rpx;
+  margin: 0 16rpx;
+  padding: 0;
+  box-sizing: border-box;
+  border-radius: 8rpx;
+  background: linear-gradient(135deg, #7b5cff, #8f63ff);
+  color: #ffffff;
+  font-size: 25rpx;
+  font-weight: 900;
+  line-height: 60rpx;
 }
 
 .category-panel {
@@ -1811,35 +2201,26 @@ function ensureSelectedCategoryExists() {
 }
 
 .feed-card {
+  position: relative;
   overflow: hidden;
   display: block;
   width: 100%;
   min-width: 0;
   padding: 0;
   border-radius: 20rpx;
-  background: #ffffff;
+  background: #f2f0fb;
   text-align: left;
   box-shadow: 0 10rpx 24rpx rgba(122, 92, 255, 0.1);
 }
 
-.feed-art,
-.feed-card.short .feed-art,
-.feed-card.tall .feed-art {
+.feed-art {
   position: relative;
   overflow: hidden;
   width: 100%;
-  height: 292rpx;
-  border-radius: 20rpx 20rpx 0 0;
-  background: #e8f0ff;
+  height: 340rpx;
+  border-radius: inherit;
+  background: #f2f0fb;
   box-shadow: none;
-}
-
-.feed-art::after {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 60%, rgba(31, 36, 55, 0.1));
-  content: "";
-  pointer-events: none;
 }
 
 .feed-scene,
@@ -1848,6 +2229,10 @@ function ensureSelectedCategoryExists() {
   inset: 0;
   width: 100%;
   height: 100%;
+}
+
+.feed-cover {
+  background: #f2f0fb;
 }
 
 .feed-scene::before,
@@ -1926,128 +2311,166 @@ function ensureSelectedCategoryExists() {
 
 .feed-badge {
   position: absolute;
-  top: 14rpx;
-  left: 14rpx;
+  top: 8rpx;
+  left: 8rpx;
   z-index: 2;
-  height: 42rpx;
-  padding: 0 18rpx;
-  border-radius: 18rpx;
-  background: linear-gradient(135deg, #7b5cff, #a76bff);
+  height: 28rpx;
+  padding: 0 10rpx;
+  border-radius: 11rpx;
+  background: rgba(112, 91, 255, 0.68);
   color: #ffffff;
-  font-size: 21rpx;
+  font-size: 17rpx;
   font-weight: 900;
-  line-height: 42rpx;
-  box-shadow: 0 8rpx 18rpx rgba(123, 92, 255, 0.22);
+  line-height: 28rpx;
+  opacity: 0.76;
+}
+
+.feed-video-mark {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  font-size: 18rpx;
+  font-weight: 900;
+  pointer-events: none;
 }
 
 .feed-play {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  z-index: 2;
-  width: 74rpx;
-  height: 74rpx;
-  border-radius: 50%;
-  background: rgba(31, 36, 55, 0.34);
-  backdrop-filter: blur(10rpx);
-  transform: translate(-50%, -50%);
+  position: relative;
+  top: auto;
+  right: auto;
+  bottom: auto;
+  left: auto;
+  width: 68rpx;
+  height: 68rpx;
+  flex-shrink: 0;
+  border-radius: 34rpx;
+  background: rgba(23, 32, 51, 0.58);
+  box-shadow: 0 8rpx 20rpx rgba(0, 0, 0, 0.2);
+  backdrop-filter: blur(8rpx);
 }
 
 .feed-play::after {
   position: absolute;
   top: 22rpx;
-  left: 29rpx;
+  left: 28rpx;
   width: 0;
   height: 0;
-  border-top: 15rpx solid transparent;
-  border-bottom: 15rpx solid transparent;
-  border-left: 21rpx solid rgba(255, 255, 255, 0.94);
+  border-top: 12rpx solid transparent;
+  border-bottom: 12rpx solid transparent;
+  border-left: 18rpx solid rgba(255, 255, 255, 0.94);
   content: "";
 }
 
-.feed-title {
-  overflow: hidden;
-  margin: 18rpx 18rpx 0;
-  color: #1f2437;
-  font-size: 25rpx;
+.feed-duration {
+  position: absolute;
+  top: 14rpx;
+  right: 14rpx;
+  height: 42rpx;
+  padding: 0 12rpx;
+  border-radius: 21rpx;
+  background: rgba(23, 32, 51, 0.58);
+  color: #ffffff;
+  font-size: 18rpx;
   font-weight: 900;
-  line-height: 1.28;
+  line-height: 42rpx;
+  backdrop-filter: blur(8rpx);
+}
+
+.feed-title {
+  position: absolute;
+  right: 18rpx;
+  bottom: 43rpx;
+  left: 18rpx;
+  z-index: 2;
+  overflow: hidden;
+  height: 42rpx;
+  margin: 0;
+  color: #ffffff;
+  font-size: 24rpx;
+  font-weight: 900;
+  line-height: 42rpx;
   text-overflow: ellipsis;
+  text-shadow:
+    0 2rpx 4rpx rgba(0, 0, 0, 0.76),
+    0 0 12rpx rgba(0, 0, 0, 0.5),
+    0 1rpx 1rpx rgba(0, 0, 0, 0.68);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
   white-space: nowrap;
 }
 
 .feed-meta {
+  position: absolute;
+  right: 14rpx;
+  bottom: 12rpx;
+  left: 14rpx;
+  z-index: 2;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8rpx;
-  margin: 14rpx 18rpx 18rpx;
-  color: #8b8fa3;
-  font-size: 21rpx;
+  gap: 10rpx;
+  margin: 0;
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 20rpx;
   font-weight: 800;
 }
 
-.feed-author {
+.feed-actions {
+  width: 100%;
+  min-width: 0;
   display: flex;
   align-items: center;
-  gap: 8rpx;
-  min-width: 0;
+  justify-content: space-between;
+  gap: 10rpx;
 }
 
-.feed-author text {
-  overflow: hidden;
-  min-width: 0;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.feed-avatar {
-  flex-shrink: 0;
-  width: 30rpx;
-  height: 30rpx;
-  border-radius: 50%;
-  background: #f0eaff;
-}
-
-.feed-avatar.fallback {
-  background:
-    radial-gradient(circle at 50% 36%, #ffe4d6 0 8rpx, transparent 9rpx),
-    linear-gradient(135deg, #7b5cff, #ff5cb8);
-}
-
-.feed-like {
-  flex-shrink: 0;
+.feed-usage,
+.feed-favorite {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 6rpx;
-  color: #8e87b2;
+  height: 36rpx;
+  margin: 0;
+  padding: 0;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 21rpx;
+  font-weight: 900;
+  line-height: 36rpx;
+  text-shadow:
+    0 2rpx 4rpx rgba(0, 0, 0, 0.68),
+    0 0 9rpx rgba(0, 0, 0, 0.44);
 }
 
-.heart-icon {
-  position: relative;
-  width: 19rpx;
-  height: 17rpx;
-  transform: rotate(-45deg);
+.feed-usage image,
+.feed-favorite image {
+  flex-shrink: 0;
+  width: 32rpx;
+  height: 32rpx;
+  filter: drop-shadow(0 2rpx 4rpx rgba(0, 0, 0, 0.46));
 }
 
-.heart-icon::before,
-.heart-icon::after {
-  position: absolute;
-  width: 12rpx;
-  height: 12rpx;
-  border: 3rpx solid #8e87b2;
-  border-radius: 50%;
-  content: "";
+.feed-usage image {
+  width: 34rpx;
+  height: 34rpx;
 }
 
-.heart-icon::before {
-  left: 0;
-  top: 0;
+.feed-favorite {
+  min-width: 32rpx;
+  order: 0;
 }
 
-.heart-icon::after {
-  right: 0;
-  bottom: 0;
+.feed-favorite.active {
+  color: #ff7aa3;
+}
+
+.feed-usage {
+  order: 1;
 }
 
 .create-empty {

@@ -4,7 +4,7 @@
       <template #right>
         <button class="record-entry" @tap="goHistory">
           <view class="record-entry-icon"></view>
-          <text>创作记录</text>
+          <text>作品库</text>
         </button>
       </template>
     </AppTopbar>
@@ -172,11 +172,13 @@
         v-model="story"
         class="manga-prompt-section"
         title="剧情梗概"
-        placeholder="例如：普通少女误入异能学院，发现自己能听见画面里的旁白。"
+        :placeholder="promptPlaceholder"
         :max-length="2000"
         :expanded="promptExpanded"
         smart-label="AI写剧本"
+        :show-help-button="showPromptGuide"
         @toggle-expanded="promptExpanded = !promptExpanded"
+        @help="openPromptGuide"
         @paste="pasteStoryPrompt"
         @select-all="selectAllStoryPrompt"
         @clear="story = ''"
@@ -219,7 +221,9 @@
         </view>
       </view>
 
-      <view class="generate-button" @tap="submitManga">生成漫剧</view>
+      <view class="generate-button" :class="{ disabled: comicMaintenanceMode }" @tap="submitManga">
+        {{ comicMaintenanceMode ? '正在开发' : '生成漫剧' }}
+      </view>
     </view>
 
     <AppDialogHost />
@@ -229,7 +233,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { onShow } from '@dcloudio/uni-app';
+import { onShareAppMessage, onShareTimeline, onShow } from '@dcloudio/uni-app';
 import AppTabBar from '@/components/common/AppTabBar.vue';
 import AppTopbar from '@/components/common/AppTopbar.vue';
 import AppDialogHost from '@/components/common/AppDialogHost.vue';
@@ -242,6 +246,11 @@ import { PAGE_ROUTES } from '@/utils/constants';
 import { assertPrompt } from '@/utils/validator';
 import { isDevFallbackEnabled, warnDevFallback } from '@/utils/dev-fallback';
 import { discountLabel } from '@/utils/member';
+import { homeEntryDisabledMessage, isHomeEntryMaintenanceMode } from '@/utils/home-entry';
+import { createShareMessage, createShareTimeline, enableShareMenu } from '@/utils/share';
+import { ensureLoggedIn } from '@/utils/login-guard';
+import { showAppDialog } from '@/utils/app-dialog';
+import { getPromptGuide, hasPromptGuideDialog } from '@/utils/prompt-guide';
 
 const genres = ['都市逆袭', '古风权谋', '奇幻冒险', '甜宠治愈'];
 const styles = ['国漫精致', '赛博霓虹', '水彩电影', '厚涂幻想'];
@@ -368,6 +377,12 @@ const configStore = useConfigStore();
 const authStore = useAuthStore();
 const comicBannerFailed = ref(false);
 const storyboardGenerateEnabled = computed(() => configStore.features.storyboardGenerate !== false);
+const comicMaintenanceMode = computed(() => isHomeEntryMaintenanceMode(configStore.publicConfig, 'comic'));
+const comicMaintenanceMessage = computed(() => homeEntryDisabledMessage(configStore.publicConfig, 'comic'));
+const defaultPromptPlaceholder = '例如：普通少女误入异能学院，发现自己能听见画面里的旁白。';
+const currentPromptGuide = computed(() => getPromptGuide(configStore.publicConfig, 'comic.story', defaultPromptPlaceholder));
+const promptPlaceholder = computed(() => currentPromptGuide.value.placeholder);
+const showPromptGuide = computed(() => hasPromptGuideDialog(currentPromptGuide.value));
 type ModelTier = {
   tierKey: string;
   tierName: string;
@@ -409,9 +424,13 @@ const comicBannerSource = computed(() => {
 });
 
 onShow(async () => {
+  enableShareMenu();
   await authStore.hydrate();
   configStore.hydrate();
-  await configStore.loadPublicConfig().catch(() => undefined);
+  await configStore.loadPublicConfig({ force: true }).catch(() => undefined);
+  if (comicMaintenanceMode.value) {
+    showComicMaintenanceMessage();
+  }
   if (!storyboardGenerateEnabled.value) {
     handleStoryboardDisabled();
     return;
@@ -428,6 +447,16 @@ onShow(async () => {
   });
 });
 
+onShareAppMessage(() => createShareMessage({
+  title: '用 AI 创作漫画短剧',
+  path: PAGE_ROUTES.comic
+}));
+
+onShareTimeline(() => createShareTimeline({
+  title: '用 AI 创作漫画短剧',
+  path: PAGE_ROUTES.comic
+}));
+
 function handleStoryboardDisabled() {
   models.value = [];
   uni.showToast({ title: 'AI漫剧功能已关闭', icon: 'none' });
@@ -441,10 +470,13 @@ function handleStoryboardDisabled() {
   }, 300);
 }
 
-function goHistory() {
+async function goHistory() {
   if (!authStore.isLoggedIn) {
-    uni.navigateTo({ url: `${PAGE_ROUTES.login}?redirect=${encodeURIComponent(PAGE_ROUTES.history)}` });
-    return;
+    const loggedIn = await ensureLoggedIn({
+      title: '登录后查看作品库',
+      subtitle: '登录并授权手机号后，可查看你的漫画和视频作品。'
+    });
+    if (!loggedIn) return;
   }
   uni.reLaunch({ url: PAGE_ROUTES.history });
 }
@@ -458,6 +490,9 @@ function goInspiration() {
 }
 
 function startCreate() {
+  if (comicMaintenanceMode.value) {
+    showComicMaintenanceMessage();
+  }
   promptExpanded.value = true;
   setTimeout(() => {
     uni.pageScrollTo({ scrollTop: 1080, duration: 260 });
@@ -493,6 +528,32 @@ function useScriptPreset(item: ScriptPreset) {
   uni.showToast({ title: '已填入精选剧本', icon: 'none' });
 }
 
+function openPromptGuide() {
+  const guide = currentPromptGuide.value;
+  if (!hasPromptGuideDialog(guide)) return;
+  showAppDialog({
+    variant: 'generic',
+    title: guide.title,
+    subtitle: guide.subtitle,
+    hideVisual: true,
+    richContent: guide.contentHtml || undefined,
+    content: guide.contentHtml ? undefined : guide.copyText,
+    primaryLabel: '我知道了',
+    secondaryLabel: '查看完整帮助',
+    minorLabel: guide.copyText ? guide.copyLabel : undefined,
+    closeOnMinor: false,
+    onMinor: () => {
+      if (!guide.copyText) return false;
+      uni.setClipboardData({ data: guide.copyText, success: () => uni.showToast({ title: '已复制示例', icon: 'success' }) });
+      return false;
+    },
+    onSecondary: () => {
+      const helpId = guide.helpId ? `&helpId=${encodeURIComponent(guide.helpId)}` : '';
+      uni.navigateTo({ url: `/pages/agreement/index?type=help${helpId}` });
+    }
+  });
+}
+
 function pasteStoryPrompt() {
   uni.getClipboardData({
     success: (res) => {
@@ -519,6 +580,10 @@ function smartFillStoryPrompt() {
 }
 
 async function submitManga() {
+  if (comicMaintenanceMode.value) {
+    showComicMaintenanceMessage();
+    return;
+  }
   if (!storyboardGenerateEnabled.value) {
     uni.showToast({ title: 'AI漫剧功能已关闭', icon: 'none' });
     return;
@@ -561,6 +626,15 @@ async function submitManga() {
 
 function selectModel(index: number) {
   selectedModelIndex.value = index;
+}
+
+function showComicMaintenanceMessage() {
+  uni.showModal({
+    title: '温馨提示',
+    content: comicMaintenanceMessage.value,
+    showCancel: false,
+    confirmText: '知道了'
+  });
 }
 
 function middleModelIndex() {

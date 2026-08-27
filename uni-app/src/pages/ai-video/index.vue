@@ -33,24 +33,45 @@
           </block>
         </view>
       </view>
-      <view v-else-if="isReferenceVideoMode" class="reference-video-upload-section">
-        <view class="card video-source-card reference-image-source-card">
+      <view v-else-if="isReferenceVideoMode && mediaUploadCards.length" class="reference-video-upload-section">
+        <view class="card media-upload-card video-source-card" :class="mediaUploadLayoutClass">
           <view class="upload-head">
             <view class="section-title">上传素材</view>
-            <view class="upload-count">{{ referenceUploadCountText }}</view>
+            <view class="upload-count">{{ mediaUploadTotalText }}</view>
           </view>
-          <view class="video-source-area reference-image-source-area" :class="{ full: referenceUploadFull }" @tap="pickReferenceAsset">
+          <view
+            v-if="mediaUploadCards.length === 1"
+            class="video-source-area media-upload-source-area"
+            :class="{ full: mediaUploadCards[0].full }"
+            @tap="openMediaAction(mediaUploadCards[0].mediaType)"
+          >
             <view class="upload-line-icon video-empty-icon">
-              <image class="line-icon-img" src="/static/icons/icon_upload_image_line.svg" mode="aspectFit" />
+              <image class="line-icon-img" :src="mediaUploadCards[0].icon" mode="aspectFit" />
               <text class="upload-line-plus">+</text>
             </view>
-            <view class="video-empty-title">{{ referenceUploadTitle }}</view>
-            <view class="video-empty-desc">{{ referenceUploadDesc }}</view>
+            <view class="video-empty-title">{{ mediaUploadCards[0].title }}</view>
+            <view class="video-empty-desc">{{ mediaUploadCards[0].countText }}</view>
+          </view>
+          <view v-else class="frame-upload-grid media-upload-grid" :class="mediaUploadGridClass">
+            <view
+              v-for="card in mediaUploadCards"
+              :key="card.mediaType"
+              class="frame-upload-slot media-upload-frame-slot"
+              :class="{ full: card.full }"
+              @tap="openMediaAction(card.mediaType)"
+            >
+              <view class="upload-line-icon frame-empty-icon">
+                <image class="line-icon-img" :src="card.icon" mode="aspectFit" />
+                <text class="upload-line-plus">+</text>
+              </view>
+              <view class="frame-empty-title">{{ card.title }}</view>
+              <view class="frame-empty-desc">{{ card.countText }}</view>
+            </view>
           </view>
         </view>
         <LegacyAssetStrip
           :assets="assets"
-          :max="maxUploads"
+          :max="mediaAssetLimit"
           @replace="replaceAsset"
           @remove="removeAsset"
           @hint="showUploadHint"
@@ -120,7 +141,10 @@
         :expanded="promptExpanded"
         :placeholder="promptPlaceholder"
         :show-smart-fill="promptOptimizeEnabled"
+        :smart-loading="promptOptimizing"
+        :show-help-button="showPromptGuide"
         @toggle-expanded="promptExpanded = !promptExpanded"
+        @help="openPromptGuide"
         @paste="pastePrompt"
         @select-all="selectAllPrompt"
         @clear="prompt = ''"
@@ -237,7 +261,7 @@
             </view>
           </view>
         </view>
-        <view class="param-block advanced-param-block">
+        <view v-if="shouldShowAdvancedParams" class="param-block advanced-param-block">
           <view class="advanced-param-toggle" @tap="advancedExpanded = !advancedExpanded">
             <view class="advanced-param-copy">
               <text class="advanced-param-title">高级参数</text>
@@ -246,7 +270,7 @@
             <text class="advanced-param-state">{{ advancedExpanded ? '收起' : '展开' }}</text>
           </view>
           <view v-if="advancedExpanded" class="advanced-param-panel">
-            <view class="advanced-param-row">
+            <view v-if="supportsAdvancedParam('seed')" class="advanced-param-row">
               <text class="advanced-param-label">随机种子</text>
               <input
                 class="advanced-param-input"
@@ -257,7 +281,7 @@
                 placeholder-class="advanced-param-placeholder"
               />
             </view>
-            <view class="advanced-param-row">
+            <view v-if="supportsAdvancedParam('fps')" class="advanced-param-row">
               <text class="advanced-param-label">帧率</text>
               <input
                 class="advanced-param-input"
@@ -268,7 +292,7 @@
                 placeholder-class="advanced-param-placeholder"
               />
             </view>
-            <view class="advanced-param-row">
+            <view v-if="supportsAdvancedParam('audioUrl')" class="advanced-param-row">
               <text class="advanced-param-label">音频URL</text>
               <input
                 class="advanced-param-input"
@@ -282,9 +306,10 @@
         </view>
         <view class="param-block">
           <view class="param-block-head">
-            <text class="param-block-title">模型档位</text>
+            <text class="param-block-title">入口档位</text>
             <text class="param-block-tip">{{ selectedModelCostLabel }}</text>
           </view>
+          <view class="entry-tier-note">切换入口档位后，比例参数和参考图数量会随当前档位变化</view>
           <view class="param-option-grid model-tier-grid">
             <button
               v-for="(item, index) in modelOptions"
@@ -293,7 +318,7 @@
               :class="{ active: selectedModelIndex === index }"
               @tap="selectModel(index)"
             >
-              <text class="param-option-title">{{ item.tierName }}</text>
+              <text class="param-option-title">{{ shortTierName(item.tierName) }}</text>
               <text class="param-option-desc">
                 <text v-if="item.memberDiscountApplied && item.basePointsCost > item.pointsCost" class="tier-base-cost">{{ item.basePointsCost }}</text>
                 {{ item.pointsCost }} 创作点
@@ -301,7 +326,7 @@
               <text v-if="item.memberDiscountApplied" class="tier-discount">{{ discountLabel(item.memberDiscountPercent) }}</text>
             </button>
           </view>
-          <view v-if="!modelTiersLoading && !modelOptions.length" class="tier-empty">当前功能暂无可用模型档位</view>
+          <view v-if="!modelTiersLoading && !modelOptions.length" class="tier-empty">当前功能暂无可用入口档位</view>
         </view>
       </view>
     </view>
@@ -324,7 +349,7 @@
 
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue';
-import { onLoad, onShow } from '@dcloudio/uni-app';
+import { onLoad, onShareAppMessage, onShareTimeline, onShow } from '@dcloudio/uni-app';
 import LegacyTopTabs from '@/components/legacy/LegacyTopTabs.vue';
 import LegacyPromptComposer from '@/components/legacy/LegacyPromptComposer.vue';
 import LegacyAssetStrip, { type LegacyAsset } from '@/components/legacy/LegacyAssetStrip.vue';
@@ -343,7 +368,11 @@ import { isDevFallbackEnabled, warnDevFallback } from '@/utils/dev-fallback';
 import { videoInspirationTemplates, type CreativeTemplate } from '@/utils/mock';
 import { discountLabel } from '@/utils/member';
 import { normalizeBackendMediaUrl } from '@/utils/media-url';
-import { showMemberRequiredDialog } from '@/utils/app-dialog';
+import { showAppDialog, showMemberRequiredDialog } from '@/utils/app-dialog';
+import { getPromptGuide, hasPromptGuideDialog, type PromptGuideModeKey } from '@/utils/prompt-guide';
+import { buildSupportedAdvancedVideoParams, hasVisibleVideoAdvancedParams, normalizeVideoAdvancedParams, type VideoAdvancedParamKey } from '@/utils/video-advanced-params';
+import { createShareMessage, createShareTimeline, enableShareMenu, withQuery } from '@/utils/share';
+import { ensureLoggedIn } from '@/utils/login-guard';
 
 type SizeMode = 'auto' | 'ratio' | 'custom_pixels';
 type VideoMode = '文生视频' | '图生视频' | '参考生视频' | '首尾帧' | '视频编辑';
@@ -361,6 +390,9 @@ type ModelCapabilities = {
   qualities?: string[];
   durations?: string[] | null;
   audioModes?: string[];
+  inputMediaTypes?: Array<'image' | 'video' | 'audio'>;
+  maxVideoUrls?: number;
+  maxAudioUrls?: number;
   supportedSizeModes?: string[];
   nativeSizes?: string[];
   defaultRatio?: string;
@@ -371,6 +403,7 @@ type ModelCapabilities = {
   minReferenceImages?: number;
   referenceUploadMode?: 'none' | 'first_frame' | 'first_last' | 'reference_images' | 'source_video';
   requiredReference?: boolean;
+  advancedParams?: VideoAdvancedParamKey[];
 };
 type ModelTier = {
   tierKey: string;
@@ -422,9 +455,20 @@ type InputAssetMeta = {
   type: string;
   typeLabel: string;
   path: string;
+  url?: string;
+  sourceType?: 'upload' | 'url';
   uploadKey?: unknown;
   fileId?: number;
-  mediaType?: 'image' | 'video';
+  fileNo?: string;
+  mediaType?: 'image' | 'video' | 'audio';
+};
+type InputMediaType = 'image' | 'video' | 'audio';
+type MediaUploadCard = {
+  mediaType: InputMediaType;
+  title: string;
+  countText: string;
+  icon: string;
+  full: boolean;
 };
 type FrameSlot = {
   type: 'start_frame' | 'end_frame';
@@ -467,6 +511,7 @@ const prompt = computed({
 const form = computed(() => currentState.value.form);
 const assets = computed(() => currentState.value.assets);
 const uploadedAssetCount = computed(() => assets.value.filter(Boolean).length);
+const displayedUploadedAssetCount = computed(() => Math.min(uploadedAssetCount.value, maxUploads.value));
 const firstFrameVideoAsset = computed(() => assets.value[0] || null);
 const firstFramePreviewPath = computed(() => firstFrameVideoAsset.value?.path || '');
 const hasFirstFrameImage = computed(() => Boolean(firstFramePreviewPath.value || currentState.value.uploadKeys[0]));
@@ -476,6 +521,7 @@ const sourceVideoAsset = computed(() => assets.value[0] || null);
 const sourceVideoPreviewPath = computed(() => sourceVideoAsset.value?.path || '');
 const hasSourceVideo = computed(() => Boolean(sourceVideoPreviewPath.value || currentState.value.uploadKeys[0]));
 const promptExpanded = ref(false);
+const promptOptimizing = ref(false);
 const promptOptimizeEnabled = computed(() => configStore.features.promptOptimize !== false);
 const selectedSizeMode = ref<SizeMode>('ratio');
 const selectedRatio = ref('9:16');
@@ -511,10 +557,14 @@ const fallbackCapabilities: ModelCapabilities = {
   nativeSizes: ['auto'],
   defaultRatio: '9:16',
   maxReferenceImages: DEFAULT_MAX_REFERENCE_IMAGES,
+  inputMediaTypes: ['image'],
+  maxVideoUrls: 0,
+  maxAudioUrls: 0,
   inputMode: 'first_frame',
   minReferenceImages: 0,
   referenceUploadMode: 'first_frame',
   requiredReference: false,
+  advancedParams: [],
 };
 const fallbackModels: ModelTier[] = [
   {
@@ -552,12 +602,22 @@ const fallbackModels: ModelTier[] = [
   }
 ];
 
-const promptPlaceholder = computed(() => {
+const promptGuideKey = computed<PromptGuideModeKey>(() => {
+  if (videoMode.value === '文生视频') return 'ai_video.text2video';
+  if (videoMode.value === '参考生视频') return 'ai_video.reference';
+  if (videoMode.value === '首尾帧') return 'ai_video.first_last_frame';
+  if (videoMode.value === '视频编辑') return 'ai_video.edit';
+  return 'ai_video.img2video';
+});
+const defaultPromptPlaceholder = computed(() => {
   if (videoMode.value === '视频编辑') return '描述你想如何编辑源视频，例如裁剪节奏、换场景或增强画质';
   if (videoMode.value === '参考生视频') return '描述多张参考图希望如何融合，包含主体、动作、镜头和风格';
   if (videoMode.value === '首尾帧') return '描述从首帧过渡到尾帧的镜头运动、节奏和氛围';
   return '写点什么... 输入完成1秒后自动保存，最多2000字';
 });
+const currentPromptGuide = computed(() => getPromptGuide(configStore.publicConfig, promptGuideKey.value, defaultPromptPlaceholder.value));
+const promptPlaceholder = computed(() => currentPromptGuide.value.placeholder);
+const showPromptGuide = computed(() => hasPromptGuideDialog(currentPromptGuide.value));
 const frameSlots = computed<FrameSlot[]>(() => [
   { type: 'start_frame', label: '开始帧', desc: '上传视频开头画面', index: 0, asset: startFrameAsset.value },
   { type: 'end_frame', label: '结束帧', desc: '上传视频结尾画面', index: 1, asset: endFrameAsset.value }
@@ -580,16 +640,40 @@ const modelOptions = computed<ModelTier[]>(() => {
   return [];
 });
 const selectedModel = computed(() => modelOptions.value[selectedModelIndex.value] || modelOptions.value[0]);
+const selectedModelName = computed(() => selectedModel.value?.tierName || '标准生视频');
+const selectedModelDescription = computed(() => selectedModel.value?.description || '');
 const selectedModelCost = computed(() => estimateSelectedModelCost(selectedModel.value));
 const selectedModelCostLabel = computed(() => modelTiersLoading.value ? '加载中' : selectedModel.value ? `${selectedModelCost.value} 创作点` : '未配置');
 const selectedCapabilities = computed(() => selectedModel.value?.capabilities || fallbackCapabilities);
 const maxUploads = computed(() => normalizeMaxReferenceImages(selectedCapabilities.value.maxReferenceImages));
+const maxVideoUrls = computed(() => normalizeMediaLimit(selectedCapabilities.value.maxVideoUrls));
+const maxAudioUrls = computed(() => normalizeMediaLimit(selectedCapabilities.value.maxAudioUrls));
 const minReferenceImages = computed(() => normalizeMinReferenceImages(selectedCapabilities.value.minReferenceImages));
 const referenceUploadMode = computed(() => selectedCapabilities.value.referenceUploadMode || inferReferenceUploadMode(videoMode.value));
 const isFirstFrameVideoMode = computed(() => videoMode.value === '图生视频');
 const isReferenceVideoMode = computed(() => videoMode.value === '参考生视频');
+const supportedInputMediaTypes = computed<InputMediaType[]>(() => normalizeInputMediaTypes(selectedCapabilities.value));
+const mediaUploadCards = computed<MediaUploadCard[]>(() => supportedInputMediaTypes.value.map((mediaType) => {
+  const count = countAssetsByMediaType(mediaType);
+  const max = maxForMediaType(mediaType);
+  return {
+    mediaType,
+    title: uploadTitleForMediaType(mediaType),
+    countText: `${count}/${max}`,
+    icon: uploadIconForMediaType(mediaType),
+    full: max > 0 && count >= max,
+  };
+}).filter((card) => maxForMediaType(card.mediaType) > 0));
+const mediaUploadGridClass = computed(() => `cols-${Math.min(3, Math.max(1, mediaUploadCards.value.length))}`);
+const mediaUploadLayoutClass = computed(() => ({
+  single: mediaUploadCards.value.length === 1,
+  pair: mediaUploadCards.value.length === 2,
+  triple: mediaUploadCards.value.length >= 3,
+}));
+const mediaAssetLimit = computed(() => mediaUploadCards.value.reduce((total, card) => total + maxForMediaType(card.mediaType), 0));
+const mediaUploadTotalText = computed(() => `已添加 ${uploadedAssetCount.value}/${mediaAssetLimit.value}`);
 const referenceUploadFull = computed(() => uploadedAssetCount.value >= maxUploads.value);
-const referenceUploadCountText = computed(() => `已上传 ${uploadedAssetCount.value}/${maxUploads.value}`);
+const referenceUploadCountText = computed(() => `已上传 ${displayedUploadedAssetCount.value}/${maxUploads.value}`);
 const referenceUploadTitle = computed(() => {
   if (referenceUploadFull.value) return '参考图已满';
   return uploadedAssetCount.value > 0 ? '继续上传参考图' : '上传参考图';
@@ -649,6 +733,9 @@ const audioModeOptions = computed<AudioModeOption[]>(() => {
 const shouldShowAudioMode = computed(() => audioModeKeys.value.length > 0);
 const audioModeLocked = computed(() => audioModeKeys.value.length <= 1);
 const selectedAudioModeLabel = computed(() => audioModeLabel(selectedAudioMode.value));
+const advancedParamKeys = computed(() => normalizeVideoAdvancedParams(selectedCapabilities.value.advancedParams));
+const shouldShowAdvancedParams = computed(() => hasVisibleVideoAdvancedParams(advancedParamKeys.value));
+const supportsAdvancedParam = (key: VideoAdvancedParamKey) => advancedParamKeys.value.includes(key);
 const hasAdvancedParams = computed(() => Object.keys(buildAdvancedVideoParams()).length > 0);
 const advancedParamSummary = computed(() => hasAdvancedParams.value ? '已填写' : '可选');
 const audioModeTip = computed(() => {
@@ -660,10 +747,10 @@ const audioModeTip = computed(() => {
   return `默认${defaultLabel}，当前选择${selectedAudioModeLabel.value}`;
 });
 const generationCostText = computed(() => modelTiersLoading.value
-  ? `预计生成${selectedDurationLabel.value} · 模型档位加载中`
+  ? `预计生成${selectedDurationLabel.value} · 入口档位加载中`
   : selectedModel.value
     ? `预计生成${selectedDurationLabel.value} · 消耗 ${selectedModelCost.value} 创作点`
-    : `预计生成${selectedDurationLabel.value} · 请先配置模型档位`);
+    : `预计生成${selectedDurationLabel.value} · 请先配置入口档位`);
 
 onLoad((query) => {
   restoreDraft();
@@ -671,6 +758,7 @@ onLoad((query) => {
 });
 
 onShow(() => {
+  enableShareMenu();
   configStore.hydrate();
   configStore.loadPublicConfig().catch(() => undefined);
   authStore.hydrate();
@@ -678,9 +766,31 @@ onShow(() => {
   loadVideoTemplates();
 });
 
+onShareAppMessage(() => createShareMessage({
+  title: 'AI 视频生成，让创意动起来',
+  path: withQuery(PAGE_ROUTES.aiVideo, { mode: videoMode.value })
+}));
+
+onShareTimeline(() => createShareTimeline({
+  title: 'AI 视频生成，让创意动起来',
+  path: withQuery(PAGE_ROUTES.aiVideo, { mode: videoMode.value })
+}));
+
 watch(videoMode, () => {
   loadVideoModelsForMode();
   scheduleDraftSave();
+});
+
+watch(() => maxUploads.value, () => {
+  trimCurrentAssetsToMaxUploads();
+});
+
+watch([
+  () => maxVideoUrls.value,
+  () => maxAudioUrls.value,
+  () => supportedInputMediaTypes.value.join(','),
+], () => {
+  trimCurrentAssetsToMaxUploads();
 });
 
 watch([
@@ -866,6 +976,7 @@ function normalizeCreativeTemplate(raw: Record<string, unknown>): CreativeTempla
     targetFeature,
     usageType,
     displayConfig,
+    createdAt: String(raw.createdAt || raw.created_at || raw.updatedAt || raw.updated_at || ''),
     canUse: raw.canUse !== false,
     canSave: raw.canSave !== false && raw.canUse !== false,
     lockReason: String(raw.lockReason || '')
@@ -904,8 +1015,14 @@ function sortTemplatesForFeature(list: CreativeTemplate[], feature: string) {
     const bPin = templatePinMeta(b, feature);
     if (aPin.pinned !== bPin.pinned) return bPin.pinned - aPin.pinned;
     if (aPin.pinOrder !== bPin.pinOrder) return bPin.pinOrder - aPin.pinOrder;
-    return numericTemplateId(b.id) - numericTemplateId(a.id);
+    const createdDiff = templateCreatedValue(b) - templateCreatedValue(a);
+    return createdDiff || numericTemplateId(b.id) - numericTemplateId(a.id);
   });
+}
+
+function templateCreatedValue(item: CreativeTemplate) {
+  const time = item.createdAt ? new Date(item.createdAt).getTime() : NaN;
+  return Number.isFinite(time) ? time : 0;
 }
 
 function templatePinMeta(item: CreativeTemplate, feature: string) {
@@ -966,7 +1083,35 @@ function handleFirstFrameSourceTap() {
 }
 
 function pickReferenceAsset() {
-  pickAsset('reference');
+  openMediaAction('image');
+}
+
+function openMediaAction(mediaType: InputMediaType, replaceIndex?: number) {
+  const count = countAssetsByMediaType(mediaType);
+  const max = maxForMediaType(mediaType);
+  if (typeof replaceIndex !== 'number' && max > 0 && count >= max) {
+    uni.showToast({ title: `${uploadTitleForMediaType(mediaType)}已达上限`, icon: 'none' });
+    return;
+  }
+  uni.showActionSheet({
+    itemList: ['本地上传', '粘贴链接'],
+    success: (res) => {
+      if (res.tapIndex === 0) chooseAndSetMedia(mediaType, replaceIndex);
+      if (res.tapIndex === 1) pasteMediaUrl(mediaType, replaceIndex);
+    },
+  });
+}
+
+function chooseAndSetMedia(mediaType: InputMediaType, replaceIndex?: number) {
+  if (mediaType === 'image') {
+    chooseAndSetReferenceImage(replaceIndex);
+    return;
+  }
+  if (mediaType === 'video') {
+    chooseAndSetReferenceVideo(replaceIndex);
+    return;
+  }
+  chooseAndSetAudio(replaceIndex);
 }
 
 function handleSourceVideoTap() {
@@ -979,11 +1124,111 @@ function handleSourceVideoTap() {
 
 function replaceAsset(slotIndex: number) {
   const current = assets.value[slotIndex];
+  if (isReferenceVideoMode.value) {
+    const mediaType = normalizeAssetMediaType(current) || 'image';
+    openMediaAction(mediaType, slotIndex);
+    return;
+  }
   if (videoMode.value === '视频编辑') {
     chooseAndSetVideo();
     return;
   }
   chooseAndSetImage(current?.type || frameTypeBySlot(slotIndex) || defaultUploadAssetType(slotIndex), slotIndex);
+}
+
+function chooseAndSetReferenceImage(replaceIndex?: number) {
+  uni.chooseImage({
+    count: 1,
+    success: async (res) => {
+      const path = Array.isArray(res.tempFilePaths) ? res.tempFilePaths[0] : res.tempFilePaths;
+      if (!path) return;
+      const asset: LegacyAsset = { path, type: 'reference', typeLabel: '图片', mediaType: 'image', sourceType: 'upload' };
+      const assetIndex = setMediaAsset(asset, replaceIndex);
+      if (assetIndex < 0) return;
+      try {
+        const uploaded = await uploadAsset<Record<string, unknown>>(path, 'ref_image', 'public');
+        applyUploadedMeta(assetIndex, uploaded);
+      } catch {
+        uni.showToast({ title: '图片上传失败，请重试', icon: 'none' });
+      }
+    }
+  });
+}
+
+function chooseAndSetReferenceVideo(replaceIndex?: number) {
+  uni.chooseVideo({
+    sourceType: ['album', 'camera'],
+    compressed: false,
+    success: async (res) => {
+      const path = res.tempFilePath;
+      if (!path) return;
+      const asset: LegacyAsset = { path, type: 'reference_video', typeLabel: '视频', mediaType: 'video', sourceType: 'upload' };
+      const assetIndex = setMediaAsset(asset, replaceIndex);
+      if (assetIndex < 0) return;
+      try {
+        const uploaded = await uploadAsset<Record<string, unknown>>(path, 'ref_video', 'public');
+        applyUploadedMeta(assetIndex, uploaded);
+      } catch {
+        uni.showToast({ title: '视频上传失败，请重试', icon: 'none' });
+      }
+    }
+  });
+}
+
+function chooseAndSetAudio(replaceIndex?: number) {
+  const chooseFile = (uni as unknown as {
+    chooseMessageFile?: (options: Record<string, unknown>) => void;
+  }).chooseMessageFile;
+  if (!chooseFile) {
+    uni.showToast({ title: '当前环境不支持选择音频文件', icon: 'none' });
+    return;
+  }
+  chooseFile({
+    count: 1,
+    type: 'file',
+    extension: ['mp3', 'wav', 'm4a', 'aac', 'ogg'],
+    success: async (res: any) => {
+      const file = Array.isArray(res.tempFiles) ? res.tempFiles[0] : null;
+      const path = file?.path || file?.tempFilePath;
+      if (!path) return;
+      const asset: LegacyAsset = { path, type: 'reference_audio', typeLabel: '音频', mediaType: 'audio', sourceType: 'upload' };
+      const assetIndex = setMediaAsset(asset, replaceIndex);
+      if (assetIndex < 0) return;
+      try {
+        const uploaded = await uploadAsset<Record<string, unknown>>(path, 'ref_audio', 'public');
+        applyUploadedMeta(assetIndex, uploaded);
+      } catch {
+        uni.showToast({ title: '音频上传失败，请重试', icon: 'none' });
+      }
+    },
+  });
+}
+
+function pasteMediaUrl(mediaType: InputMediaType, replaceIndex?: number) {
+  (uni as unknown as {
+    showModal: (options: Record<string, unknown>) => void;
+  }).showModal({
+    title: `粘贴${uploadTitleForMediaType(mediaType)}链接`,
+    editable: true,
+    placeholderText: 'https://example.com/file',
+    success: (res: any) => {
+      if (!res.confirm) return;
+      const url = String(res.content || '').trim();
+      if (!/^https?:\/\//i.test(url)) {
+        uni.showToast({ title: '链接必须以 http 或 https 开头', icon: 'none' });
+        return;
+      }
+      const asset: LegacyAsset = {
+        path: url,
+        url,
+        type: mediaType === 'image' ? 'reference' : mediaType === 'video' ? 'reference_video' : 'reference_audio',
+        typeLabel: mediaType === 'image' ? '图片' : mediaType === 'video' ? '视频' : '音频',
+        mediaType,
+        sourceType: 'url',
+      };
+      setMediaAsset(asset, replaceIndex);
+    },
+  });
 }
 
 function chooseAndSetImage(type: string, replaceIndex?: number) {
@@ -1049,6 +1294,37 @@ function chooseAndSetVideo() {
   });
 }
 
+function setMediaAsset(asset: LegacyAsset, replaceIndex?: number) {
+  const mediaType = normalizeAssetMediaType(asset);
+  const state = currentState.value;
+  const isReplace = typeof replaceIndex === 'number';
+  if (!isReplace && mediaType && countAssetsByMediaType(mediaType) >= maxForMediaType(mediaType)) {
+    uni.showToast({ title: `${uploadTitleForMediaType(mediaType)}已达上限`, icon: 'none' });
+    return -1;
+  }
+  const index = isReplace ? replaceIndex : nextAvailableMixedAssetSlot(state);
+  state.assets[index] = asset;
+  state.uploadKeys[index] = asset.url || undefined;
+  state.fileIds[index] = undefined;
+  return index;
+}
+
+function applyUploadedMeta(assetIndex: number, uploaded: Record<string, unknown>) {
+  const fileId = extractFileId(uploaded);
+  const fileNo = extractFileNo(uploaded);
+  const key = fileNo || fileId || uploaded.url;
+  const state = currentState.value;
+  const asset = state.assets[assetIndex];
+  state.fileIds[assetIndex] = fileId;
+  state.uploadKeys[assetIndex] = key;
+  if (asset) {
+    asset.uploadKey = key;
+    asset.fileId = fileId;
+    asset.fileNo = fileNo;
+    asset.url = String(uploaded.url || uploaded.deliveryUrl || uploaded.publicUrl || asset.url || asset.path || '');
+  }
+}
+
 function removeAsset(slotIndex: number) {
   const state = currentState.value;
   if (videoMode.value === '图生视频' || videoMode.value === '首尾帧' || videoMode.value === '视频编辑') {
@@ -1066,6 +1342,32 @@ function showUploadHint() {
   uni.showToast({ title: '请点击上方上传素材卡片', icon: 'none' });
 }
 
+function openPromptGuide() {
+  const guide = currentPromptGuide.value;
+  if (!hasPromptGuideDialog(guide)) return;
+  showAppDialog({
+    variant: 'generic',
+    title: guide.title,
+    subtitle: guide.subtitle,
+    hideVisual: true,
+    richContent: guide.contentHtml || undefined,
+    content: guide.contentHtml ? undefined : guide.copyText,
+    primaryLabel: '我知道了',
+    secondaryLabel: '查看完整帮助',
+    minorLabel: guide.copyText ? guide.copyLabel : undefined,
+    closeOnMinor: false,
+    onMinor: () => {
+      if (!guide.copyText) return false;
+      uni.setClipboardData({ data: guide.copyText, success: () => uni.showToast({ title: '已复制示例', icon: 'success' }) });
+      return false;
+    },
+    onSecondary: () => {
+      const helpId = guide.helpId ? `&helpId=${encodeURIComponent(guide.helpId)}` : '';
+      uni.navigateTo({ url: `/pages/agreement/index?type=help${helpId}` });
+    }
+  });
+}
+
 function pastePrompt() {
   uni.getClipboardData({ success: (res) => { prompt.value = res.data || prompt.value; } });
 }
@@ -1075,34 +1377,64 @@ function selectAllPrompt() {
 }
 
 async function optimizePrompt() {
+  if (promptOptimizing.value) return;
   if (!promptOptimizeEnabled.value) {
     uni.showToast({ title: '智能优化功能已关闭', icon: 'none' });
     return;
   }
   if (!assertPrompt(prompt.value)) return;
-  const result = await optimizeVideoPrompt<Record<string, unknown>>({
+  promptOptimizing.value = true;
+  try {
+    const result = await optimizeVideoPrompt<Record<string, unknown>>({
     featureKey: videoFeatureKey(),
     prompt: prompt.value,
     ratio: videoMode.value !== '视频编辑' && sizeOptions.value.length > 0 && selectedSizeMode.value === 'ratio' ? selectedRatio.value : undefined,
     duration: durationOptions.value.length > 0 ? selectedDuration.value : undefined,
-    resolution: resolutionOptions.value.length > 0 ? selectedResolution.value : undefined
+    resolution: resolutionOptions.value.length > 0 ? selectedResolution.value : undefined,
+    usage: 'deep_completion',
+    context: {
+      feature: 'video',
+      mode: videoMode.value,
+      referenceMode: referenceUploadMode.value,
+      scene: form.value.scene,
+      brand: form.value.brand,
+      sellingPoint: form.value.sellingPoint,
+      sizeMode: selectedSizeMode.value,
+      ratio: selectedRatio.value,
+      duration: selectedDuration.value,
+      resolution: selectedResolution.value,
+      audioMode: selectedAudioMode.value,
+      preserveAudio: preserveAudio.value,
+      hasFirstFrame: hasFirstFrameImage.value,
+      hasLastFrame: videoMode.value === '首尾帧' && Boolean(currentState.value.assets[1] || currentState.value.uploadKeys[1]),
+      hasSourceVideo: hasSourceVideo.value,
+      inputAssets: buildInputAssets(currentState.value),
+      tierName: selectedModelName.value,
+      tierDescription: selectedModelDescription.value,
+    },
   });
-  prompt.value = String(result.optimizedPrompt || result.optimized_prompt || prompt.value);
+    prompt.value = String(result.optimizedPrompt || result.optimized_prompt || prompt.value);
+  } finally {
+    promptOptimizing.value = false;
+  }
 }
 
 async function submit() {
   if (isSubmitting.value) return;
   if (!authStore.isLoggedIn) {
-    uni.navigateTo({ url: `${PAGE_ROUTES.login}?redirect=${encodeURIComponent(PAGE_ROUTES.aiVideo)}` });
-    return;
+    const loggedIn = await ensureLoggedIn({
+      title: '登录后提交视频任务',
+      subtitle: '登录并授权手机号后，可提交生成任务并同步作品。'
+    });
+    if (!loggedIn) return;
   }
   if (!assertPrompt(prompt.value)) return;
   if (modelTiersLoading.value) {
-    uni.showToast({ title: '模型档位加载中，请稍后再生成', icon: 'none' });
+    uni.showToast({ title: '入口档位加载中，请稍后再生成', icon: 'none' });
     return;
   }
   if (!selectedModel.value) {
-    uni.showToast({ title: '请先在后台配置可用模型档位', icon: 'none' });
+    uni.showToast({ title: '请先在后台配置可用入口档位', icon: 'none' });
     return;
   }
   const state = currentState.value;
@@ -1110,8 +1442,8 @@ async function submit() {
     videoMode.value === '图生视频' ? 1 : 0,
     videoMode.value === '参考生视频' ? Math.max(1, minReferenceImages.value) : 0,
   );
-  const uploadedImageCount = countFilledAssets(state);
-  const uploadedImageKeys = countUploadedKeys(state);
+  const uploadedImageCount = countFilledAssetsByMediaType(state, 'image');
+  const uploadedImageKeys = countUploadedKeysByMediaType(state, 'image');
   if ((videoMode.value === '图生视频' || videoMode.value === '参考生视频') && uploadedImageCount < requiredImageCount) {
     uni.showToast({ title: videoMode.value === '参考生视频' ? `请至少上传 ${requiredImageCount} 张参考图` : '请先上传首图', icon: 'none' });
     return;
@@ -1177,7 +1509,7 @@ async function submit() {
     autoScript: true,
     formData: { ...state.form },
     params,
-    uploadKeys: state.uploadKeys.filter((item) => item !== undefined && item !== null && item !== '')
+    uploadKeys: buildLegacyImageUploadKeys(state)
   });
   const id = Number(result.id || result.taskId);
   if (!Number.isInteger(id) || id <= 0) {
@@ -1209,7 +1541,10 @@ async function submit() {
 
 function selectModel(index: number) {
   selectedModelIndex.value = index;
-  normalizeVideoParams();
+  const removedAssetCount = normalizeVideoParams();
+  if (removedAssetCount > 0) {
+    uni.showToast({ title: `已按当前档位移除 ${removedAssetCount} 个不兼容素材`, icon: 'none' });
+  }
 }
 
 function middleModelIndex() {
@@ -1268,6 +1603,41 @@ function normalizeVideoParams() {
   if (!audioModeKeys.value.length) {
     selectedAudioMode.value = 'silent';
   }
+  return trimCurrentAssetsToMaxUploads();
+}
+
+function trimCurrentAssetsToMaxUploads() {
+  if (videoMode.value !== '参考生视频' || !selectedModel.value) return 0;
+  const state = currentState.value;
+  const supportedMediaTypes = supportedInputMediaTypes.value;
+  const hasOnlyImageAssets = state.assets.every((asset) => !asset || normalizeAssetMediaType(asset) === 'image');
+
+  if (supportedMediaTypes.length === 1 && supportedMediaTypes[0] === 'image' && hasOnlyImageAssets) {
+    const removedAssetCount = state.assets.slice(maxUploads.value).filter(Boolean).length;
+    state.assets.splice(maxUploads.value);
+    state.uploadKeys.splice(maxUploads.value);
+    state.fileIds.splice(maxUploads.value);
+    return removedAssetCount;
+  }
+
+  const counts: Record<InputMediaType, number> = { image: 0, video: 0, audio: 0 };
+  const removalIndexes: number[] = [];
+  for (let index = 0; index < state.assets.length; index += 1) {
+    const mediaType = normalizeAssetMediaType(state.assets[index]);
+    if (!mediaType) continue;
+    if (!supportedMediaTypes.includes(mediaType) || counts[mediaType] >= maxForMediaType(mediaType)) {
+      removalIndexes.push(index);
+      continue;
+    }
+    counts[mediaType] += 1;
+  }
+  for (let index = removalIndexes.length - 1; index >= 0; index -= 1) {
+    const removalIndex = removalIndexes[index];
+    state.assets.splice(removalIndex, 1);
+    state.uploadKeys.splice(removalIndex, 1);
+    state.fileIds.splice(removalIndex, 1);
+  }
+  return removalIndexes.length;
 }
 
 function createModeState(): ModeState {
@@ -1335,6 +1705,10 @@ function normalizeVideoModeKey(value: unknown): VideoMode | '' {
   return videoModes.includes(value as VideoMode) ? value as VideoMode : '';
 }
 
+function shortTierName(value: unknown) {
+  return String(value || '').slice(0, 5);
+}
+
 function clearDraft() {
   if (draftTimer) clearTimeout(draftTimer);
   draftTimer = null;
@@ -1348,6 +1722,9 @@ function normalizeCapabilities(value: unknown): ModelCapabilities {
     qualities: stringArray(caps.qualities, fallbackCapabilities.qualities),
     durations: stringArray(caps.durations, fallbackCapabilities.durations || []),
     audioModes: stringArray(caps.audioModes || caps.audio_modes, []),
+    inputMediaTypes: normalizeInputMediaTypes(caps),
+    maxVideoUrls: normalizeMediaLimit(caps.maxVideoUrls ?? caps.max_video_urls),
+    maxAudioUrls: normalizeMediaLimit(caps.maxAudioUrls ?? caps.max_audio_urls),
     supportedSizeModes: stringArray(caps.supportedSizeModes, fallbackCapabilities.supportedSizeModes),
     nativeSizes: stringArray(caps.nativeSizes, fallbackCapabilities.nativeSizes),
     defaultRatio: String(caps.defaultRatio || fallbackCapabilities.defaultRatio || '9:16'),
@@ -1358,7 +1735,60 @@ function normalizeCapabilities(value: unknown): ModelCapabilities {
     minReferenceImages: normalizeMinReferenceImages(caps.minReferenceImages),
     referenceUploadMode: normalizeReferenceUploadMode(caps.referenceUploadMode || fallbackCapabilities.referenceUploadMode || 'first_frame'),
     requiredReference: Boolean(caps.requiredReference),
+    advancedParams: normalizeVideoAdvancedParams(caps.advancedParams || caps.advanced_params),
   };
+}
+
+function normalizeInputMediaTypes(value: unknown): InputMediaType[] {
+  const objectValue = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const source = Object.keys(objectValue).length
+    ? (objectValue.inputMediaTypes || objectValue.input_media_types)
+    : value;
+  if (!Array.isArray(source)) {
+    const uploadMode = String(objectValue.referenceUploadMode || objectValue.reference_upload_mode || objectValue.inputMode || objectValue.input_mode || '').trim();
+    if (uploadMode === 'source_video') return ['video'];
+    if (uploadMode && uploadMode !== 'none') return ['image'];
+    return [];
+  }
+  const normalized = source.map((item) => String(item || '').trim().toLowerCase()).filter((item): item is InputMediaType => (
+    item === 'image' || item === 'video' || item === 'audio'
+  ));
+  return uniqueStrings(normalized) as InputMediaType[];
+}
+
+function normalizeMediaLimit(value: unknown) {
+  const count = Math.floor(Number(value || 0));
+  return Number.isFinite(count) && count > 0 ? count : 0;
+}
+
+function maxForMediaType(mediaType: InputMediaType) {
+  if (mediaType === 'image') return maxUploads.value;
+  if (mediaType === 'video') return maxVideoUrls.value;
+  return maxAudioUrls.value;
+}
+
+function countAssetsByMediaType(mediaType: InputMediaType) {
+  return assets.value.filter((asset) => normalizeAssetMediaType(asset) === mediaType).length;
+}
+
+function normalizeAssetMediaType(asset?: LegacyAsset | null): InputMediaType | '' {
+  if (!asset) return '';
+  if (asset.mediaType === 'video' || asset.type === 'source_video') return 'video';
+  if (asset.mediaType === 'audio' || asset.type === 'reference_audio') return 'audio';
+  if (asset.mediaType === 'image' || !asset.mediaType) return 'image';
+  return '';
+}
+
+function uploadTitleForMediaType(mediaType: InputMediaType) {
+  if (mediaType === 'video') return '参考视频';
+  if (mediaType === 'audio') return '参考音频';
+  return '参考图片';
+}
+
+function uploadIconForMediaType(mediaType: InputMediaType) {
+  return mediaType === 'video'
+    ? '/static/icons/icon_upload_video_line.svg'
+    : '/static/icons/icon_upload_image_line.svg';
 }
 
 function normalizePricing(value: unknown): TierPricing | null {
@@ -1574,6 +2004,22 @@ function countUploadedKeys(state: ModeState) {
   return state.uploadKeys.filter((item) => item !== undefined && item !== null && item !== '').length;
 }
 
+function countFilledAssetsByMediaType(state: ModeState, mediaType: InputMediaType) {
+  return state.assets.filter((asset) => normalizeAssetMediaType(asset) === mediaType).length;
+}
+
+function countUploadedKeysByMediaType(state: ModeState, mediaType: InputMediaType) {
+  return state.uploadKeys.filter((item, index) => (
+    item !== undefined && item !== null && item !== '' && normalizeAssetMediaType(state.assets[index]) === mediaType
+  )).length;
+}
+
+function buildLegacyImageUploadKeys(state: ModeState) {
+  return state.uploadKeys.filter((item, index) => (
+    item !== undefined && item !== null && item !== '' && normalizeAssetMediaType(state.assets[index]) === 'image'
+  ));
+}
+
 function imageTypeLabel(type: string) {
   if (type === 'product') return videoMode.value === '图生视频' ? '首图' : '主图';
   if (type === 'start_frame') return '开始帧';
@@ -1596,6 +2042,11 @@ function nextAvailableAssetSlot(state: ModeState, type: string) {
   return -1;
 }
 
+function nextAvailableMixedAssetSlot(state: ModeState) {
+  const emptyIndex = state.assets.findIndex((asset) => !asset);
+  return emptyIndex >= 0 ? emptyIndex : state.assets.length;
+}
+
 function isFrameUploadType(type: string) {
   return type === 'start_frame' || type === 'end_frame';
 }
@@ -1604,6 +2055,11 @@ function extractFileId(uploaded: Record<string, unknown>) {
   const value = uploaded.fileId || uploaded.id || uploaded.file_id;
   const fileId = Number(value);
   return Number.isFinite(fileId) && fileId > 0 ? fileId : undefined;
+}
+
+function extractFileNo(uploaded: Record<string, unknown>) {
+  const value = String(uploaded.fileNo || uploaded.file_no || '').trim();
+  return value || undefined;
 }
 
 function frameTypeBySlot(slotIndex: number) {
@@ -1643,8 +2099,11 @@ function buildInputAssets(state: ModeState): InputAssetMeta[] {
       type: asset.type,
       typeLabel: asset.typeLabel,
       path: asset.path,
+      url: asset.url,
+      sourceType: asset.sourceType || (asset.url && !state.uploadKeys[index] ? 'url' : 'upload'),
       uploadKey: state.uploadKeys[index],
       fileId: state.fileIds[index],
+      fileNo: asset.fileNo,
       mediaType: asset.mediaType
     });
     return items;
@@ -1652,30 +2111,11 @@ function buildInputAssets(state: ModeState): InputAssetMeta[] {
 }
 
 function buildAdvancedVideoParams() {
-  const params: Record<string, string | number> = {};
-  const seed = normalizeSeedParam(advancedSeed.value);
-  const fps = normalizePositiveInteger(advancedFps.value, 1, 120);
-  const audioUrl = advancedAudioUrl.value.trim().slice(0, 500);
-  if (seed !== undefined) params.seed = seed;
-  if (fps !== undefined) params.fps = fps;
-  if (audioUrl) params.audioUrl = audioUrl;
-  return params;
-}
-
-function normalizeSeedParam(value: string) {
-  const text = String(value || '').trim();
-  if (!text) return undefined;
-  const numberValue = Number(text);
-  if (Number.isSafeInteger(numberValue)) return numberValue;
-  return text.slice(0, 64);
-}
-
-function normalizePositiveInteger(value: string, min: number, max: number) {
-  const numberValue = Number(String(value || '').trim());
-  if (!Number.isFinite(numberValue)) return undefined;
-  const integer = Math.trunc(numberValue);
-  if (integer < min || integer > max) return undefined;
-  return integer;
+  return buildSupportedAdvancedVideoParams(advancedParamKeys.value, {
+    seed: advancedSeed.value,
+    fps: advancedFps.value,
+    audioUrl: advancedAudioUrl.value,
+  });
 }
 
 function cacheResultMeta(id: number, meta: Record<string, unknown>) {
@@ -1730,6 +2170,92 @@ function cacheResultMeta(id: number, meta: Record<string, unknown>) {
 
 .single-image-source-card {
   margin-bottom: 24rpx;
+}
+
+.media-upload-card {
+  padding: 24rpx 22rpx 22rpx;
+}
+
+.media-upload-card.single {
+  margin-bottom: 0;
+}
+
+.media-upload-source-area {
+  min-height: 420rpx;
+}
+
+.media-upload-source-area:active {
+  border-color: rgba(122, 92, 255, 0.5);
+  background: #f3f1ff;
+}
+
+.media-upload-source-area.full {
+  border-style: solid;
+  border-color: #dfe5ee;
+  background: #f1f4f9;
+  color: #91a3ad;
+}
+
+.media-upload-grid {
+  display: grid;
+  gap: 16rpx;
+  margin-top: 22rpx;
+}
+
+.media-upload-grid.cols-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.media-upload-grid.cols-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.media-upload-frame-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 20rpx 16rpx;
+  color: #637083;
+  text-align: center;
+}
+
+.media-upload-frame-slot:active {
+  border-color: #8b7cff;
+  background: #f3f1ff;
+}
+
+.media-upload-frame-slot.full {
+  border-style: solid;
+  border-color: #dfe5ee;
+  background: #f1f4f9;
+  color: #91a3ad;
+}
+
+.media-upload-grid.cols-3 .media-upload-frame-slot {
+  padding: 16rpx 8rpx;
+}
+
+.media-upload-grid.cols-3 .upload-line-icon {
+  width: 58rpx;
+  height: 58rpx;
+  margin-bottom: 12rpx;
+  border-radius: 18rpx;
+}
+
+.media-upload-grid.cols-3 .line-icon-img {
+  width: 36rpx;
+  height: 36rpx;
+}
+
+.media-upload-grid.cols-3 .frame-empty-title {
+  font-size: 24rpx;
+}
+
+.media-upload-grid.cols-3 .frame-empty-desc {
+  margin-top: 8rpx;
+  padding: 0;
+  font-size: 19rpx;
 }
 
 .reference-video-upload-section {
@@ -1984,6 +2510,14 @@ function cacheResultMeta(id: number, meta: Record<string, unknown>) {
   justify-content: space-between;
   gap: 18rpx;
   margin-bottom: 14rpx;
+}
+
+.entry-tier-note {
+  margin: -4rpx 0 14rpx;
+  color: #64748b;
+  font-size: 21rpx;
+  font-weight: 700;
+  line-height: 1.4;
 }
 
 .param-block-title {

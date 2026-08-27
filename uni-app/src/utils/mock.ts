@@ -13,6 +13,12 @@ export interface CreativeTemplate {
   mode: CreativeTemplateMode;
   category: string;
   duration?: string;
+  ratio?: string;
+  aspectRatio?: number;
+  usageCount?: number;
+  favoriteCount?: number;
+  isFavorited?: boolean;
+  createdAt?: string;
   targetFeature?: string;
   usageType?: string;
   displayConfig?: Record<string, unknown> | null;

@@ -27,35 +27,85 @@
 
     <view class="panel">
       <view class="panel-title">邀请奖励</view>
-      <view v-for="item in rewards" :key="item.title" class="reward-row">
+      <view v-for="item in visibleRewards" :key="item.title" class="reward-row">
         <view class="reward-icon"></view>
         <view>{{ item.title }}</view>
         <text>+{{ item.points }} 积分</text>
       </view>
     </view>
 
-    <view class="primary-action" @tap="inviteFriend">去邀请好友</view>
+    <button class="primary-action" open-type="share">去邀请好友</button>
     <view class="invite-count">已成功邀请 {{ invited }} 位好友</view>
+    <AppDialogHost />
   </view>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue';
-import { onShow } from '@dcloudio/uni-app';
+import { computed, ref } from 'vue';
+import { onLoad, onShareAppMessage, onShareTimeline, onShow } from '@dcloudio/uni-app';
 import { getInviteCode, getInviteRecords, getInviteSummary } from '@/api/invite';
+import AppDialogHost from '@/components/common/AppDialogHost.vue';
+import { useConfigStore } from '@/stores/config';
+import { useAuthStore } from '@/stores/auth';
+import { canRenderPurchaseUi } from '@/utils/purchase-guard';
+import { PAGE_ROUTES } from '@/utils/constants';
+import { createShareMessage, createShareTimeline, enableShareMenu, withQuery } from '@/utils/share';
+import { ensureLoggedIn } from '@/utils/login-guard';
 const code = ref('AI2026');
 const invited = ref(0);
-const shareTitle = ref('邀请你一起使用 AI 创作工坊');
+const shareTitle = ref('邀请你一起使用 AI艺术生成工坊');
 const sharePath = ref('');
+const configStore = useConfigStore();
+const authStore = useAuthStore();
 const rewards = [
   { title: '好友首次注册成功', points: 200 },
   { title: '好友开通会员', points: 500 },
   { title: '好友每日活跃奖励', points: 50 }
 ];
+const purchaseEnabled = computed(() => canRenderPurchaseUi(configStore.publicConfigReady, configStore.publicConfig));
+const visibleRewards = computed(() => rewards.filter((_, index) => purchaseEnabled.value || index !== 1));
+const inviteSharePath = computed(() => sharePath.value || withQuery(PAGE_ROUTES.invite, { inviteCode: code.value }));
 
-onShow(() => {
+onLoad((query) => {
+  const incomingInviteCode = resolveInviteCode(query);
+  if (incomingInviteCode) {
+    authStore.hydrate()
+      .then(async () => {
+        if (!authStore.isLoggedIn) {
+          await ensureLoggedIn({
+            title: '登录后接受邀请',
+            subtitle: '登录并授权手机号后，可绑定邀请关系并领取奖励。',
+            inviteCode: incomingInviteCode
+          });
+        }
+      })
+      .catch(() => {
+        ensureLoggedIn({
+          title: '登录后接受邀请',
+          subtitle: '登录并授权手机号后，可绑定邀请关系并领取奖励。',
+          inviteCode: incomingInviteCode
+        }).catch(() => undefined);
+      });
+  }
+});
+
+onShow(async () => {
+  enableShareMenu();
+  configStore.hydrate();
+  configStore.loadPublicConfig({ force: true }).catch(() => undefined);
+  await authStore.hydrate();
   loadInvite();
 });
+
+onShareAppMessage(() => createShareMessage({
+  title: shareTitle.value || '邀请你一起使用 AI艺术生成工坊',
+  path: inviteSharePath.value
+}));
+
+onShareTimeline(() => createShareTimeline({
+  title: shareTitle.value || '邀请你一起使用 AI艺术生成工坊',
+  path: inviteSharePath.value
+}));
 
 function loadInvite() {
   getInviteCode<Record<string, unknown>>()
@@ -73,6 +123,16 @@ function loadInvite() {
   getInviteRecords({ page: 1, pageSize: 1 }).catch(() => undefined);
 }
 
+function resolveInviteCode(query?: Record<string, unknown>) {
+  const direct = String(query?.inviteCode || query?.invite_code || '').trim();
+  if (direct) return direct;
+  const scene = String(query?.scene || '').trim();
+  if (!scene) return '';
+  const decoded = decodeURIComponent(scene);
+  const matched = decoded.match(/(?:^|[?&])inviteCode=([^&]+)/i);
+  return matched ? decodeURIComponent(matched[1]) : decoded;
+}
+
 function copyCode() {
   if (!code.value) {
     uni.showToast({ title: '请登录后获取邀请码', icon: 'none' });
@@ -84,13 +144,6 @@ function copyCode() {
   });
 }
 
-function inviteFriend() {
-  const content = sharePath.value ? `${shareTitle.value}\n${sharePath.value}` : code.value;
-  uni.setClipboardData({
-    data: content,
-    success: () => uni.showToast({ title: '邀请信息已复制', icon: 'none' })
-  });
-}
 </script>
 
 <style scoped lang="scss">

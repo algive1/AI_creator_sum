@@ -1,5 +1,5 @@
 import { FEATURE_KEYS } from '@/utils/constants';
-import { get, post } from './request';
+import { get, post, type RequestOptions } from './request';
 
 export interface ImageTaskPayload {
   featureKey?: string;
@@ -21,14 +21,15 @@ export interface ImageTaskPayload {
   optimizedPrompt?: string;
   negativePrompt?: string;
   platformWatermarkEnabled?: boolean;
+  billingSource?: 'auto' | 'points';
 }
 
 export function getImageModels<T = { list: unknown[] }>(featureKey: string = FEATURE_KEYS.image) {
   return get<T>('/public/model-tiers', { feature: featureKey }, { silent: true, cacheTtl: 60_000 });
 }
 
-export function createImageTask<T = Record<string, unknown>>(payload: ImageTaskPayload) {
-  return post<T>('/tasks/image', { ...payload, featureKey: payload.featureKey || FEATURE_KEYS.image }, { loading: '提交生图任务' });
+export function createImageTask<T = Record<string, unknown>>(payload: ImageTaskPayload, options: Omit<RequestOptions, 'url' | 'method' | 'data'> = {}) {
+  return post<T>('/tasks/image', { ...payload, featureKey: payload.featureKey || FEATURE_KEYS.image }, { loading: '提交生图任务', ...options });
 }
 
 export function optimizeImagePrompt<T = Record<string, unknown>>(payload: Record<string, unknown>) {

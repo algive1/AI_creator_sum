@@ -1,5 +1,7 @@
 import { defineStore } from 'pinia';
 import { bindPhone, getMeFull } from '@/api/user';
+import { post } from '@/api/request';
+import { useAuthStore } from '@/stores/auth';
 import { STORAGE_KEYS } from '@/utils/constants';
 
 interface UserState {
@@ -49,10 +51,16 @@ export const useUserStore = defineStore('user', {
         this.loading = false;
       }
     },
-    async bindPhoneByCode(code: string) {
-      const profile = await bindPhone<Record<string, unknown>>(code);
+    async bindPhoneByCode(code: string, token?: string) {
+      const profile = token
+        ? await post<Record<string, unknown>>('/users/me/phone', { code }, {
+          loading: true,
+          header: { Authorization: `Bearer ${token}` }
+        })
+        : await bindPhone<Record<string, unknown>>(code);
       this.profile = profile;
       await setStorageSafe(STORAGE_KEYS.profile, profile);
+      await useAuthStore().markPhoneBoundFromProfile(profile);
       return profile;
     },
     async clear() {

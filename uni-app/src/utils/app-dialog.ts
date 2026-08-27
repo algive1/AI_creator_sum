@@ -1,5 +1,7 @@
 import { reactive } from 'vue';
 import { PAGE_ROUTES } from './constants';
+import { useConfigStore } from '@/stores/config';
+import { shouldBlockPurchase } from './purchase-guard';
 
 const DIALOG_VISUAL_BASE = '/static/visuals/dialog';
 
@@ -21,6 +23,7 @@ export interface AppDialogOptions {
   content?: string;
   richContent?: string;
   image?: string;
+  hideVisual?: boolean;
   primaryLabel?: string;
   secondaryLabel?: string;
   minorLabel?: string;
@@ -78,11 +81,16 @@ export function clearAppDialogs() {
   if (appDialogState.current) closeCurrentAppDialog('close');
 }
 
-export function showMemberRequiredDialog(options: {
+export async function showMemberRequiredDialog(options: {
   title?: string;
   message?: string;
   source?: string;
 } = {}) {
+  const guard = await readPurchaseGuard();
+  if (guard.blocked) {
+    uni.showToast({ title: guard.message, icon: 'none' });
+    return Promise.resolve('close' as AppDialogResult);
+  }
   return showAppDialog({
     variant: 'member',
     image: '/static/visuals/member/member_crown_3d.png',
@@ -101,11 +109,21 @@ export function showMemberRequiredDialog(options: {
   });
 }
 
-export function showInsufficientPointsDialog(options: {
+export async function showInsufficientPointsDialog(options: {
   neededPoints?: number;
   currentPoints?: number;
   message?: string;
 } = {}) {
+  const guard = await readPurchaseGuard();
+  if (guard.blocked) {
+    return showAppDialog({
+      variant: 'generic',
+      title: '积分不足',
+      subtitle: guard.message,
+      primaryLabel: '知道了',
+      closable: true
+    });
+  }
   const lines: string[] = [];
   if (options.neededPoints) lines.push(`本次需要 ${options.neededPoints} 积分`);
   if (typeof options.currentPoints === 'number') lines.push(`当前还有 ${Math.max(0, options.currentPoints)} 积分`);
@@ -132,10 +150,83 @@ export function showInsufficientPointsDialog(options: {
   });
 }
 
-export function showHdSaveDialog(options: {
+export async function showFreeQuotaInsufficientDialog(options: {
+  message?: string;
+  requestedImages?: number;
+  dailyRemaining?: number;
+  totalRemaining?: number;
+  estimatedPointsCost?: number;
+  pointsCost?: number;
+  canUsePoints?: boolean;
+  allowPointRetry?: boolean;
+  membershipEnabled?: boolean;
+  purchaseEnabled?: boolean;
+} = {}) {
+  const guard = await readPurchaseGuard();
+  const purchaseAllowed = !guard.blocked && options.purchaseEnabled !== false;
+  const lines: string[] = [];
+  if (options.requestedImages) lines.push(`本次需要 ${options.requestedImages} 张`);
+  if (typeof options.dailyRemaining === 'number') lines.push(`今日剩余 ${Math.max(0, options.dailyRemaining)} 张`);
+  if (typeof options.totalRemaining === 'number') lines.push(`总剩余 ${Math.max(0, options.totalRemaining)} 张`);
+  const estimatedPointsCost = options.estimatedPointsCost ?? options.pointsCost;
+  if (estimatedPointsCost) lines.push(`使用积分预计消耗 ${estimatedPointsCost} 点`);
+  const subtitle = options.message || lines.join('，') || '免费生图额度不足，可以减少张数，或使用积分继续生成。';
+
+  if (options.canUsePoints && options.allowPointRetry !== false) {
+    return showAppDialog({
+      variant: 'points',
+      image: '/static/visuals/points/points_buy_3d.png',
+      title: '免费额度不足',
+      subtitle,
+      primaryLabel: '使用积分继续',
+      secondaryLabel: '减少张数',
+      closable: true,
+      closeOnPrimary: true,
+      closeOnSecondary: true
+    });
+  }
+
+  if (!purchaseAllowed) {
+    return showAppDialog({
+      variant: 'generic',
+      title: '免费额度不足',
+      subtitle: guard.blocked ? guard.message : subtitle,
+      primaryLabel: '知道了',
+      closable: true
+    });
+  }
+
+  return showAppDialog({
+    variant: 'member',
+    image: options.membershipEnabled !== false ? '/static/visuals/member/member_crown_3d.png' : '/static/visuals/points/points_buy_3d.png',
+    title: '免费额度不足',
+    subtitle,
+    primaryLabel: options.membershipEnabled !== false ? '开通会员领积分' : '购买积分继续',
+    secondaryLabel: '做任务赚积分',
+    minorLabel: '减少张数',
+    benefits: [
+      { label: '会员积分', sub: '开通后发放', image: `${DIALOG_VISUAL_BASE}/benefit-member-value.png` },
+      { label: '积分购买', sub: '立即到账', image: `${DIALOG_VISUAL_BASE}/benefit-points-buy.png` },
+      { label: '任务奖励', sub: '免费补充', image: `${DIALOG_VISUAL_BASE}/benefit-points-ad.png` }
+    ],
+    onPrimary: () => {
+      uni.navigateTo({ url: options.membershipEnabled !== false ? PAGE_ROUTES.member : PAGE_ROUTES.points });
+    },
+    onSecondary: () => {
+      uni.navigateTo({ url: PAGE_ROUTES.pointsAd });
+    }
+  });
+}
+
+export async function showHdSaveDialog(options: {
   costPoints?: number;
   isMember?: boolean;
 } = {}) {
+  const guard = await readPurchaseGuard();
+  if (guard.blocked && !options.isMember) {
+    uni.showToast({ title: guard.message, icon: 'none' });
+    return Promise.resolve('close');
+  }
   return showAppDialog({
     variant: 'saveHd',
     image: `${DIALOG_VISUAL_BASE}/benefit-hd-save.png`,
@@ -152,9 +243,19 @@ export function showHdSaveDialog(options: {
       { label: '原图保存', sub: '便于编辑', image: `${DIALOG_VISUAL_BASE}/benefit-original-file.png` }
     ],
     onPrimary: () => {
+      if (guard.blocked) return;
       if (!options.isMember) uni.navigateTo({ url: PAGE_ROUTES.member });
     }
   });
+}
+
+async function readPurchaseGuard() {
+  const configStore = useConfigStore();
+  if (!configStore.publicConfigReady) {
+    configStore.hydrate();
+    await configStore.loadPublicConfig({ force: true }).catch(() => undefined);
+  }
+  return shouldBlockPurchase(configStore.publicConfig);
 }
 
 function pumpDialogQueue() {

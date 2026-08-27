@@ -100,12 +100,30 @@ function loadHistory() {
       history.value = list.map((item) => ({
         id: String(item.id || item.createdAt || item.created_at),
         title: String(item.title || '观看广告'),
-        time: String(item.createdAt || item.created_at || ''),
+        time: formatAdDateTime(String(item.createdAt || item.created_at || '')),
         points: Math.max(0, Number(item.amount || item.points || 0)),
         status: '已到账'
       }));
     })
     .catch(() => { history.value = []; });
+}
+
+function formatAdDateTime(value?: string | null) {
+  if (!value) return '';
+  const raw = String(value).trim().replace(/\//g, '-');
+  const hasTimeZone = /(?:z|[+-]\d{2}:?\d{2})$/i.test(raw);
+  const match = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2})(?::(\d{1,2})(?::(\d{1,2}))?)?)?/);
+  if (match && !hasTimeZone) {
+    const [, year, month, day, hour = '0', minute = '0', second = '0'] = match;
+    return `${year}-${padDateTime(month)}-${padDateTime(day)} ${padDateTime(hour)}:${padDateTime(minute)}:${padDateTime(second)}`;
+  }
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return String(value);
+  return `${date.getFullYear()}-${padDateTime(date.getMonth() + 1)}-${padDateTime(date.getDate())} ${padDateTime(date.getHours())}:${padDateTime(date.getMinutes())}:${padDateTime(date.getSeconds())}`;
+}
+
+function padDateTime(value: string | number) {
+  return String(value).padStart(2, '0');
 }
 
 async function watchAd() {

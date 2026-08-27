@@ -1,5 +1,5 @@
 <template>
-  <view class="tabbar" :style="tabbarStyle">
+  <view v-if="showTabbar" class="tabbar" :style="tabbarStyle">
     <button
       v-for="item in tabs"
       :key="item.path"
@@ -33,30 +33,34 @@ type TabItem = {
 const fallbackTabs: TabItem[] = [
   { text: '首页', path: PAGE_ROUTES.home, icon: 'home' },
   { text: '灵感', path: PAGE_ROUTES.inspiration, icon: 'spark' },
-  { text: '漫剧', path: PAGE_ROUTES.comic, icon: 'create', center: true },
-  { text: '记录', path: PAGE_ROUTES.history, icon: 'record' },
+  { text: '工具', path: PAGE_ROUTES.tools, icon: 'tools' },
+  { text: '作品库', path: PAGE_ROUTES.history, icon: 'record' },
   { text: '我的', path: PAGE_ROUTES.profile, icon: 'mine' }
 ];
-const TAB_ICON_BASE = '/static/icons/tabbar';
+const TAB_ICON_BASE = '/static/tabbar';
+const TOOL_ICON_BASE = '/static/icons/tabbar';
 const config = useConfigStore();
 const pathIconMap: Record<string, string> = {
   [PAGE_ROUTES.home]: 'home',
   [PAGE_ROUTES.inspiration]: 'spark',
+  [PAGE_ROUTES.tools]: 'tools',
   [PAGE_ROUTES.comic]: 'create',
   [PAGE_ROUTES.history]: 'record',
   [PAGE_ROUTES.profile]: 'mine'
 };
 const localTabIconMap: Record<string, { iconPath: string; selectedIconPath: string }> = {
-  home: { iconPath: `${TAB_ICON_BASE}/tab-home.svg`, selectedIconPath: `${TAB_ICON_BASE}/tab-home-active.svg` },
-  spark: { iconPath: `${TAB_ICON_BASE}/tab-spark.svg`, selectedIconPath: `${TAB_ICON_BASE}/tab-spark-active.svg` },
-  inspiration: { iconPath: `${TAB_ICON_BASE}/tab-spark.svg`, selectedIconPath: `${TAB_ICON_BASE}/tab-spark-active.svg` },
-  create: { iconPath: `${TAB_ICON_BASE}/tab-create.svg`, selectedIconPath: `${TAB_ICON_BASE}/tab-create-active.svg` },
-  film: { iconPath: `${TAB_ICON_BASE}/tab-create.svg`, selectedIconPath: `${TAB_ICON_BASE}/tab-create-active.svg` },
-  comic: { iconPath: `${TAB_ICON_BASE}/tab-create.svg`, selectedIconPath: `${TAB_ICON_BASE}/tab-create-active.svg` },
-  record: { iconPath: `${TAB_ICON_BASE}/tab-record.svg`, selectedIconPath: `${TAB_ICON_BASE}/tab-record-active.svg` },
-  history: { iconPath: `${TAB_ICON_BASE}/tab-record.svg`, selectedIconPath: `${TAB_ICON_BASE}/tab-record-active.svg` },
-  mine: { iconPath: `${TAB_ICON_BASE}/tab-mine.svg`, selectedIconPath: `${TAB_ICON_BASE}/tab-mine-active.svg` },
-  profile: { iconPath: `${TAB_ICON_BASE}/tab-mine.svg`, selectedIconPath: `${TAB_ICON_BASE}/tab-mine-active.svg` }
+  home: { iconPath: `${TAB_ICON_BASE}/home.png`, selectedIconPath: `${TAB_ICON_BASE}/home-active.png` },
+  spark: { iconPath: `${TAB_ICON_BASE}/spark.png`, selectedIconPath: `${TAB_ICON_BASE}/spark-active.png` },
+  inspiration: { iconPath: `${TAB_ICON_BASE}/spark.png`, selectedIconPath: `${TAB_ICON_BASE}/spark-active.png` },
+  tools: { iconPath: `${TOOL_ICON_BASE}/tab-tools.svg`, selectedIconPath: `${TOOL_ICON_BASE}/tab-tools-active.svg` },
+  tool: { iconPath: `${TOOL_ICON_BASE}/tab-tools.svg`, selectedIconPath: `${TOOL_ICON_BASE}/tab-tools-active.svg` },
+  create: { iconPath: `${TAB_ICON_BASE}/comic.png`, selectedIconPath: `${TAB_ICON_BASE}/comic-active.png` },
+  film: { iconPath: `${TAB_ICON_BASE}/comic.png`, selectedIconPath: `${TAB_ICON_BASE}/comic-active.png` },
+  comic: { iconPath: `${TAB_ICON_BASE}/comic.png`, selectedIconPath: `${TAB_ICON_BASE}/comic-active.png` },
+  record: { iconPath: `${TAB_ICON_BASE}/history.png`, selectedIconPath: `${TAB_ICON_BASE}/history-active.png` },
+  history: { iconPath: `${TAB_ICON_BASE}/history.png`, selectedIconPath: `${TAB_ICON_BASE}/history-active.png` },
+  mine: { iconPath: `${TAB_ICON_BASE}/profile.png`, selectedIconPath: `${TAB_ICON_BASE}/profile-active.png` },
+  profile: { iconPath: `${TAB_ICON_BASE}/profile.png`, selectedIconPath: `${TAB_ICON_BASE}/profile-active.png` }
 };
 const pathTextMap: Record<string, string> = fallbackTabs.reduce((map, item) => {
   map[item.path] = item.text;
@@ -66,10 +70,11 @@ const cachedTabs = ref<TabItem[]>(readCachedTabs());
 
 const configuredTabs = computed(() => readConfiguredTabs(config.publicConfig));
 const tabs = computed(() => {
-  if (isValidTabConfig(configuredTabs.value)) return configuredTabs.value;
-  if (isValidTabConfig(cachedTabs.value)) return cachedTabs.value;
+  if (isValidTabConfig(configuredTabs.value)) return withRequiredToolsTab(configuredTabs.value).slice(0, 5);
+  if (isValidTabConfig(cachedTabs.value)) return withRequiredToolsTab(cachedTabs.value).slice(0, 5);
   return fallbackTabs;
 });
+const showTabbar = computed(() => config.publicConfigReady);
 
 const activePath = computed(() => {
   const pages = getCurrentPages();
@@ -84,7 +89,7 @@ watch(configuredTabs, (items) => {
   try {
     uni.setStorageSync(STORAGE_KEYS.navigation, items);
   } catch {
-    // 导航缓存失败时保留当前内存态，默认导航仍可兜底。
+    // Navigation cache is only a warm fallback; runtime config remains authoritative.
   }
 }, { immediate: true });
 
@@ -107,14 +112,23 @@ function normalizeTab(item: unknown): TabItem | null {
   if (!raw || raw.enabled === false || raw.visible === false) return null;
   const path = normalizePath(raw.path || raw.pagePath || raw.url || raw.route || raw.value || raw.key || raw.id);
   if (!path) return null;
+  const configuredIcon = firstString(raw.icon);
+  const iconKey = firstString(raw.iconKey, isImageUrl(configuredIcon) ? '' : configuredIcon, pathIconMap[path], 'home');
+  const iconPath = firstString(raw.iconPath, raw.iconUrl, raw.defaultIconPath, raw.defaultIconUrl, raw.iconImage, configuredIcon);
   return {
-    text: String(raw.text || raw.title || raw.name || raw.label || pathTextMap[path] || ''),
+    text: normalizeTabText(path, raw.text || raw.title || raw.name || raw.label || pathTextMap[path] || ''),
     path,
-    icon: normalizeIconKey(raw.iconKey || (isImageUrl(raw.icon) ? '' : raw.icon) || pathIconMap[path] || 'home'),
-    iconPath: normalizeIconUrl(raw.iconPath || raw.iconUrl || raw.defaultIconPath || raw.defaultIconUrl || raw.iconImage || raw.icon),
+    icon: normalizeIconKey(iconKey),
+    iconPath: normalizeIconUrl(iconPath),
     selectedIconPath: normalizeIconUrl(raw.selectedIconPath || raw.activeIconPath || raw.selectedIconUrl || raw.activeIconUrl),
-    center: Boolean(raw.center || raw.primary || path === PAGE_ROUTES.comic)
+    center: Boolean(raw.center || raw.primary)
   };
+}
+
+function normalizeTabText(path: string, value: unknown) {
+  const text = String(value || '');
+  if (path === PAGE_ROUTES.history && ['资产', '记录'].includes(text)) return pathTextMap[path] || '作品库';
+  return text;
 }
 
 function getIconUrl(item: TabItem) {
@@ -141,6 +155,24 @@ function isValidTabConfig(items: TabItem[]) {
   return items.length >= 2;
 }
 
+function withRequiredToolsTab(items: TabItem[]) {
+  if (!shouldInjectToolsTab() || items.some(item => item.path === PAGE_ROUTES.tools)) return items;
+  const next = items.filter(item => item.path !== PAGE_ROUTES.comic);
+  const insertAt = Math.min(2, next.length);
+  return [
+    ...next.slice(0, insertAt),
+    fallbackTabs[2],
+    ...next.slice(insertAt)
+  ];
+}
+
+function shouldInjectToolsTab() {
+  const root = asRecord(config.publicConfig);
+  const features = asRecord(root.features);
+  const toolsConfig = asRecord(root.toolsConfig);
+  return toolsConfig.enabled !== false && features.tools !== false;
+}
+
 function normalizePath(value: unknown) {
   const raw = String(value || '').trim();
   if (!raw) return '';
@@ -149,6 +181,8 @@ function normalizePath(value: unknown) {
     index: PAGE_ROUTES.home,
     inspiration: PAGE_ROUTES.inspiration,
     spark: PAGE_ROUTES.inspiration,
+    tools: PAGE_ROUTES.tools,
+    tool: PAGE_ROUTES.tools,
     comic: PAGE_ROUTES.comic,
     manga: PAGE_ROUTES.comic,
     history: PAGE_ROUTES.history,
@@ -161,17 +195,21 @@ function normalizePath(value: unknown) {
 }
 
 function normalizeIconUrl(value: unknown) {
-  const raw = String(value || '').trim();
+  if (typeof value !== 'string') return '';
+  const raw = value.trim();
+  if (!raw || raw === '[object Object]') return '';
   return isImageUrl(raw) ? raw : '';
 }
 
 function normalizeIconKey(value: unknown) {
-  const raw = String(value || '').trim();
+  const raw = firstString(value);
   const aliasMap: Record<string, string> = {
     index: 'home',
     inspiration: 'spark',
     idea: 'spark',
     ideas: 'spark',
+    tools: 'tools',
+    tool: 'tools',
     comic: 'create',
     manga: 'create',
     film: 'create',
@@ -185,12 +223,22 @@ function normalizeIconKey(value: unknown) {
 }
 
 function isImageUrl(value: unknown) {
-  const raw = String(value || '').trim();
+  if (typeof value !== 'string') return false;
+  const raw = value.trim();
   return /^https?:\/\//i.test(raw) || raw.startsWith('/');
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? value as Record<string, unknown> : {};
+}
+
+function firstString(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value !== 'string') continue;
+    const text = value.trim();
+    if (text && text !== '[object Object]') return text;
+  }
+  return '';
 }
 </script>
 
@@ -276,7 +324,8 @@ function asRecord(value: unknown): Record<string, unknown> {
   background: #fff;
 }
 
-.spark .icon-core {
+.spark .icon-core,
+.tools .icon-core {
   width: 22rpx;
   height: 22rpx;
   border-radius: 4rpx;

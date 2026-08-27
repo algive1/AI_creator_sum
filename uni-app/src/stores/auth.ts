@@ -54,15 +54,33 @@ export const useAuthStore = defineStore('auth', {
         this.refreshToken ? setStorage(STORAGE_KEYS.refreshToken, this.refreshToken) : Promise.resolve(),
       ]);
     },
+    async markPhoneBoundFromProfile(profile?: Record<string, unknown> | null) {
+      const profileUser = profile && typeof profile === 'object' && profile.user && typeof profile.user === 'object'
+        ? profile.user as Record<string, unknown>
+        : {};
+      const nextUser = {
+        ...(this.user || {}),
+        ...profileUser,
+        phoneBound: true,
+      };
+      this.user = nextUser;
+      await setStorage(STORAGE_KEYS.user, nextUser);
+    },
     async loginWithWechat(inviteCode?: string) {
       const payload = await loginByUniCode(inviteCode);
       await this.applyLogin(payload);
       return payload;
     },
+    async loginWithWechatTemporary(inviteCode?: string) {
+      return loginByUniCode(inviteCode);
+    },
     async loginWithDev(inviteCode?: string) {
       const payload = await devLogin(inviteCode);
       await this.applyLogin(payload);
       return payload;
+    },
+    async loginWithDevTemporary(inviteCode?: string) {
+      return devLogin(inviteCode);
     },
     async clearSession() {
       this.token = '';

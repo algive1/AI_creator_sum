@@ -3,6 +3,6 @@ const apiBaseURL = String(import.meta.env.VITE_API_BASE_URL || '').trim().replac
 export const prodEnv = {
   name: 'production',
   baseURL: apiBaseURL,
-  timeout: 15000,
+  timeout: 60000,
   devLoginCode: ''
 } as const;

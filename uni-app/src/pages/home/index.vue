@@ -1,5 +1,5 @@
 <template>
-  <view class="screen home-page">
+  <view class="screen home-page" :class="{ 'home-page--booting': bootingHomeRedirect }">
     <AppTopbar class="app-nav-root" transparent>
       <template #left>
         <view class="home-nav-title">{{ appName }}</view>
@@ -81,7 +81,12 @@
 
     <view class="section-head">
       <view class="section-title">灵感推荐<text>✨</text></view>
-      <button class="section-refresh" :class="{ loading: loadingInspirations }" :disabled="loadingInspirations" @tap="refreshInspirations">
+      <button
+        class="section-refresh"
+        :class="{ loading: loadingInspirations, cycling: cyclingInspirations }"
+        :disabled="loadingInspirations"
+        @tap="refreshInspirations"
+      >
         <text>{{ loadingInspirations ? '刷新中' : '换一换' }}</text>
         <text class="refresh-icon"></text>
       </button>
@@ -94,7 +99,7 @@
           :key="item"
           class="inspiration-tab"
           :class="{ active: activeInspirationTab === item }"
-          @tap="activeInspirationTab = item"
+          @tap="setActiveInspirationTab(item)"
         >
           {{ item }}
         </button>
@@ -102,43 +107,31 @@
     </scroll-view>
 
     <view v-if="filteredInspirations.length" class="inspiration-grid">
-      <view class="inspiration-column">
+      <view v-for="(column, columnIndex) in inspirationColumns" :key="columnIndex" class="inspiration-column">
         <button
-          v-for="item in leftInspirations"
+          v-for="item in column"
           :key="item.id"
           class="inspiration-card"
           @tap="useInspiration(item)"
         >
           <view class="inspiration-art" :class="`theme-${item.theme}`">
-            <image v-if="item.cover" class="inspiration-cover" :src="item.cover" mode="aspectFill" lazy-load />
+            <image v-if="item.cover" class="inspiration-cover" :src="item.cover" mode="aspectFill" lazy-load :fade-show="false" />
             <view v-else class="inspiration-scene"></view>
             <view class="inspiration-badge">{{ item.tag }}</view>
             <view v-if="item.kind === 'video'" class="inspiration-play"></view>
-          </view>
-          <view class="inspiration-title">{{ item.title }}</view>
-          <view class="inspiration-meta">
-            <text>{{ item.author }}</text>
-            <text class="inspiration-like"><text class="flame"></text>{{ item.likes }}</text>
-          </view>
-        </button>
-      </view>
-      <view class="inspiration-column">
-        <button
-          v-for="item in rightInspirations"
-          :key="item.id"
-          class="inspiration-card"
-          @tap="useInspiration(item)"
-        >
-          <view class="inspiration-art" :class="`theme-${item.theme}`">
-            <image v-if="item.cover" class="inspiration-cover" :src="item.cover" mode="aspectFill" lazy-load />
-            <view v-else class="inspiration-scene"></view>
-            <view class="inspiration-badge">{{ item.tag }}</view>
-            <view v-if="item.kind === 'video'" class="inspiration-play"></view>
-          </view>
-          <view class="inspiration-title">{{ item.title }}</view>
-          <view class="inspiration-meta">
-            <text>{{ item.author }}</text>
-            <text class="inspiration-like"><text class="flame"></text>{{ item.likes }}</text>
+            <view class="inspiration-overlay">
+              <view class="inspiration-title">{{ item.title }}</view>
+              <view class="inspiration-bottom">
+                <view class="inspiration-source">
+                  <image v-if="item.avatar" class="inspiration-source-avatar" :src="item.avatar" mode="aspectFill" lazy-load />
+                  <text>{{ item.author }}</text>
+                </view>
+                <button class="inspiration-favorite" :class="{ active: item.isFavorited }" hover-class="none" @tap.stop="toggleFavorite(item)">
+                  <image :src="item.isFavorited ? '/static/icons/icon_favorite_filled.svg' : '/static/icons/icon_favorite_line.svg'" mode="aspectFit" />
+                  <text v-if="hasFavoriteCount(item.favoriteCount)">{{ item.favoriteText }}</text>
+                </button>
+              </view>
+            </view>
           </view>
         </button>
       </view>
@@ -148,15 +141,6 @@
       <text v-if="loadingInspirations" class="inline-spinner empty-spinner"></text>
       <view>{{ loadingInspirations ? '正在加载灵感...' : '暂无灵感内容' }}</view>
       <button @tap="refreshInspirations">重新加载</button>
-    </view>
-
-    <view v-if="filteredInspirations.length" class="load-state">
-      <view v-if="loadingInspirations" class="inline-loading">
-        <text class="inline-spinner small"></text>
-        <text>加载中...</text>
-      </view>
-      <text v-else-if="!hasMore">没有更多了</text>
-      <text v-else>继续下滑查看更多</text>
     </view>
 
     <button v-if="showMemberFloat" class="member-float" @tap="goMember">
@@ -178,6 +162,7 @@
     <TemplatePreviewSheet
       :template="previewTemplate"
       @close="previewTemplate = null"
+      @favorite="togglePreviewFavorite"
       @use="usePreviewTemplate"
     />
     <AppDialogHost class="app-dialog-host-root" />
@@ -187,12 +172,12 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { onPullDownRefresh, onReachBottom, onShow } from '@dcloudio/uni-app';
+import { onLoad, onPullDownRefresh, onReachBottom, onShareAppMessage, onShareTimeline, onShow } from '@dcloudio/uni-app';
 import AppTabBar from '@/components/common/AppTabBar.vue';
 import AppTopbar from '@/components/common/AppTopbar.vue';
 import AppDialogHost from '@/components/common/AppDialogHost.vue';
 import TemplatePreviewSheet from '@/components/business/TemplatePreviewSheet.vue';
-import { getInspirations, useTemplate as useContentTemplate } from '@/api/template';
+import { favoriteTemplate, getHomeInspirations, getTemplateCategories, unfavoriteTemplate, useTemplate as useContentTemplate } from '@/api/template';
 import { useAuthStore } from '@/stores/auth';
 import { useConfigStore } from '@/stores/config';
 import { useUserStore } from '@/stores/user';
@@ -200,11 +185,15 @@ import { PAGE_ROUTES, STORAGE_KEYS } from '@/utils/constants';
 import { isDevFallbackEnabled, warnDevFallback } from '@/utils/dev-fallback';
 import { normalizeBackendMediaUrl } from '@/utils/media-url';
 import { acceptLegalDocuments, getLegalDocuments } from '@/api/config';
-import { showAppDialog, showMemberRequiredDialog } from '@/utils/app-dialog';
+import { closeCurrentAppDialog, showAppDialog, showMemberRequiredDialog } from '@/utils/app-dialog';
 import type { CreativeTemplate } from '@/utils/mock';
 import { markAnnouncementRead, closeAnnouncement } from '@/api/announcements';
+import { homeEntryDisabledMessage, isHomeEntryMaintenanceMode, type HomeEntryKey } from '@/utils/home-entry';
+import { isPurchaseEnabled, showPurchaseUnavailable } from '@/utils/purchase-guard';
+import { createShareMessage, createShareTimeline, enableShareMenu } from '@/utils/share';
+import { ensureLoggedIn } from '@/utils/login-guard';
 
-type EntryKey = 'image' | 'video' | 'comic';
+type EntryKey = HomeEntryKey;
 
 interface EntryCard {
   key: EntryKey;
@@ -219,10 +208,14 @@ interface InspirationItem {
   title: string;
   author: string;
   likes: string;
+  favoriteCount?: number;
+  favoriteText?: string;
+  isFavorited?: boolean;
   category: string;
   tag: string;
   theme: string;
   kind: 'image' | 'video';
+  avatar?: string;
   cover?: string;
   mediaUrl?: string;
   prompt?: string;
@@ -261,7 +254,6 @@ interface LegalDocument {
 
 const LOCAL_HOME_BANNER = '/static/home/home_banner.jpg';
 const LOCAL_HOME_MEMBER_UPSELL = '/static/home/home_member_upsell.jpg';
-const DIALOG_VISUAL_BASE = '/static/visuals/dialog';
 const allEntryCards: EntryCard[] = [
   { key: 'image', image: '/static/home/home_entry_image.jpg', icon: '/static/icons/workbench_image.svg', title: 'AI生图', sub: '智能生成图片' },
   { key: 'video', image: '/static/home/home_entry_video.jpg', icon: '/static/icons/workbench_video.svg', title: 'AI视频', sub: '一键生成视频' },
@@ -269,23 +261,28 @@ const allEntryCards: EntryCard[] = [
 ];
 
 const fallbackInspirations: InspirationItem[] = [
-  { id: 'home_demo_comic', title: '治愈系少女日常', author: '糯米团子', likes: '12.3w', category: '漫画', tag: '漫画', theme: 'flower', kind: 'image', prompt: '治愈系少女日常，春日花园，国漫精致画风。' },
-  { id: 'home_demo_city', title: '未来城市科幻风', author: 'AI创作者', likes: '8.7w', category: '视频', tag: '视频', theme: 'neon', kind: 'video', prompt: '未来城市霓虹街道，跑车穿过雨夜，高级科幻短片。' },
-  { id: 'home_demo_cat', title: '可爱猫咪系列', author: '猫咪画室', likes: '6.4w', category: '漫画', tag: '漫画', theme: 'cat', kind: 'image', prompt: '可爱猫咪漫画角色，软萌表情，粉紫渐变背景。' },
-  { id: 'home_demo_landscape', title: '国风山水意境', author: '山河工作室', likes: '5.1w', category: '图片', tag: '图片', theme: 'landscape', kind: 'image', prompt: '国风山水意境，云雾山峰，淡雅高级插画。' },
-  { id: 'home_demo_wallpaper', title: '梦幻星空壁纸', author: '星屿小助手', likes: '4.8w', category: '壁纸', tag: '壁纸', theme: 'sky', kind: 'image', prompt: '梦幻星空壁纸，紫粉星云，柔和光感。' },
-  { id: 'home_demo_story', title: '异世界冒险开篇', author: '故事盒子', likes: '3.9w', category: '小说', tag: '小说', theme: 'story', kind: 'image', prompt: '异世界冒险开篇，少年打开发光古书，奇幻氛围。' }
+  { id: 'home_demo_comic', title: '治愈系少女日常', author: '@官方灵感', likes: '12.3w', category: '漫画', tag: '漫画', theme: 'flower', kind: 'image', prompt: '治愈系少女日常，春日花园，国漫精致画风。' },
+  { id: 'home_demo_city', title: '未来城市科幻风', author: '@官方灵感', likes: '8.7w', category: '视频', tag: '视频', theme: 'neon', kind: 'video', prompt: '未来城市霓虹街道，跑车穿过雨夜，高级科幻短片。' },
+  { id: 'home_demo_cat', title: '可爱猫咪系列', author: '@官方灵感', likes: '6.4w', category: '漫画', tag: '漫画', theme: 'cat', kind: 'image', prompt: '可爱猫咪漫画角色，软萌表情，粉紫渐变背景。' },
+  { id: 'home_demo_landscape', title: '国风山水意境', author: '@官方灵感', likes: '5.1w', category: '图片', tag: '图片', theme: 'landscape', kind: 'image', prompt: '国风山水意境，云雾山峰，淡雅高级插画。' },
+  { id: 'home_demo_wallpaper', title: '梦幻星空壁纸', author: '@官方灵感', likes: '4.8w', category: '壁纸', tag: '壁纸', theme: 'sky', kind: 'image', prompt: '梦幻星空壁纸，紫粉星云，柔和光感。' },
+  { id: 'home_demo_story', title: '异世界冒险开篇', author: '@官方灵感', likes: '3.9w', category: '小说', tag: '小说', theme: 'story', kind: 'image', prompt: '异世界冒险开篇，少年打开发光古书，奇幻氛围。' }
 ];
 
-const inspirationTabs = ['推荐', '漫画', '视频', '图片', '小说', '壁纸'];
+const fallbackInspirationTabs = ['漫画', '视频', '图片', '小说', '壁纸'];
 const authStore = useAuthStore();
 const configStore = useConfigStore();
 const userStore = useUserStore();
 const activeInspirationTab = ref('推荐');
+const inspirationCategoryTabs = ref<string[]>([]);
+
 const inspirations = ref<InspirationItem[]>([]);
 const previewTemplate = ref<CreativeTemplate | null>(null);
 const loadingInspirations = ref(false);
+const cyclingInspirations = ref(false);
 const pullRefreshing = ref(false);
+const favoritePending = ref<Record<string, boolean>>({});
+const pendingFavoriteId = ref('');
 const phoneBinding = ref(false);
 const hasMore = ref(true);
 const page = ref(1);
@@ -295,16 +292,24 @@ const entryImageErrors = ref<Record<string, boolean>>({});
 const popupDismissed = ref(false);
 const phonePromptDismissed = ref(false);
 const dialogFlowRunning = ref(false);
+const bootingHomeRedirect = ref(true);
+const shouldCheckLaunchRedirect = ref(true);
 
 const appName = computed(() => {
   const source = configStore.publicConfig || {};
-  return String(source.appName || source.siteName || 'AIGC生成艺术工坊');
+  return String(source.appName || source.siteName || 'AI艺术生成工坊');
 });
 const membershipEnabled = computed(() => configStore.publicConfig?.membershipEnabled !== false);
+const purchaseEnabled = computed(() => isPurchaseEnabled(configStore.publicConfig));
 const storyboardGenerateEnabled = computed(() => configStore.features.storyboardGenerate !== false);
-const entryCards = computed(() => allEntryCards.filter((item) => item.key !== 'comic' || storyboardGenerateEnabled.value));
-const showMemberFloat = computed(() => membershipEnabled.value && !userStore.isMember);
-const phoneBound = computed(() => Boolean(userStore.user?.phoneBound || userStore.user?.phone));
+const entryCards = computed(() => allEntryCards);
+const showMemberFloat = computed(() => configStore.publicConfigReady && purchaseEnabled.value && membershipEnabled.value && !userStore.isMember);
+const phoneBound = computed(() => Boolean(
+  userStore.user?.phoneBound
+  || userStore.user?.phone
+  || authStore.user?.phoneBound
+  || authStore.user?.phone
+));
 const visualAssets = computed(() => {
   const value = configStore.publicConfig?.visualAssets;
   return value && typeof value === 'object' ? value as Record<string, unknown> : {};
@@ -320,15 +325,37 @@ const homeAnnouncement = computed(() => {
   if (popup && typeof popup === 'object') return normalizeHomeAnnouncement(popup as Record<string, unknown>);
   return null;
 });
+const inspirationTabs = computed(() => ['推荐', ...uniqueTexts(inspirationCategoryTabs.value.length ? inspirationCategoryTabs.value : fallbackInspirationTabs)]);
 const filteredInspirations = computed(() => {
   return inspirations.value.filter((item) => tabMatches(item, activeInspirationTab.value));
 });
-const leftInspirations = computed(() => filteredInspirations.value.filter((_, index) => index % 2 === 0));
-const rightInspirations = computed(() => filteredInspirations.value.filter((_, index) => index % 2 === 1));
+const inspirationColumns = computed(() => {
+  const columns: InspirationItem[][] = [[], []];
+  filteredInspirations.value.forEach((item, index) => {
+    columns[index % 2].push(item);
+  });
+  return columns;
+});
+
+onLoad((query) => {
+  pendingFavoriteId.value = String(query?.favoriteId || '');
+});
 
 onShow(() => {
+  enableShareMenu();
+  bootingHomeRedirect.value = false;
   refreshHomePage(!inspirations.value.length).catch(() => undefined);
 });
+
+onShareAppMessage(() => createShareMessage({
+  title: 'AI艺术生成工坊，一键生成图片和视频',
+  path: PAGE_ROUTES.home
+}));
+
+onShareTimeline(() => createShareTimeline({
+  title: 'AI艺术生成工坊，一键生成图片和视频',
+  path: PAGE_ROUTES.home
+}));
 
 onPullDownRefresh(() => {
   pullRefreshing.value = true;
@@ -338,21 +365,98 @@ onPullDownRefresh(() => {
   });
 });
 
+onReachBottom(() => {
+  loadInspirations(false);
+});
+
 async function refreshHomePage(reloadInspirations: boolean, force = false) {
   configStore.hydrate();
-  await authStore.hydrate();
-  await userStore.hydrate();
+  const authHydrated = authStore.hydrate().catch(() => undefined);
+  const userHydrated = userStore.hydrate().catch(() => undefined);
+
+  const configPromise = configStore.loadPublicConfig({ force: true }).catch(() => undefined);
+  const configLoaded = await Promise.race([configPromise.then(() => true), delay(1200).then(() => false)]);
+  if (configLoaded && shouldCheckLaunchRedirect.value) {
+    shouldCheckLaunchRedirect.value = false;
+    if (redirectToConfiguredLaunchTab()) return;
+  }
+  await Promise.all([authHydrated, userHydrated]);
+  await configPromise;
+  if (!configLoaded && shouldCheckLaunchRedirect.value) {
+    shouldCheckLaunchRedirect.value = false;
+    if (redirectToConfiguredLaunchTab()) return;
+  }
+  bootingHomeRedirect.value = false;
 
   const homePromise = configStore.loadHomeData({ force });
 
   await Promise.all([
-    configStore.loadPublicConfig({ force }).catch(() => undefined),
     homePromise.catch(() => undefined),
     authStore.isLoggedIn ? userStore.loadFullProfile().catch(() => undefined) : Promise.resolve(),
+    loadInspirationCategories(force).catch(() => undefined),
     reloadInspirations ? loadInspirations(true).catch(() => undefined) : Promise.resolve()
   ]);
 
   runHomeDialogFlow().catch(() => undefined);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function redirectToConfiguredLaunchTab() {
+  const launchPath = firstConfiguredTabPath(configStore.publicConfig);
+  if (!launchPath || launchPath === PAGE_ROUTES.home) return false;
+  if (!isKnownTabPage(launchPath)) return false;
+  uni.reLaunch({ url: launchPath });
+  return true;
+}
+
+function firstConfiguredTabPath(sourceConfig: unknown) {
+  const root = asRecord(sourceConfig);
+  const navigation = asRecord(root.navigation);
+  const candidates = [root.tabBar, root.bottomNav, root.navTabs, navigation.tabBar, navigation.bottom, navigation.tabs];
+  const source = candidates.find(Array.isArray);
+  if (!Array.isArray(source)) return '';
+  for (const item of source) {
+    const path = normalizeRoute(asRecord(item).path || asRecord(item).pagePath || asRecord(item).url || asRecord(item).route);
+    if (path) return path;
+  }
+  return '';
+}
+
+function normalizeRoute(value: unknown) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const aliasMap: Record<string, string> = {
+    home: PAGE_ROUTES.home,
+    index: PAGE_ROUTES.home,
+    inspiration: PAGE_ROUTES.inspiration,
+    spark: PAGE_ROUTES.inspiration,
+    comic: PAGE_ROUTES.comic,
+    manga: PAGE_ROUTES.comic,
+    history: PAGE_ROUTES.history,
+    records: PAGE_ROUTES.history,
+    profile: PAGE_ROUTES.profile,
+    mine: PAGE_ROUTES.profile
+  };
+  if (aliasMap[raw]) return aliasMap[raw];
+  return raw.startsWith('/') ? raw : `/${raw}`;
+}
+
+function isKnownTabPage(path: string) {
+  const knownTabPages: string[] = [
+    PAGE_ROUTES.home,
+    PAGE_ROUTES.inspiration,
+    PAGE_ROUTES.comic,
+    PAGE_ROUTES.history,
+    PAGE_ROUTES.profile
+  ];
+  return knownTabPages.includes(path);
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' ? value as Record<string, unknown> : {};
 }
 
 async function runHomeDialogFlow() {
@@ -369,11 +473,19 @@ async function runHomeDialogFlow() {
 
 async function maybeShowAgreementDialog() {
   const legalRequired = (configStore.homeData?.legalRequired || {}) as Record<string, any>;
+  const serverCheckedAgreement = authStore.isLoggedIn && typeof legalRequired.required === 'boolean';
   const serverRequiresAgreement = authStore.isLoggedIn && Boolean(legalRequired.required);
   const docs = await loadLegalDocumentsForDialog();
   const signature = legalSignature(docs, legalRequired);
-  const localSignature = String(uni.getStorageSync(STORAGE_KEYS.legalConsent) || '');
-  if (!serverRequiresAgreement && localSignature === signature) return;
+  if (hasStoredLegalConsent(signature)) {
+    if (serverRequiresAgreement) syncLegalConsentToServer(docs, 'first_open').catch(() => undefined);
+    markHomeLegalAccepted();
+    return;
+  }
+  if (serverCheckedAgreement && !serverRequiresAgreement) {
+    rememberLegalConsent(signature);
+    return;
+  }
 
   await showAppDialog({
     variant: 'agreement',
@@ -385,15 +497,11 @@ async function maybeShowAgreementDialog() {
     secondaryLabel: '查看完整协议',
     closable: false,
     maskClosable: false,
-    closeOnSecondary: true,
     onPrimary: async () => {
       if (authStore.isLoggedIn && docs.length) {
-        await acceptLegalDocuments(
-          docs.map((item) => ({ docType: item.docType, version: item.version })),
-          'first_open'
-        );
+        await syncLegalConsentToServer(docs, 'first_open');
       }
-      uni.setStorageSync(STORAGE_KEYS.legalConsent, signature);
+      rememberLegalConsent(signature);
     },
     onSecondary: () => {
       uni.navigateTo({ url: PAGE_ROUTES.agreement });
@@ -401,25 +509,49 @@ async function maybeShowAgreementDialog() {
   });
 }
 
+function hasStoredLegalConsent(signature: string) {
+  return Boolean(signature && String(uni.getStorageSync(STORAGE_KEYS.legalConsent) || '') === signature);
+}
+
+function rememberLegalConsent(signature: string) {
+  if (signature) uni.setStorageSync(STORAGE_KEYS.legalConsent, signature);
+  markHomeLegalAccepted();
+}
+
+function markHomeLegalAccepted() {
+  if (!configStore.homeData) return;
+  configStore.homeData = {
+    ...configStore.homeData,
+    complianceRequired: false,
+    legalRequired: { required: false, missing: [] },
+  };
+}
+
+function syncLegalConsentToServer(docs: LegalDocument[], scene: string) {
+  if (!authStore.isLoggedIn || !docs.length) return Promise.resolve();
+  return acceptLegalDocuments(
+    docs.map((item) => ({ docType: item.docType, version: item.version })),
+    scene
+  );
+}
+
 async function maybeShowPhoneDialog() {
   if (!authStore.isLoggedIn || phoneBound.value || phonePromptDismissed.value) return;
   await showAppDialog({
     variant: 'phone',
-    image: `${DIALOG_VISUAL_BASE}/benefit-support-contact.png`,
+    hideVisual: true,
     title: '绑定手机号',
     subtitle: '用于订单通知、生成结果提醒、售后联系和账号安全验证。',
     primaryLabel: phoneBinding.value ? '绑定中' : '授权手机号',
     secondaryLabel: '暂不绑定',
     primaryOpenType: 'getPhoneNumber',
-    benefits: [
-      { label: '订单通知', sub: '充值开通可追踪', image: `${DIALOG_VISUAL_BASE}/benefit-order-notice.png` },
-      { label: '结果提醒', sub: '生成完成不错过', image: `${DIALOG_VISUAL_BASE}/benefit-result-notice.png` },
-      { label: '售后联系', sub: '问题处理更快', image: `${DIALOG_VISUAL_BASE}/benefit-support-contact.png` }
-    ],
     onGetPhoneNumber: async (event) => {
       const ok = await handleGetPhoneNumber(event);
-      if (ok) phonePromptDismissed.value = true;
-      return ok;
+      if (ok) {
+        phonePromptDismissed.value = true;
+        closeCurrentAppDialog('phone');
+      }
+      return false;
     },
     onSecondary: () => {
       phonePromptDismissed.value = true;
@@ -438,7 +570,7 @@ async function maybeShowAnnouncementDialog() {
   markLocalAnnouncementPopupSeen(announcement);
   await showAppDialog({
     variant: 'announcement',
-    image: '/static/home/notice_megaphone.png',
+    hideVisual: true,
     title: announcement.title || '公告',
     richContent: announcement.content || '暂无公告内容',
     primaryLabel: '我知道了',
@@ -485,7 +617,23 @@ function agreementSummary(docs: LegalDocument[], legalRequired: Record<string, a
       ? legalRequired.missing.map((item: any) => `${item.title || '协议'} v${item.version || ''}`)
       : [];
   const list = names.length ? names : ['用户协议', '隐私政策', 'AI 内容规则'];
-  return `<p>请确认你已阅读并同意以下内容：</p><ul>${list.map((item) => `<li>${item}</li>`).join('')}</ul><p>平台会依据协议处理账号、积分、会员、作品保存和内容合规相关事项。</p>`;
+  const items = list
+    .map((item) => `<p style="margin:6px 0;text-align:center;color:#263348;font-weight:700;">${escapeRichText(item)}</p>`)
+    .join('');
+  return `<div style="text-align:center;"><p style="margin:0 0 10px;color:#1f2b3d;font-weight:800;">继续使用前请先同意以下协议</p>${items}<p style="margin:12px 0 0;color:#4f5d72;line-height:1.65;">同意后即可进入小程序，完整内容可随时在“我的-用户协议”查看。</p></div>`;
+}
+
+function escapeRichText(value: string) {
+  return String(value).replace(/[&<>"']/g, (char) => {
+    const map: Record<string, string> = {
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;'
+    };
+    return map[char] || char;
+  });
 }
 
 function closeHomeAnnouncement(announcement: HomeAnnouncement) {
@@ -496,15 +644,15 @@ function closeHomeAnnouncement(announcement: HomeAnnouncement) {
   closeAnnouncement(Number(announcement.id)).catch(() => undefined);
 }
 
-onReachBottom(() => {
-  loadInspirations(false);
-});
-
 function goCreate() {
-  uni.navigateTo({ url: `${PAGE_ROUTES.aiImage}?type=${encodeURIComponent('文生图')}` });
+  goEntry('image');
 }
 
 function goEntry(key: EntryKey) {
+  if (isHomeEntryMaintenanceMode(configStore.publicConfig, key)) {
+    showHomeEntryMaintenanceMessage(key);
+    return;
+  }
   if (key === 'image') {
     uni.navigateTo({ url: `${PAGE_ROUTES.aiImage}?type=${encodeURIComponent('文生图')}` });
     return;
@@ -520,7 +668,20 @@ function goEntry(key: EntryKey) {
   uni.navigateTo({ url: PAGE_ROUTES.comic });
 }
 
+function showHomeEntryMaintenanceMessage(key: EntryKey) {
+  uni.showModal({
+    title: '温馨提示',
+    content: homeEntryDisabledMessage(configStore.publicConfig, key),
+    showCancel: false,
+    confirmText: '知道了'
+  });
+}
+
 function goMember() {
+  if (!purchaseEnabled.value) {
+    showPurchaseUnavailable(configStore.publicConfig);
+    return;
+  }
   if (!membershipEnabled.value) {
     uni.showToast({ title: '会员功能已关闭', icon: 'none' });
     return;
@@ -561,8 +722,10 @@ function requestErrorText(error: unknown, fallback: string) {
   return message ? message.slice(0, 60) : fallback;
 }
 
-function refreshInspirations() {
-  loadInspirations(true);
+async function refreshInspirations() {
+  if (loadingInspirations.value) return;
+  playInspirationRefreshMotion();
+  await loadInspirations(true);
 }
 
 function visualAssetSource(localKey: string, configKey: string, fallback: string) {
@@ -597,13 +760,13 @@ async function loadInspirations(reset: boolean) {
   }
   loadingInspirations.value = true;
   try {
-    const res = await getInspirations<{ list?: Record<string, unknown>[]; total?: number; hasMore?: boolean }>({
+    const res = await getHomeInspirations<{ list?: Record<string, unknown>[]; total?: number; hasMore?: boolean; fallback?: boolean }>({
       page: page.value,
       pageSize
     });
     const list = Array.isArray(res.list) ? res.list : [];
     if (!list.length && isDevFallbackEnabled && reset) {
-      warnDevFallback('home-inspirations', 'GET /templates/inspirations returned empty list');
+      warnDevFallback('home-inspirations', 'GET /templates/home-inspirations returned empty list');
       inspirations.value = fallbackInspirations;
       hasMore.value = false;
       return;
@@ -616,6 +779,7 @@ async function loadInspirations(reset: boolean) {
     const next = list.map((item, index) => normalizeInspiration(item, (page.value - 1) * pageSize + index));
     const merged = reset ? next : mergeInspirations(inspirations.value, next);
     inspirations.value = merged;
+    consumePendingFavorite();
     page.value += 1;
     const total = Number(res.total || 0);
     hasMore.value = typeof res.hasMore === 'boolean'
@@ -625,7 +789,7 @@ async function loadInspirations(reset: boolean) {
         : next.length >= pageSize && (!reset || merged.length > next.length);
   } catch {
     if (isDevFallbackEnabled && reset) {
-      warnDevFallback('home-inspirations', 'GET /templates/inspirations failed');
+      warnDevFallback('home-inspirations', 'GET /templates/home-inspirations failed');
       inspirations.value = fallbackInspirations;
       hasMore.value = false;
       return;
@@ -635,6 +799,32 @@ async function loadInspirations(reset: boolean) {
   } finally {
     loadingInspirations.value = false;
   }
+}
+
+async function loadInspirationCategories(force = false) {
+  if (!force && inspirationCategoryTabs.value.length) return;
+  try {
+    const res = await getTemplateCategories<{ list?: Record<string, unknown>[] }>();
+    const list = Array.isArray(res.list) ? res.list : [];
+    const names = uniqueTexts(list.map((item) => String(item.name || item.category || item.categoryName || '').trim()).filter(Boolean));
+    inspirationCategoryTabs.value = names.length ? names : fallbackInspirationTabs;
+  } catch {
+    inspirationCategoryTabs.value = fallbackInspirationTabs;
+  }
+  if (!inspirationTabs.value.includes(activeInspirationTab.value)) {
+    setActiveInspirationTab('推荐');
+  }
+}
+
+function setActiveInspirationTab(tab: string) {
+  activeInspirationTab.value = tab;
+}
+
+function playInspirationRefreshMotion() {
+  cyclingInspirations.value = true;
+  setTimeout(() => {
+    cyclingInspirations.value = false;
+  }, 420);
 }
 
 function mergeInspirations(current: InspirationItem[], next: InspirationItem[]) {
@@ -664,10 +854,87 @@ function useInspiration(item: InspirationItem) {
     mode: item.kind === 'video' ? 'text2video' : 'text2img',
     category: item.category,
     duration: item.kind === 'video' ? '10s' : undefined,
+    favoriteCount: item.favoriteCount,
+    isFavorited: item.isFavorited,
     canUse: item.canUse !== false,
     canSave: item.canSave !== false && item.canUse !== false,
     lockReason: item.lockReason || ''
   };
+}
+
+function togglePreviewFavorite(template: CreativeTemplate) {
+  const target = inspirations.value.find((item) => String(item.id) === String(template.id));
+  if (!target) {
+    uni.showToast({ title: '该内容暂不支持收藏', icon: 'none' });
+    return;
+  }
+  toggleFavorite(target);
+}
+
+async function toggleFavorite(item: InspirationItem) {
+  const templateId = numericTemplateId(item.id);
+  if (!templateId) {
+    uni.showToast({ title: '该内容暂不支持收藏', icon: 'none' });
+    return;
+  }
+  if (!authStore.isLoggedIn) {
+    const loggedIn = await ensureLoggedIn({
+      title: '登录后收藏灵感',
+      subtitle: '登录并授权手机号后，可同步收藏到你的账号。'
+    });
+    if (!loggedIn) return;
+  }
+  const id = String(item.id);
+  if (favoritePending.value[id]) return;
+
+  const before = {
+    isFavorited: item.isFavorited === true,
+    favoriteCount: Math.max(0, Math.floor(Number(item.favoriteCount || 0) || 0))
+  };
+  const nextFavorited = !before.isFavorited;
+  const nextCount = before.favoriteCount + (nextFavorited ? 1 : -1);
+  favoritePending.value = { ...favoritePending.value, [id]: true };
+  applyFavoriteState(id, nextFavorited, nextCount);
+  try {
+    const res = before.isFavorited
+      ? await unfavoriteTemplate<{ isFavorited?: boolean; favoriteCount?: number }>(templateId)
+      : await favoriteTemplate<{ isFavorited?: boolean; favoriteCount?: number }>(templateId);
+    applyFavoriteState(id, res.isFavorited === true, Number(res.favoriteCount || 0));
+    userStore.loadFullProfile().catch(() => undefined);
+  } catch (error) {
+    applyFavoriteState(id, before.isFavorited, before.favoriteCount);
+    const message = error instanceof Error ? error.message : '';
+    uni.showToast({ title: message || '收藏失败，请稍后重试', icon: 'none' });
+  } finally {
+    const next = { ...favoritePending.value };
+    delete next[id];
+    favoritePending.value = next;
+  }
+}
+
+function consumePendingFavorite() {
+  if (!pendingFavoriteId.value || !authStore.isLoggedIn) return;
+  const target = inspirations.value.find((item) => String(item.id) === pendingFavoriteId.value);
+  if (!target) return;
+  pendingFavoriteId.value = '';
+  if (target.isFavorited) return;
+  toggleFavorite(target);
+}
+
+function applyFavoriteState(id: string, isFavorited: boolean, count: number) {
+  const favoriteCount = Math.max(0, Math.floor(Number(count) || 0));
+  const update = (item: InspirationItem) => {
+    if (String(item.id) !== id) return item;
+    return { ...item, isFavorited, favoriteCount, favoriteText: formatCount(favoriteCount), likes: formatCount(favoriteCount) };
+  };
+  inspirations.value = inspirations.value.map(update);
+  if (previewTemplate.value && String(previewTemplate.value.id) === id) {
+    previewTemplate.value = {
+      ...previewTemplate.value,
+      isFavorited,
+      favoriteCount
+    };
+  }
 }
 
 async function usePreviewTemplate(item: CreativeTemplate) {
@@ -678,7 +945,7 @@ async function usePreviewTemplate(item: CreativeTemplate) {
     });
     return;
   }
-  const backendTemplateId = item.mediaType === 'image' ? numericTemplateId(item.id) : 0;
+  const backendTemplateId = numericTemplateId(item.id);
   if (backendTemplateId) {
     try {
       await useContentTemplate(backendTemplateId);
@@ -788,22 +1055,40 @@ function normalizeInspiration(item: Record<string, unknown>, index: number): Ins
   const title = String(item.title || '灵感模板');
   const category = categoryOf(item, templateType, title);
   const kind = isVideoType(templateType) || category === '视频' ? 'video' : 'image';
+  const originalCover = item.coverUrl || item.cover_url || item.cover;
+  const thumbnail = item.thumbnailUrl || item.thumbnail_url || item.thumbUrl || item.thumb_url || item.thumbnail || item.thumb || originalCover;
+  const mediaSource = item.previewUrl || item.preview_url || item.mediaUrl || item.media_url || originalCover || thumbnail;
+  const favoriteCount = Math.max(0, Math.floor(Number(item.favoriteCount || item.favorite_count || 0) || 0));
+  const author = templateAuthorOf(item);
   return {
     id: item.id as string | number || `inspiration_${index}`,
     title,
-    author: String(item.author || item.nickname || item.creatorName || '@官方灵感'),
-    likes: formatCount(Number(item.favoriteCount || item.favorite_count || item.usageCount || item.usage_count || item.likes || 0)),
+    author,
+    likes: formatCount(favoriteCount),
+    favoriteCount,
+    favoriteText: formatCount(favoriteCount),
+    isFavorited: item.isFavorited === true || item.is_favorited === true,
     category,
     tag: tagOf(kind, category),
     theme: ['flower', 'neon', 'cat', 'landscape', 'sky', 'story'][index % 6],
     kind,
-    cover: normalizeBackendMediaUrl(item.coverUrl || item.cover_url || item.thumbnail || item.cover),
-    mediaUrl: normalizeBackendMediaUrl(item.previewUrl || item.preview_url || item.mediaUrl || item.media_url),
+    avatar: normalizeBackendMediaUrl(item.avatarUrl || item.avatar_url || item.authorAvatar || item.author_avatar),
+    cover: normalizeBackendMediaUrl(thumbnail),
+    mediaUrl: normalizeBackendMediaUrl(mediaSource),
     prompt: String(item.prompt || item.description || title),
     canUse: item.canUse !== false,
     canSave: item.canSave !== false && item.canUse !== false,
     lockReason: String(item.lockReason || '')
   };
+}
+
+function templateAuthorOf(item: Record<string, unknown>) {
+  const raw = String(item.author || item.nickname || item.creatorName || item.creator_name || item.userNickname || '').trim();
+  if (raw) return raw.startsWith('@') ? raw : `@${raw}`;
+  const source = String(item.source || '').trim();
+  const userId = String(item.userId || item.user_id || '').trim();
+  if (source === 'user' && userId) return `@用户${userId}`;
+  return '@官方灵感';
 }
 
 function numericTemplateId(value: unknown) {
@@ -812,8 +1097,9 @@ function numericTemplateId(value: unknown) {
 }
 
 function categoryOf(item: Record<string, unknown>, templateType: string, title: string) {
-  const raw = String(item.categoryName || item.category || item.scene || '');
-  const text = `${raw}${templateType}${title}`;
+  const raw = String(item.categoryName || item.category || item.scene || '').trim();
+  if (raw) return raw;
+  const text = `${templateType}${title}`;
   if (/视频|video/i.test(text)) return '视频';
   if (/漫画|漫剧|comic|manga/i.test(text)) return '漫画';
   if (/壁纸|wallpaper/i.test(text)) return '壁纸';
@@ -834,6 +1120,16 @@ function tagOf(kind: 'image' | 'video', category: string) {
   return '图片';
 }
 
+function uniqueTexts(values: string[]) {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    const text = value.trim();
+    if (!text || seen.has(text)) return false;
+    seen.add(text);
+    return true;
+  });
+}
+
 function tabMatches(item: InspirationItem, tab: string) {
   if (tab === '推荐') return true;
   return item.category === tab || item.tag === tab;
@@ -845,12 +1141,26 @@ function formatCount(value: number) {
   return String(value || 0);
 }
 
+function hasFavoriteCount(value?: number) {
+  return Math.max(0, Math.floor(Number(value || 0) || 0)) > 0;
+}
+
 function formatAnnouncementTime(value?: string | null) {
   if (!value) return '';
+  const raw = String(value).trim().replace(/\//g, '-');
+  const hasTimeZone = /(?:z|[+-]\d{2}:?\d{2})$/i.test(raw);
+  const match = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2})(?::(\d{1,2})(?::(\d{1,2}))?)?)?/);
+  if (match && !hasTimeZone) {
+    const [, year, month, day, hour = '0', minute = '0', second = '0'] = match;
+    return `${year}-${padDateTime(month)}-${padDateTime(day)} ${padDateTime(hour)}:${padDateTime(minute)}:${padDateTime(second)}`;
+  }
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  const pad = (num: number) => String(num).padStart(2, '0');
-  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())}  ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  if (!Number.isFinite(date.getTime())) return String(value);
+  return `${date.getFullYear()}-${padDateTime(date.getMonth() + 1)}-${padDateTime(date.getDate())} ${padDateTime(date.getHours())}:${padDateTime(date.getMinutes())}:${padDateTime(date.getSeconds())}`;
+}
+
+function padDateTime(value: string | number) {
+  return String(value).padStart(2, '0');
 }
 </script>
 
@@ -862,6 +1172,16 @@ function formatAnnouncementTime(value?: string | null) {
   padding: 0 24rpx calc(250rpx + env(safe-area-inset-bottom));
   background: #f8f6ff;
   color: #1f2437;
+}
+
+.home-page--booting > view:not(.app-nav-root):not(.pull-refresh-indicator):not(.app-dialog-host-root):not(.app-dialog-host),
+.home-page--booting > scroll-view,
+.home-page--booting > button {
+  visibility: hidden;
+}
+
+.home-page--booting .home-nav-title {
+  visibility: hidden;
 }
 
 .home-page::before {
@@ -1435,11 +1755,25 @@ function formatAnnouncementTime(value?: string | null) {
 }
 
 .refresh-icon {
+  position: relative;
   width: 24rpx;
   height: 24rpx;
+  box-sizing: border-box;
   border: 4rpx solid #6f7190;
   border-left-color: transparent;
   border-radius: 50%;
+}
+
+.refresh-icon::after {
+  position: absolute;
+  right: -5rpx;
+  top: 0;
+  width: 0;
+  height: 0;
+  border-top: 7rpx solid #6f7190;
+  border-left: 7rpx solid transparent;
+  content: "";
+  transform: rotate(28deg);
 }
 
 .section-refresh.loading .refresh-icon {
@@ -1448,10 +1782,18 @@ function formatAnnouncementTime(value?: string | null) {
   animation: pull-refresh-spin 0.82s linear infinite;
 }
 
+.section-refresh.loading .refresh-icon::after {
+  border-top-color: #7a5cff;
+}
+
+.section-refresh.cycling .refresh-icon {
+  animation: pull-refresh-spin 0.42s ease-out;
+}
+
 .inspiration-tabs {
   width: 100%;
   overflow: hidden;
-  margin-bottom: 18rpx;
+  margin-bottom: 16rpx;
   white-space: nowrap;
 }
 
@@ -1464,14 +1806,14 @@ function formatAnnouncementTime(value?: string | null) {
 
 .inspiration-tab {
   flex-shrink: 0;
-  height: 52rpx;
-  padding: 0 24rpx;
+  height: 48rpx;
+  padding: 0 22rpx;
   border-radius: 999rpx;
   background: #f0ecff;
   color: #766f9c;
-  font-size: 23rpx;
+  font-size: 22rpx;
   font-weight: 900;
-  line-height: 52rpx;
+  line-height: 48rpx;
 }
 
 .inspiration-tab.active {
@@ -1480,46 +1822,39 @@ function formatAnnouncementTime(value?: string | null) {
 }
 
 .inspiration-grid {
-  display: flex;
-  align-items: flex-start;
-  gap: 16rpx;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 18rpx;
   width: 100%;
 }
 
 .inspiration-column {
-  flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 20rpx;
+  gap: 18rpx;
 }
 
 .inspiration-card {
   overflow: hidden;
   display: block;
   width: 100%;
-  padding: 0 0 16rpx;
-  border-radius: 18rpx;
-  background: #ffffff;
+  min-width: 0;
+  padding: 0;
+  border-radius: 20rpx;
+  background: #f2f0fb;
   text-align: left;
-  box-shadow: 0 10rpx 12rpx rgba(122, 92, 255, 0.08);
+  box-shadow: 0 10rpx 24rpx rgba(122, 92, 255, 0.1);
 }
 
 .inspiration-art {
   position: relative;
   overflow: hidden;
   width: 100%;
-  height: 214rpx;
-  border-radius: 18rpx 18rpx 8rpx 8rpx;
+  height: 342rpx;
+  border-radius: inherit;
   background: #e8f0ff;
-}
-
-.inspiration-art::after {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 60%, rgba(31, 36, 55, 0.08));
-  content: "";
-  pointer-events: none;
 }
 
 .inspiration-cover,
@@ -1582,85 +1917,141 @@ function formatAnnouncementTime(value?: string | null) {
 
 .inspiration-badge {
   position: absolute;
-  top: 12rpx;
-  left: 12rpx;
-  z-index: 2;
-  height: 38rpx;
-  padding: 0 16rpx;
-  border-radius: 16rpx;
-  background: linear-gradient(135deg, #7b5cff, #a76bff);
+  top: 14rpx;
+  left: 14rpx;
+  z-index: 3;
+  max-width: 140rpx;
+  height: 34rpx;
+  padding: 0 12rpx;
+  border-radius: 17rpx;
+  background: rgba(18, 22, 38, 0.48);
   color: #ffffff;
-  font-size: 20rpx;
+  font-size: 19rpx;
   font-weight: 900;
-  line-height: 38rpx;
+  line-height: 34rpx;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  backdrop-filter: blur(8rpx);
 }
 
 .inspiration-play {
   position: absolute;
-  top: 50%;
-  left: 50%;
-  z-index: 2;
-  width: 62rpx;
-  height: 62rpx;
+  top: 14rpx;
+  right: 14rpx;
+  z-index: 3;
+  width: 48rpx;
+  height: 48rpx;
   border-radius: 50%;
-  background: rgba(31, 36, 55, 0.34);
-  transform: translate(-50%, -50%);
+  background: rgba(23, 32, 51, 0.58);
+  backdrop-filter: blur(8rpx);
 }
 
 .inspiration-play::after {
   position: absolute;
-  top: 18rpx;
-  left: 25rpx;
+  top: 14rpx;
+  left: 20rpx;
   width: 0;
   height: 0;
-  border-top: 13rpx solid transparent;
-  border-bottom: 13rpx solid transparent;
-  border-left: 18rpx solid #ffffff;
+  border-top: 10rpx solid transparent;
+  border-bottom: 10rpx solid transparent;
+  border-left: 15rpx solid #ffffff;
   content: "";
 }
 
 .inspiration-title {
   overflow: hidden;
-  margin: 16rpx 14rpx 0;
-  color: #1f2437;
+  height: 38rpx;
+  max-width: 100%;
+  margin: 0;
+  color: #ffffff;
   font-size: 24rpx;
   font-weight: 900;
-  line-height: 1.28;
+  line-height: 38rpx;
   text-overflow: ellipsis;
+  text-shadow:
+    0 2rpx 4rpx rgba(0, 0, 0, 0.74),
+    0 0 12rpx rgba(0, 0, 0, 0.48),
+    0 1rpx 1rpx rgba(0, 0, 0, 0.66);
   white-space: nowrap;
 }
 
-.inspiration-meta {
+.inspiration-overlay {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 2;
+  padding: 0 16rpx 16rpx;
+}
+
+.inspiration-bottom {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8rpx;
-  margin: 10rpx 14rpx 0;
-  color: #8b8fa3;
-  font-size: 20rpx;
-  font-weight: 800;
+  gap: 10rpx;
+  margin-top: 8rpx;
 }
 
-.inspiration-meta text:first-child {
+.inspiration-source {
+  display: flex;
+  align-items: center;
+  gap: 8rpx;
+  min-width: 0;
+  max-width: 132rpx;
+  min-height: 34rpx;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 20rpx;
+  font-weight: 800;
+  line-height: 1.2;
+  text-shadow:
+    0 2rpx 4rpx rgba(0, 0, 0, 0.68),
+    0 0 9rpx rgba(0, 0, 0, 0.44);
+}
+
+.inspiration-source-avatar {
+  flex-shrink: 0;
+  width: 30rpx;
+  height: 30rpx;
+  border: 1rpx solid rgba(255, 255, 255, 0.44);
+  border-radius: 50%;
+}
+
+.inspiration-source text {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.inspiration-like {
+.inspiration-favorite {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 5rpx;
+  min-width: 34rpx;
+  height: 34rpx;
+  margin: 0;
+  padding: 0;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 20rpx;
+  font-weight: 900;
+  line-height: 34rpx;
+  text-shadow:
+    0 2rpx 4rpx rgba(0, 0, 0, 0.68),
+    0 0 9rpx rgba(0, 0, 0, 0.44);
 }
 
-.flame {
-  width: 13rpx;
-  height: 17rpx;
-  border-radius: 12rpx 12rpx 12rpx 3rpx;
-  background: linear-gradient(180deg, #ff5cb8, #ff9e3d);
-  transform: rotate(36deg);
+.inspiration-favorite.active {
+  color: #ff7aa3;
+}
+
+.inspiration-favorite image {
+  flex-shrink: 0;
+  width: 32rpx;
+  height: 32rpx;
+  filter: drop-shadow(0 2rpx 4rpx rgba(0, 0, 0, 0.46));
 }
 
 .inspiration-empty {

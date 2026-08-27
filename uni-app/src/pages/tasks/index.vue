@@ -54,6 +54,8 @@ import { ref } from 'vue';
 import { onShow } from '@dcloudio/uni-app';
 import { PAGE_ROUTES } from '@/utils/constants';
 import { getPointTasks } from '@/api/point-task';
+import { useConfigStore } from '@/stores/config';
+import { isPurchaseEnabled, showPurchaseUnavailable } from '@/utils/purchase-guard';
 
 interface TaskReward {
   id: string;
@@ -78,6 +80,7 @@ const growthBase = [
 ];
 const dailyTasks = ref<TaskReward[]>([]);
 const growthTasks = ref<TaskReward[]>([]);
+const configStore = useConfigStore();
 const taskIcons: Record<string, string> = {
   video: '/static/icons/benefit_ai_video.svg',
   calendar: '/static/icons/icon_task_checkin.svg',
@@ -88,14 +91,20 @@ const taskIcons: Record<string, string> = {
 };
 
 onShow(() => {
-  loadTasks();
+  refreshTasksEntry();
 });
+
+async function refreshTasksEntry() {
+  configStore.hydrate();
+  await configStore.loadPublicConfig({ force: true }).catch(() => undefined);
+  loadTasks();
+}
 
 function loadTasks() {
   getPointTasks<{ todayAvailable?: number; list?: Record<string, unknown>[] }>()
     .then((res) => {
       todayAvailable.value = Number(res.todayAvailable || 0);
-      const list = Array.isArray(res.list) ? res.list.map(normalizeTask) : [];
+      const list = filterPurchaseTasks(Array.isArray(res.list) ? res.list.map(normalizeTask) : []);
       dailyTasks.value = list.filter((item) => item.group === 'daily');
       growthTasks.value = list.filter((item) => item.group !== 'daily');
       if (!list.length) useFallbackTasks();
@@ -125,6 +134,10 @@ function goTask(id: string) {
     return;
   }
   if (id === 'open_pro') {
+    if (!isPurchaseEnabled(configStore.publicConfig)) {
+      showPurchaseUnavailable(configStore.publicConfig);
+      return;
+    }
     uni.navigateTo({ url: PAGE_ROUTES.member });
     return;
   }
@@ -150,7 +163,12 @@ function normalizeTask(item: Record<string, unknown>): TaskReward {
 function useFallbackTasks() {
   todayAvailable.value = 0;
   dailyTasks.value = dailyBase.map((item) => ({ ...item, completed: false }));
-  growthTasks.value = growthBase.map((item) => ({ ...item, completed: false }));
+  growthTasks.value = filterPurchaseTasks(growthBase.map((item) => ({ ...item, completed: false })));
+}
+
+function filterPurchaseTasks(items: TaskReward[]) {
+  if (isPurchaseEnabled(configStore.publicConfig)) return items;
+  return items.filter((item) => item.id !== 'open_pro');
 }
 </script>
 

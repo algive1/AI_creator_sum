@@ -109,7 +109,7 @@
         </view>
         <view class="filter-options">
           <view
-            v-for="option in filterOptions"
+            v-for="option in visibleFilterOptions"
             :key="option.value"
             class="filter-option"
             :class="{ active: activeCategory === option.value }"
@@ -127,6 +127,8 @@
 import { computed, ref } from 'vue';
 import { onPullDownRefresh, onReachBottom, onShow } from '@dcloudio/uni-app';
 import { getBalance, getTransactions } from '@/api/points';
+import { useConfigStore } from '@/stores/config';
+import { canRenderPurchaseUi } from '@/utils/purchase-guard';
 
 type TransactionItem = Record<string, unknown>;
 type TabValue = 'all' | 'income' | 'expense';
@@ -154,6 +156,7 @@ const loading = ref(false);
 const hasMore = ref(false);
 const page = ref(1);
 const pageSize = 20;
+const configStore = useConfigStore();
 
 const tabs: Array<{ label: string; value: TabValue }> = [
   { label: '全部', value: 'all' },
@@ -172,18 +175,23 @@ const filterOptions = [
 ];
 
 const imageCount = computed(() => Math.max(0, Math.floor(balance.value / 2)));
+const purchaseEnabled = computed(() => canRenderPurchaseUi(configStore.publicConfigReady, configStore.publicConfig));
+const visibleFilterOptions = computed(() => {
+  if (purchaseEnabled.value) return filterOptions;
+  return filterOptions.filter((item) => !['recharge', 'membership'].includes(item.value));
+});
 const selectedFilterText = computed(() => {
-  const current = filterOptions.find((item) => item.value === activeCategory.value);
+  const current = visibleFilterOptions.value.find((item) => item.value === activeCategory.value);
   return activeCategory.value === 'all' ? '筛选' : current?.label || '筛选';
 });
 
 onShow(() => {
   uni.setNavigationBarTitle({ title: '积分明细' });
-  refreshAll();
+  refreshPointsDetail();
 });
 
 onPullDownRefresh(async () => {
-  await refreshAll();
+  await refreshPointsDetail();
   uni.stopPullDownRefresh();
 });
 
@@ -197,6 +205,15 @@ async function refreshAll() {
     loadTodayDelta().catch(() => undefined),
     loadTransactions(true).catch(() => undefined),
   ]);
+}
+
+async function refreshPointsDetail() {
+  configStore.hydrate();
+  await configStore.loadPublicConfig({ force: true }).catch(() => undefined);
+  if (!visibleFilterOptions.value.some((item) => item.value === activeCategory.value)) {
+    activeCategory.value = 'all';
+  }
+  await refreshAll();
 }
 
 async function loadBalance() {
@@ -279,13 +296,13 @@ function transactionTitle(item: TransactionItem) {
   const title = String(item.title || '').trim();
   if (title) return title;
   const category = resolveCategory(item);
-  const matched = filterOptions.find((option) => option.value === category);
+  const matched = visibleFilterOptions.value.find((option) => option.value === category);
   return matched?.label || '积分变动';
 }
 
 function transactionTime(item: TransactionItem) {
   const raw = String(item.createdAt || item.created_at || item.time || '');
-  return raw ? raw.replace('T', ' ').slice(0, 19) : '';
+  return formatTransactionDateTime(raw);
 }
 
 function transactionAmount(item: TransactionItem) {
@@ -315,7 +332,7 @@ function resolveCategory(item: TransactionItem) {
 function tagText(item: TransactionItem) {
   const category = resolveCategory(item);
   if (category === 'all') return '';
-  const matched = filterOptions.find((option) => option.value === category);
+  const matched = visibleFilterOptions.value.find((option) => option.value === category);
   return matched?.label.replace('奖励', '').replace('赠送', '') || '';
 }
 
@@ -352,6 +369,24 @@ function formatDateKey(date: Date) {
   const month = monthValue < 10 ? `0${monthValue}` : `${monthValue}`;
   const day = dayValue < 10 ? `0${dayValue}` : `${dayValue}`;
   return `${year}-${month}-${day}`;
+}
+
+function formatTransactionDateTime(value?: string | null) {
+  if (!value) return '';
+  const raw = String(value).trim().replace(/\//g, '-');
+  const hasTimeZone = /(?:z|[+-]\d{2}:?\d{2})$/i.test(raw);
+  const match = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2})(?::(\d{1,2})(?::(\d{1,2}))?)?)?/);
+  if (match && !hasTimeZone) {
+    const [, year, month, day, hour = '0', minute = '0', second = '0'] = match;
+    return `${year}-${padDateTime(month)}-${padDateTime(day)} ${padDateTime(hour)}:${padDateTime(minute)}:${padDateTime(second)}`;
+  }
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return String(value);
+  return `${date.getFullYear()}-${padDateTime(date.getMonth() + 1)}-${padDateTime(date.getDate())} ${padDateTime(date.getHours())}:${padDateTime(date.getMinutes())}:${padDateTime(date.getSeconds())}`;
+}
+
+function padDateTime(value: string | number) {
+  return String(value).padStart(2, '0');
 }
 </script>
 

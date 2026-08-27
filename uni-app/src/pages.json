@@ -1,10 +1,14 @@
 {
   "pages": [
-    { "path": "pages/home/index", "style": { "navigationBarTitleText": "AI创作工坊", "navigationStyle": "custom", "enablePullDownRefresh": true } },
+    { "path": "pages/home/index", "style": { "navigationBarTitleText": "AI艺术生成工坊", "navigationStyle": "custom", "enablePullDownRefresh": true } },
     { "path": "pages/inspiration/index", "style": { "navigationBarTitleText": "灵感", "navigationStyle": "custom" } },
+    { "path": "pages/tools/index", "style": { "navigationBarTitleText": "工具", "navigationStyle": "custom" } },
+    { "path": "pages/tools/run/index", "style": { "navigationBarTitleText": "工具", "navigationStyle": "custom" } },
+    { "path": "pages/tools/aion-obs/index", "style": { "navigationBarTitleText": "OBS遗物计算器", "navigationStyle": "custom" } },
     { "path": "pages/comic/index", "style": { "navigationBarTitleText": "AI漫剧", "navigationStyle": "custom" } },
-    { "path": "pages/history/index", "style": { "navigationBarTitleText": "记录", "navigationStyle": "custom" } },
+    { "path": "pages/history/index", "style": { "navigationBarTitleText": "作品库", "navigationStyle": "custom" } },
     { "path": "pages/profile/index", "style": { "navigationBarTitleText": "我的", "navigationStyle": "custom" } },
+    { "path": "pages/favorites/index", "style": { "navigationBarTitleText": "我的收藏", "navigationStyle": "custom", "enablePullDownRefresh": true, "onReachBottomDistance": 80 } },
     { "path": "pages/ai-image/index", "style": { "navigationBarTitleText": "AI生图" } },
     { "path": "pages/ai-video/index", "style": { "navigationBarTitleText": "AI视频生成" } },
     { "path": "pages/member/index", "style": { "navigationBarTitleText": "会员中心", "navigationStyle": "custom" } },
@@ -22,7 +26,7 @@
   ],
   "globalStyle": {
     "navigationBarTextStyle": "black",
-    "navigationBarTitleText": "AI创作工坊",
+    "navigationBarTitleText": "AI艺术生成工坊",
     "navigationBarBackgroundColor": "#ffffff",
     "backgroundColor": "#f7f8ff",
     "backgroundTextStyle": "dark"

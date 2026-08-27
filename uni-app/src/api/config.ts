@@ -1,7 +1,7 @@
 import { get, post } from './request';
 
 export function getPublicApp<T = Record<string, unknown>>() {
-  return get<T>('/public/app', undefined, { silent: true, cacheTtl: 60_000 });
+  return get<T>('/public/app', undefined, { silent: true });
 }
 
 export function getAppHome<T = Record<string, unknown>>() {

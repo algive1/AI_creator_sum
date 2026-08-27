@@ -12,9 +12,13 @@ export const STORAGE_KEYS = {
 export const PAGE_ROUTES = {
   home: '/pages/home/index',
   inspiration: '/pages/inspiration/index',
+  tools: '/pages/tools/index',
+  toolRun: '/pages/tools/run/index',
+  aionObsCalculator: '/pages/tools/aion-obs/index',
   comic: '/pages/comic/index',
   history: '/pages/history/index',
   profile: '/pages/profile/index',
+  favorites: '/pages/favorites/index',
   login: '/pages/login/index',
   aiImage: '/pages/ai-image/index',
   aiVideo: '/pages/ai-video/index',

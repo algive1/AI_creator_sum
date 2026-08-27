@@ -19,7 +19,7 @@
             <text>{{ item.label }}</text>
           </view>
         </view>
-        <view v-else class="free-copy">开通会员后可获得高清画质、优先处理、专属素材等创作权益。</view>
+        <view v-else-if="purchaseUiEnabled" class="free-copy">开通会员后可获得高清画质、优先处理、专属素材等创作权益。</view>
       </view>
 
       <view class="detail-panel">
@@ -35,11 +35,11 @@
           <text>开通时间</text>
           <text>{{ memberView.startedText || '-' }}</text>
         </view>
-        <view class="detail-row">
+        <view v-if="purchaseUiEnabled" class="detail-row">
           <text>支付方式</text>
           <text>{{ memberView.isMember ? '微信支付' : '-' }}</text>
         </view>
-        <button class="manage-btn" @tap="goMember">{{ memberView.isMember ? '管理会员' : '开通会员' }}</button>
+        <button v-if="purchaseUiEnabled" class="manage-btn" @tap="goMember">{{ memberView.isMember ? '管理会员' : '开通会员' }}</button>
       </view>
     </view>
   </view>
@@ -52,11 +52,16 @@ import { useAuthStore } from '@/stores/auth';
 import { useUserStore } from '@/stores/user';
 import { PAGE_ROUTES } from '@/utils/constants';
 import { getMemberView } from '@/utils/member';
+import { useConfigStore } from '@/stores/config';
+import { canRenderPurchaseUi, isPurchaseEnabled, showPurchaseUnavailable } from '@/utils/purchase-guard';
 
 const auth = useAuthStore();
 const userStore = useUserStore();
+const configStore = useConfigStore();
 
 const memberView = computed(() => getMemberView(userStore.membership));
+const purchaseEnabled = computed(() => isPurchaseEnabled(configStore.publicConfig));
+const purchaseUiEnabled = computed(() => canRenderPurchaseUi(configStore.publicConfigReady, configStore.publicConfig));
 const benefitItems = computed(() => {
   const rights = Array.isArray(userStore.membership?.rights) ? userStore.membership?.rights as Array<Record<string, unknown>> : [];
   const labels = rights.map((item) => String(item.rightName || item.right_name || '')).filter(Boolean).slice(0, 6);
@@ -69,6 +74,8 @@ const benefitItems = computed(() => {
 
 onShow(() => {
   uni.setNavigationBarTitle({ title: '我的会员信息' });
+  configStore.hydrate();
+  configStore.loadPublicConfig().catch(() => undefined);
   if (auth.isLoggedIn) userStore.loadFullProfile().catch(() => undefined);
 });
 
@@ -83,6 +90,10 @@ function benefitIconOf(label: string) {
 }
 
 function goMember() {
+  if (!purchaseEnabled.value) {
+    showPurchaseUnavailable(configStore.publicConfig);
+    return;
+  }
   uni.navigateTo({ url: PAGE_ROUTES.member });
 }
 </script>

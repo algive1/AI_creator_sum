@@ -1,7 +1,9 @@
 import { appEnv } from '@/env/index';
-import { PAGE_ROUTES, STORAGE_KEYS } from '@/utils/constants';
+import { STORAGE_KEYS } from '@/utils/constants';
 import { getFriendlyError } from '@/utils/error-map';
-import { showInsufficientPointsDialog, showMemberRequiredDialog } from '@/utils/app-dialog';
+import { showFreeQuotaInsufficientDialog, showInsufficientPointsDialog, showMemberRequiredDialog } from '@/utils/app-dialog';
+import { useConfigStore } from '@/stores/config';
+import { shouldBlockPurchase, showPurchaseUnavailable } from '@/utils/purchase-guard';
 
 export interface ApiResponse<T = unknown> {
   code: number;
@@ -78,7 +80,8 @@ let authHandlers = {
     uni.removeStorageSync(STORAGE_KEYS.token);
     uni.removeStorageSync(STORAGE_KEYS.refreshToken);
     uni.removeStorageSync(STORAGE_KEYS.user);
-  }
+  },
+  onLoginRequired: (_payload: { currentRoute?: string }) => {}
 };
 
 let loadingCount = 0;
@@ -181,12 +184,13 @@ export function uploadFile<T = unknown>(options: UploadOptions): Promise<T> {
 
 export function downloadFile(url: string, options: { loading?: boolean | string; timeout?: number } = {}) {
   const token = authHandlers.getToken();
+  const resolvedUrl = resolveUrl(url);
   showLoading(options.loading);
   return new Promise<string>((resolve, reject) => {
     uni.downloadFile({
-      url: resolveUrl(url),
+      url: resolvedUrl,
       timeout: options.timeout || appEnv.timeout,
-      header: token ? { Authorization: `Bearer ${token}` } : {},
+      header: token && isApiUrl(resolvedUrl) ? { Authorization: `Bearer ${token}` } : {},
       success: (res) => {
         if (res.statusCode && res.statusCode >= 400) {
           reject(new RequestError('文件下载失败', res.statusCode));
@@ -204,6 +208,12 @@ export function downloadFile(url: string, options: { loading?: boolean | string;
 }
 
 export async function payWithWechat(orderNo: string) {
+  const configStore = useConfigStore();
+  const guard = shouldBlockPurchase(configStore.publicConfig);
+  if (guard.blocked) {
+    showPurchaseUnavailable(configStore.publicConfig);
+    throw new RequestError(guard.message, 3002);
+  }
   const params = await post<WechatPaymentParams>('/payments/wechat/jsapi', { orderNo }, { loading: '正在拉起支付' });
   try {
     await new Promise<void>((resolve, reject) => {
@@ -375,12 +385,21 @@ function safeJsonStringify(value: unknown) {
 
 function handleError(error: unknown) {
   const err = error instanceof RequestError ? error : normalizeNetworkError(error);
+  const payload = err.response as { data?: { needAd?: boolean } } | undefined;
+  if (err.code === 1004 && payload?.data?.needAd) {
+    return;
+  }
   if (err.code === 401) {
-    redirectToLogin();
+    requestLogin();
     return;
   }
   if (err.code === 1002) {
     showInsufficientPointsDialog({ message: err.message });
+    return;
+  }
+  if (err.code === 4606) {
+    const data = (err.response as { data?: Record<string, unknown> } | undefined)?.data || {};
+    showFreeQuotaInsufficientDialog({ message: err.message, ...(data as any), allowPointRetry: false });
     return;
   }
   if (err.code === 4603) {
@@ -394,20 +413,14 @@ function handleError(error: unknown) {
   });
 }
 
-function redirectToLogin() {
+function requestLogin() {
   authHandlers.onUnauthorized();
   if (redirectingLogin) return;
   redirectingLogin = true;
-  const current = getCurrentRoute();
-  const query = current && current !== PAGE_ROUTES.login ? `?redirect=${encodeURIComponent(current)}` : '';
-  uni.reLaunch({
-    url: `${PAGE_ROUTES.login}${query}`,
-    complete: () => {
-      setTimeout(() => {
-        redirectingLogin = false;
-      }, 600);
-    }
-  });
+  authHandlers.onLoginRequired({ currentRoute: getCurrentRoute() });
+  setTimeout(() => {
+    redirectingLogin = false;
+  }, 600);
 }
 
 function showLoading(loading?: boolean | string) {
@@ -431,6 +444,14 @@ function resolveUrl(url: string) {
   if (/^https?:\/\//i.test(url)) return url;
   const path = url.startsWith('/') ? url : `/${url}`;
   return `${appEnv.baseURL}${path}`;
+}
+
+function isApiUrl(url: string) {
+  try {
+    return new URL(url).origin === new URL(appEnv.baseURL).origin;
+  } catch {
+    return false;
+  }
 }
 
 function normalizeNetworkError(error: unknown) {

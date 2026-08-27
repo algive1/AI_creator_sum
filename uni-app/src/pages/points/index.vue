@@ -1,5 +1,5 @@
 <template>
-  <view class="points-buy-page">
+  <view v-if="purchasePageReady && purchaseEnabled" class="points-buy-page">
     <view class="content">
       <view class="hero-card">
         <view class="hero-copy">
@@ -98,7 +98,7 @@
             open-type="contact"
             :session-from="String(customerService.sessionFrom || 'points')"
             :show-message-card="Boolean(customerService.showMessageCard)"
-            :send-message-title="String(customerService.sendMessageTitle || 'AI创作助手客服咨询')"
+            :send-message-title="String(customerService.sendMessageTitle || 'AI艺术生成工坊客服咨询')"
             :send-message-path="String(customerService.sendMessagePath || PAGE_ROUTES.points)"
             :send-message-img="String(customerService.sendMessageImg || '')"
           >
@@ -107,6 +107,7 @@
         </view>
       </view>
     </view>
+    <AppDialogHost />
   </view>
 </template>
 
@@ -115,10 +116,13 @@ import { computed, ref } from 'vue';
 import { onShow } from '@dcloudio/uni-app';
 import { getBalance, getPointPackages } from '@/api/points';
 import { createOrder, payOrder } from '@/api/payment';
+import AppDialogHost from '@/components/common/AppDialogHost.vue';
 import { useAuthStore } from '@/stores/auth';
 import { useConfigStore } from '@/stores/config';
 import { PAGE_ROUTES } from '@/utils/constants';
 import { isDevFallbackEnabled, warnDevFallback } from '@/utils/dev-fallback';
+import { isPurchaseEnabled, showPurchaseUnavailable } from '@/utils/purchase-guard';
+import { ensureLoggedIn } from '@/utils/login-guard';
 
 type PointPackage = Record<string, unknown>;
 
@@ -127,9 +131,11 @@ const packages = ref<PointPackage[]>([]);
 const selectedPackageId = ref('');
 const isPaying = ref(false);
 const showServiceConfirm = ref(false);
+const purchasePageReady = ref(false);
 const configStore = useConfigStore();
 const authStore = useAuthStore();
 const customerService = computed(() => configStore.customerService);
+const purchaseEnabled = computed(() => isPurchaseEnabled(configStore.publicConfig));
 const fallbackPointPackages: PointPackage[] = [
   { id: 'dev_60', points: 60, priceCents: 600, description: '示例', __fallback: true },
   { id: 'dev_180', points: 180, priceCents: 1800, description: '热门', __fallback: true },
@@ -143,13 +149,37 @@ const examplePackagePoints = computed(() => packagePoints(packages.value[0]) || 
 const exampleGenerationCount = computed(() => Math.max(1, Math.floor(examplePackagePoints.value / 2)));
 
 onShow(() => {
-  uni.setNavigationBarTitle({ title: '积分购买' });
   authStore.hydrate();
-  configStore.loadPublicConfig().catch(() => undefined);
-  loadPageData();
+  refreshPointsEntry();
 });
 
+async function refreshPointsEntry() {
+  purchasePageReady.value = false;
+  try {
+    await configStore.loadPublicConfig({ force: true });
+  } catch {
+    configStore.hydrate();
+  }
+  if (!purchaseEnabled.value) {
+    packages.value = [];
+    showPurchaseUnavailable(configStore.publicConfig);
+    setTimeout(() => {
+      const pages = getCurrentPages();
+      if (pages.length > 1) {
+        uni.navigateBack();
+        return;
+      }
+      uni.reLaunch({ url: PAGE_ROUTES.profile });
+    }, 300);
+    return;
+  }
+  uni.setNavigationBarTitle({ title: '积分购买' });
+  purchasePageReady.value = true;
+  loadPageData();
+}
+
 function loadPageData() {
+  if (!purchaseEnabled.value) return;
   if (authStore.isLoggedIn) {
     getBalance<Record<string, unknown>>()
       .then((res) => { balance.value = Number(res.balance || 0); })
@@ -248,6 +278,10 @@ function selectPackage(pkg: PointPackage) {
 }
 
 async function buy(pkg: PointPackage) {
+  if (!purchaseEnabled.value) {
+    showPurchaseUnavailable(configStore.publicConfig);
+    return;
+  }
   if (isFallbackPackage(pkg)) {
     uni.showToast({ title: '请先在后台配置套餐', icon: 'none' });
     return;
@@ -259,8 +293,11 @@ async function buy(pkg: PointPackage) {
   }
   if (isPaying.value) return;
   if (!authStore.isLoggedIn) {
-    uni.navigateTo({ url: `${PAGE_ROUTES.login}?redirect=${encodeURIComponent(PAGE_ROUTES.points)}` });
-    return;
+    const loggedIn = await ensureLoggedIn({
+      title: '登录后购买积分',
+      subtitle: '登录并授权手机号后，可创建订单并同步积分余额。'
+    });
+    if (!loggedIn) return;
   }
   selectedPackageId.value = packageId(pkg);
   isPaying.value = true;
@@ -276,10 +313,13 @@ async function buy(pkg: PointPackage) {
   }
 }
 
-function goPointDetails() {
+async function goPointDetails() {
   if (!authStore.isLoggedIn) {
-    uni.navigateTo({ url: `${PAGE_ROUTES.login}?redirect=${encodeURIComponent(PAGE_ROUTES.pointsDetail)}` });
-    return;
+    const loggedIn = await ensureLoggedIn({
+      title: '登录后查看积分明细',
+      subtitle: '登录并授权手机号后，可查看你的积分余额和流水。'
+    });
+    if (!loggedIn) return;
   }
   uni.navigateTo({ url: PAGE_ROUTES.pointsDetail });
 }

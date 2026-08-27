@@ -104,7 +104,7 @@ export function formatDateTime(value: unknown) {
   if (!value) return '';
   const date = new Date(String(value));
   if (!Number.isFinite(date.getTime())) return '';
-  return `${formatDate(value)} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return `${formatDate(value)} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 function pad(value: number) {

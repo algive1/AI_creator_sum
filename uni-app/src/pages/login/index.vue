@@ -2,23 +2,24 @@
   <view class="flow-page login-page">
     <view class="login-panel">
       <view class="login-logo">AI</view>
-      <view class="login-title">登录 AI创作工坊</view>
+      <view class="login-title">登录 AI艺术生成工坊</view>
       <view class="login-desc">同步积分、会员、历史作品和生成任务</view>
       <button class="primary-btn" @tap="wechatLogin">微信一键登录</button>
       <button v-if="showDevLogin" class="ghost-btn dev-btn" @tap="devLoginAction">开发环境登录</button>
       <button class="link-btn" @tap="goAgreement">查看用户协议和隐私政策</button>
     </view>
+    <AppDialogHost />
   </view>
 </template>
 
 <script setup lang="ts">
 import { ref } from 'vue';
 import { onLoad } from '@dcloudio/uni-app';
-import { useAuthStore } from '@/stores/auth';
+import AppDialogHost from '@/components/common/AppDialogHost.vue';
 import { PAGE_ROUTES } from '@/utils/constants';
 import { isDevFallbackEnabled } from '@/utils/dev-fallback';
+import { ensureLoggedIn } from '@/utils/login-guard';
 
-const auth = useAuthStore();
 const redirect = ref<string>(PAGE_ROUTES.home);
 const inviteCode = ref('');
 const showDevLogin = isDevFallbackEnabled;
@@ -30,8 +31,8 @@ onLoad((query) => {
 
 async function wechatLogin() {
   try {
-    await auth.loginWithWechat(inviteCode.value || undefined);
-    finish();
+    const loggedIn = await ensureLoggedIn({ inviteCode: inviteCode.value || undefined });
+    if (loggedIn) finish();
   } catch (error) {
     uni.showToast({ title: loginErrorText(error), icon: 'none' });
   }
@@ -39,8 +40,8 @@ async function wechatLogin() {
 
 async function devLoginAction() {
   try {
-    await auth.loginWithDev(inviteCode.value || undefined);
-    finish();
+    const loggedIn = await ensureLoggedIn({ inviteCode: inviteCode.value || undefined });
+    if (loggedIn) finish();
   } catch (error) {
     uni.showToast({ title: loginErrorText(error, '开发登录未启用，请检查后端配置'), icon: 'none' });
   }

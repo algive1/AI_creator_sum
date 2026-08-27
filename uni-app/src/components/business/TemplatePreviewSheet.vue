@@ -1,64 +1,265 @@
 <template>
-  <view v-if="template" class="sheet-layer">
-    <view class="sheet-mask" @tap="$emit('close')"></view>
-    <view class="template-sheet">
-      <view class="sheet-handle"></view>
-      <button class="sheet-close" @tap="$emit('close')">×</button>
+  <view v-if="template" class="sheet-root">
+    <view class="sheet-layer">
+      <view class="sheet-mask" @tap="$emit('close')"></view>
+      <view class="template-sheet">
+        <view class="sheet-handle"></view>
+        <button class="sheet-close" @tap="$emit('close')">×</button>
 
-      <view class="template-title">{{ template.title }}</view>
-      <view class="template-tags">
-        <text v-for="tag in template.tags" :key="tag" class="template-tag">{{ tag }}</text>
-      </view>
-
-      <view class="prompt-box">提示词：{{ template.prompt }}</view>
-
-      <view class="preview-frame" :class="{ 'preview-frame-video': template.mediaType === 'video' }">
-        <video
-          v-if="videoPreviewUrl"
-          class="preview-media preview-media-video video-media"
-          :src="videoPreviewUrl"
-          :poster="template.coverUrl"
-          controls
-          object-fit="contain"
-          @error="onVideoError"
-        />
-        <image v-else-if="template.coverUrl" class="preview-media" :src="template.coverUrl" mode="aspectFill" />
-        <view v-else class="preview-media empty-preview">AI</view>
-        <view v-if="template.mediaType === 'video' && !videoPreviewUrl" class="video-play">
-          <view class="play-triangle"></view>
+        <view class="template-title">{{ template.title }}</view>
+        <view class="template-tags">
+          <text v-for="tag in template.tags" :key="tag" class="template-tag">{{ tag }}</text>
         </view>
-        <view v-if="template.mediaType === 'video' && !videoPreviewUrl" class="video-unavailable">暂无视频预览</view>
-      </view>
 
-      <view class="sheet-actions">
-        <button class="save-btn" @tap="saveMedia">{{ template.mediaType === 'video' ? '保存视频' : '保存图片' }}</button>
-        <button class="use-btn" @tap="$emit('use', template)">使用提示词生成同款</button>
+        <view class="prompt-box" :class="{ expanded: promptExpanded }" @tap="togglePromptExpanded">
+          <view class="prompt-content">提示词：{{ template.prompt }}</view>
+          <view v-if="promptExpandable" class="prompt-toggle">{{ promptExpanded ? '收起' : '展开' }}</view>
+        </view>
+
+        <view
+          class="preview-frame"
+          :class="{ 'preview-frame-video': isPreviewVideo, 'preview-frame-image': isPreviewImage }"
+          :style="previewFrameStyle"
+        >
+          <video
+            v-if="videoPreviewUrl"
+            class="preview-media preview-media-video video-media"
+            :src="videoPreviewUrl"
+            :poster="template.coverUrl"
+            controls
+            object-fit="contain"
+            style="width: 100%; height: 100%;"
+            @loadedmetadata="onPreviewVideoLoadedMetadata"
+            @error="onVideoError"
+          />
+          <image
+            v-else-if="template.coverUrl"
+            class="preview-media preview-media-image"
+            :src="template.coverUrl"
+            mode="aspectFit"
+            :show-menu-by-longpress="false"
+            @load="onPreviewImageLoad"
+            @tap.stop="openImageViewer"
+          />
+          <view v-else class="preview-media empty-preview">AI</view>
+          <view v-if="isPreviewVideo && !videoPreviewUrl" class="video-play">
+            <view class="play-triangle"></view>
+          </view>
+          <view v-if="isPreviewVideo && !videoPreviewUrl" class="video-unavailable">暂无视频预览</view>
+        </view>
+
+        <view class="sheet-actions" :class="{ 'sheet-actions-favorite': favoriteAvailable }">
+          <button class="save-btn" @tap="saveMedia">{{ isPreviewVideo ? '保存视频' : '保存图片' }}</button>
+          <button
+            v-if="favoriteAvailable"
+            class="favorite-btn"
+            :class="{ active: template.isFavorited }"
+            hover-class="none"
+            aria-label="收藏模板"
+            @tap="$emit('favorite', template)"
+          >
+            <image
+              :src="template.isFavorited ? '/static/icons/icon_favorite_filled.svg' : '/static/icons/icon_favorite_line.svg'"
+              mode="aspectFit"
+            />
+          </button>
+          <button class="use-btn" @tap="$emit('use', template)">使用提示词生成同款</button>
+        </view>
       </view>
     </view>
+    <ProtectedImageViewer
+      :visible="imageViewerVisible"
+      :src="imagePreviewUrl"
+      :title="template.title"
+      @close="imageViewerVisible = false"
+    />
   </view>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, onUnmounted, ref, watch } from 'vue';
+import ProtectedImageViewer from '@/components/business/ProtectedImageViewer.vue';
 import type { CreativeTemplate } from '@/utils/mock';
+import { downloadFile as downloadRemoteFile } from '@/api/request';
 import { showMemberRequiredDialog } from '@/utils/app-dialog';
+import { enableSensitiveCaptureProtection } from '@/utils/capture-protection';
+import { isOwnDownloadableMediaUrl, type MediaDownloadConfig } from '@/utils/media-url';
+import { useConfigStore } from '@/stores/config';
 
 const props = defineProps<{
   template: CreativeTemplate | null;
 }>();
+const configStore = useConfigStore();
 
 defineEmits<{
   close: [];
   use: [template: CreativeTemplate];
+  favorite: [template: CreativeTemplate];
 }>();
 
 const videoPreviewUrl = computed(() => {
   const template = props.template;
-  if (!template || template.mediaType !== 'video') return '';
+  if (!template || !isPreviewVideo.value) return '';
   const mediaUrl = String(template.mediaUrl || '').trim();
   const coverUrl = String(template.coverUrl || '').trim();
   return mediaUrl && mediaUrl !== coverUrl ? mediaUrl : '';
 });
+const isPreviewVideo = computed(() => props.template?.mediaType === 'video');
+const isPreviewImage = computed(() => props.template?.mediaType === 'image');
+const favoriteAvailable = computed(() => {
+  const template = props.template;
+  return Boolean(template && (typeof template.isFavorited === 'boolean' || typeof template.favoriteCount === 'number'));
+});
+const promptExpanded = ref(false);
+const promptExpandable = computed(() => String(props.template?.prompt || '').length > 88);
+
+const imageViewerVisible = ref(false);
+const imagePreviewSize = ref({ width: 0, height: 0 });
+const videoPreviewSize = ref({ width: 16, height: 9 });
+const imagePreviewUrl = computed(() => {
+  const template = props.template;
+  if (!template || !isPreviewImage.value) return '';
+  return String(template.mediaUrl || template.coverUrl || '').trim();
+});
+const imagePreviewFrameStyle = computed(() => {
+  if (!imagePreviewSize.value.width || !imagePreviewSize.value.height) return '';
+  return imageFrameStyle(imagePreviewSize.value.width, imagePreviewSize.value.height, 694);
+});
+const videoPreviewFrameStyle = computed(() => {
+  return imageFrameStyle(videoPreviewSize.value.width, videoPreviewSize.value.height, 694);
+});
+const previewFrameStyle = computed(() => {
+  if (isPreviewVideo.value) return videoPreviewFrameStyle.value;
+  if (isPreviewImage.value) return imagePreviewFrameStyle.value;
+  return '';
+});
+const mediaDownloadConfig = computed(() => {
+  return (configStore.publicConfig?.mediaDownload || {}) as MediaDownloadConfig;
+});
+
+let stopCaptureProtection: (() => void) | null = null;
+
+watch(
+  () => Boolean(props.template),
+  (active) => {
+    if (active) {
+      promptExpanded.value = false;
+      startCaptureProtection();
+      return;
+    }
+    imageViewerVisible.value = false;
+    stopCaptureProtection?.();
+    stopCaptureProtection = null;
+  },
+  { immediate: true }
+);
+
+watch(
+  imagePreviewUrl,
+  (url) => {
+    imagePreviewSize.value = { width: 0, height: 0 };
+    if (url) loadPreviewImageInfo(url);
+  },
+  { immediate: true }
+);
+
+watch(
+  () => [videoPreviewUrl.value, props.template?.ratio, props.template?.aspectRatio],
+  () => {
+    videoPreviewSize.value = videoSizeFromTemplate(props.template);
+  },
+  { immediate: true }
+);
+
+onUnmounted(() => {
+  stopCaptureProtection?.();
+  stopCaptureProtection = null;
+});
+
+function startCaptureProtection() {
+  if (stopCaptureProtection) return;
+  stopCaptureProtection = enableSensitiveCaptureProtection();
+}
+
+function openImageViewer() {
+  if (!imagePreviewUrl.value) return;
+  imageViewerVisible.value = true;
+}
+
+function loadPreviewImageInfo(src: string) {
+  uni.getImageInfo({
+    src,
+    success: (info) => updateImagePreviewSize(info.width, info.height),
+    fail: () => undefined
+  });
+}
+
+function onPreviewImageLoad(event: any) {
+  updateImagePreviewSize(event.detail?.width, event.detail?.height);
+}
+
+function onPreviewVideoLoadedMetadata(event: any) {
+  const detail = event?.detail || {};
+  updateVideoPreviewSize(
+    firstPositiveNumber(detail.width, detail.videoWidth, detail.naturalWidth),
+    firstPositiveNumber(detail.height, detail.videoHeight, detail.naturalHeight)
+  );
+}
+
+function updateImagePreviewSize(width?: number, height?: number) {
+  const nextWidth = Number(width || 0);
+  const nextHeight = Number(height || 0);
+  if (nextWidth > 0 && nextHeight > 0) {
+    imagePreviewSize.value = { width: nextWidth, height: nextHeight };
+  }
+}
+
+function updateVideoPreviewSize(width?: number, height?: number) {
+  const nextWidth = Number(width || 0);
+  const nextHeight = Number(height || 0);
+  if (nextWidth > 0 && nextHeight > 0) {
+    videoPreviewSize.value = { width: nextWidth, height: nextHeight };
+  }
+}
+
+function videoSizeFromTemplate(template: CreativeTemplate | null) {
+  const ratioSize = sizeFromRatio(String(template?.ratio || ''));
+  if (ratioSize) return ratioSize;
+  const aspectRatio = Number(template?.aspectRatio || 0);
+  if (Number.isFinite(aspectRatio) && aspectRatio > 0) {
+    return { width: aspectRatio, height: 1 };
+  }
+  return { width: 16, height: 9 };
+}
+
+function sizeFromRatio(value: string) {
+  const match = value.trim().match(/^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/);
+  if (!match) return null;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+  return { width, height };
+}
+
+function firstPositiveNumber(...values: unknown[]) {
+  return values.map((value) => Number(value || 0)).find((value) => value > 0) || 0;
+}
+
+function imageFrameStyle(width: number, height: number, frameWidthRpx: number) {
+  const ratio = clampRatio(width / height);
+  const frameHeight = Math.round(frameWidthRpx / ratio);
+  return `width: ${frameWidthRpx}rpx; height: ${frameHeight}rpx;`;
+}
+
+function clampRatio(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return 1;
+  return Math.max(0.25, Math.min(value, 4));
+}
+
+function togglePromptExpanded() {
+  if (!promptExpandable.value) return;
+  promptExpanded.value = !promptExpanded.value;
+}
 
 function saveMedia() {
   const template = props.template;
@@ -70,35 +271,38 @@ function saveMedia() {
     });
     return;
   }
-  if (template.mediaType === 'video') {
+  if (isPreviewVideo.value) {
     const videoUrl = videoPreviewUrl.value;
     if (!videoUrl) {
       uni.showToast({ title: '视频素材待接入', icon: 'none' });
       return;
     }
-    uni.downloadFile({
-      url: videoUrl,
-      success: (res) => {
-        if (res.statusCode && res.statusCode >= 400) {
-          uni.showToast({ title: '视频下载失败', icon: 'none' });
-          return;
-        }
-        uni.saveVideoToPhotosAlbum({
-          filePath: res.tempFilePath,
-          success: () => uni.showToast({ title: '已保存到相册', icon: 'none' }),
-          fail: (error) => uni.showToast({ title: albumSaveErrorText(error), icon: 'none' })
-        });
-      },
-      fail: () => uni.showToast({ title: '视频下载失败，请检查域名配置', icon: 'none' })
-    });
+    if (!isOwnDownloadableMediaUrl(videoUrl, mediaDownloadConfig.value)) {
+      showExternalSeedMediaNotice();
+      return;
+    }
+    downloadRemoteFile(videoUrl, { loading: '下载中' })
+      .then((filePath) => saveVideo(filePath))
+      .catch(() => undefined);
     return;
   }
 
-  uni.getImageInfo({
-    src: template.mediaUrl || template.coverUrl,
-    success: (res) => saveImage(res.path),
-    fail: () => uni.showToast({ title: '图片加载失败，请检查图片地址', icon: 'none' })
-  });
+  const imageUrl = imagePreviewUrl.value;
+  if (!imageUrl) {
+    uni.showToast({ title: '暂无可保存图片', icon: 'none' });
+    return;
+  }
+  if (!isOwnDownloadableMediaUrl(imageUrl, mediaDownloadConfig.value)) {
+    showExternalSeedMediaNotice();
+    return;
+  }
+  if (/^(wxfile|file):\/\//i.test(imageUrl)) {
+    saveImage(imageUrl);
+    return;
+  }
+  downloadRemoteFile(imageUrl, { loading: '下载中' })
+    .then((filePath) => saveImage(filePath))
+    .catch(() => undefined);
 }
 
 function saveImage(filePath: string) {
@@ -109,8 +313,25 @@ function saveImage(filePath: string) {
   });
 }
 
+function saveVideo(filePath: string) {
+  uni.saveVideoToPhotosAlbum({
+    filePath,
+    success: () => uni.showToast({ title: '已保存到相册', icon: 'none' }),
+    fail: (error) => uni.showToast({ title: albumSaveErrorText(error), icon: 'none' })
+  });
+}
+
 function onVideoError() {
   uni.showToast({ title: '视频无法播放，请检查视频域名或格式', icon: 'none' });
+}
+
+function showExternalSeedMediaNotice() {
+  uni.showModal({
+    title: '暂不支持保存',
+    content: '外部示例素材仅供灵感参考，请使用提示词生成同款后保存。',
+    showCancel: false,
+    confirmText: '知道了'
+  });
 }
 
 function albumSaveErrorText(error: unknown) {
@@ -126,6 +347,11 @@ function albumSaveErrorText(error: unknown) {
 </script>
 
 <style scoped lang="scss">
+.sheet-root {
+  position: relative;
+  z-index: 200;
+}
+
 .sheet-layer {
   position: fixed;
   inset: 0;
@@ -213,20 +439,58 @@ function albumSaveErrorText(error: unknown) {
   line-height: 1.5;
 }
 
+.prompt-content {
+  display: -webkit-box;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+}
+
+.prompt-box.expanded .prompt-content {
+  display: block;
+  overflow: visible;
+  text-overflow: clip;
+  -webkit-line-clamp: unset;
+}
+
+.prompt-toggle {
+  margin-top: 12rpx;
+  color: #735cff;
+  font-size: 24rpx;
+  font-weight: 900;
+}
+
 .preview-frame {
   position: relative;
   overflow: hidden;
   width: 100%;
-  max-height: 58vh;
   margin-top: 24rpx;
+  margin-right: auto;
+  margin-left: auto;
   border-radius: 18rpx;
-  background: #eef2f8;
+  background: #101729;
+}
+
+.preview-frame-image {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f2f5fb;
+}
+
+.preview-frame-video {
+  background: #101729;
 }
 
 .preview-media {
   display: block;
   width: 100%;
-  height: 640rpx;
+  height: 100%;
+}
+
+.preview-media-image {
+  height: 100%;
 }
 
 .empty-preview {
@@ -240,7 +504,7 @@ function albumSaveErrorText(error: unknown) {
 }
 
 .preview-media-video {
-  height: 430rpx;
+  height: 100%;
 }
 
 .video-play {
@@ -293,13 +557,23 @@ function albumSaveErrorText(error: unknown) {
   margin-top: 24rpx;
 }
 
+.sheet-actions-favorite {
+  grid-template-columns: minmax(0, 0.78fr) 88rpx minmax(0, 1.22fr);
+  gap: 14rpx;
+}
+
 .save-btn,
-.use-btn {
+.use-btn,
+.favorite-btn {
   display: flex;
   align-items: center;
   justify-content: center;
   height: 88rpx;
   border-radius: 44rpx;
+}
+
+.save-btn,
+.use-btn {
   font-size: 28rpx;
   font-weight: 900;
 }
@@ -314,5 +588,23 @@ function albumSaveErrorText(error: unknown) {
   background: linear-gradient(135deg, #6f63ff, #9a5cff);
   color: #ffffff;
   box-shadow: 0 16rpx 30rpx rgba(112, 91, 255, 0.24);
+}
+
+.favorite-btn {
+  width: 88rpx;
+  padding: 0;
+  border: 2rpx solid rgba(124, 91, 255, 0.18);
+  background: #f7f2ff;
+  box-shadow: inset 0 0 0 1rpx rgba(255, 255, 255, 0.74);
+}
+
+.favorite-btn.active {
+  border-color: rgba(139, 92, 255, 0.32);
+  background: #efe8ff;
+}
+
+.favorite-btn image {
+  width: 38rpx;
+  height: 38rpx;
 }
 </style>

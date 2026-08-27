@@ -10,7 +10,7 @@ const PROFILE_RELOAD_INTERVAL = 30_000; // 30 秒内不重复加载
 onLaunch(() => {
   const config = useConfigStore();
   config.hydrate();
-  config.loadPublicConfig().catch(() => undefined);
+  config.loadPublicConfig({ force: true }).catch(() => undefined);
 });
 
 onShow(async () => {

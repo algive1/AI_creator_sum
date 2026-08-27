@@ -6,6 +6,8 @@ interface ConfigState {
   publicConfig: Record<string, unknown>;
   homeData: Record<string, unknown> | null;
   loaded: boolean;
+  publicConfigReady: boolean;
+  publicConfigLoading: boolean;
 }
 
 const PUBLIC_CONFIG_TTL_MS = 60_000;
@@ -19,12 +21,14 @@ export const useConfigStore = defineStore('config', {
   state: (): ConfigState => ({
     publicConfig: {},
     homeData: null,
-    loaded: false
+    loaded: false,
+    publicConfigReady: false,
+    publicConfigLoading: false
   }),
   getters: {
     features: (state) => (state.publicConfig.features || {}) as Record<string, boolean>,
     customerService: (state) => (state.publicConfig.customerService || {}) as Record<string, unknown>,
-    appName: (state) => String(state.publicConfig.appName || state.publicConfig.siteName || 'AI创作工坊')
+    appName: (state) => String(state.publicConfig.appName || state.publicConfig.siteName || 'AI艺术生成工坊')
   },
   actions: {
     hydrate() {
@@ -33,21 +37,26 @@ export const useConfigStore = defineStore('config', {
     },
     async loadPublicConfig(options: { force?: boolean } = {}) {
       if (!options.force && this.loaded && Date.now() - publicConfigLoadedAt < PUBLIC_CONFIG_TTL_MS) {
+        this.publicConfigReady = true;
         return this.publicConfig;
       }
-      if (!options.force && publicConfigPromise) return publicConfigPromise;
+      if (publicConfigPromise) return publicConfigPromise;
       try {
+        this.publicConfigLoading = true;
         publicConfigPromise = getPublicApp<Record<string, unknown>>();
         const config = normalizePublicConfig(await publicConfigPromise);
         this.publicConfig = config;
         this.loaded = true;
+        this.publicConfigReady = true;
         publicConfigLoadedAt = Date.now();
         uni.setStorageSync(STORAGE_KEYS.config, config);
         return config;
       } catch (error) {
         this.hydrate();
+        this.publicConfigReady = true;
         throw error;
       } finally {
+        this.publicConfigLoading = false;
         publicConfigPromise = null;
       }
     },

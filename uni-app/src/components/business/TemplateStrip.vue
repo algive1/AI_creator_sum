@@ -82,13 +82,6 @@ function fallbackIconOf(mediaType: string) {
   height: 66rpx;
 }
 
-.template-card::after {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(180deg, transparent 45%, rgba(15, 23, 42, 0.66));
-  content: "";
-}
-
 .template-play {
   position: absolute;
   top: 50%;
@@ -136,11 +129,16 @@ function fallbackIconOf(mediaType: string) {
   left: 10rpx;
   z-index: 2;
   overflow: hidden;
+  height: 30rpx;
   color: #ffffff;
   font-size: 19rpx;
   font-weight: 900;
-  line-height: 1.2;
+  line-height: 30rpx;
   text-overflow: ellipsis;
+  text-shadow:
+    0 2rpx 4rpx rgba(0, 0, 0, 0.72),
+    0 0 10rpx rgba(0, 0, 0, 0.46),
+    0 1rpx 1rpx rgba(0, 0, 0, 0.62);
   white-space: nowrap;
 }
 </style>

@@ -5,10 +5,14 @@
     @tap="handleMaskTap"
     @touchmove.stop.prevent="noop"
   >
-    <view class="app-action-modal-card" :class="`variant-${dialog.variant || 'generic'}`" @tap.stop>
+    <view
+      class="app-action-modal-card"
+      :class="[`variant-${dialog.variant || 'generic'}`, { 'no-visual': !showModalVisual }]"
+      @tap.stop
+    >
       <button v-if="dialog.closable !== false" class="modal-close" @tap="handleClose">×</button>
 
-      <view class="modal-visual" :class="`visual-${dialog.variant || 'generic'}`">
+      <view v-if="showModalVisual" class="modal-visual" :class="`visual-${dialog.variant || 'generic'}`">
         <image v-if="dialog.image" class="modal-visual-image" :src="dialog.image" mode="aspectFit" />
         <image v-else-if="dialog.variant === 'saveHd'" class="modal-visual-image" src="/static/visuals/dialog/benefit-hd-save.png" mode="aspectFit" />
         <view v-else class="modal-symbol">{{ symbolText }}</view>
@@ -17,7 +21,12 @@
       <view class="modal-title">{{ dialog.title }}</view>
       <view v-if="dialog.subtitle" class="modal-subtitle">{{ dialog.subtitle }}</view>
 
-      <scroll-view v-if="dialog.richContent || dialog.content" scroll-y class="modal-content-scroll">
+      <scroll-view
+        v-if="dialog.richContent || dialog.content"
+        scroll-y
+        class="modal-content-scroll"
+        :class="{ 'agreement-content-scroll': dialog.variant === 'agreement' }"
+      >
         <rich-text v-if="dialog.richContent" class="modal-rich-text" :nodes="dialog.richContent" />
         <view v-else class="modal-content-text">{{ dialog.content }}</view>
       </scroll-view>
@@ -65,6 +74,7 @@ import { appDialogState, closeCurrentAppDialog } from '@/utils/app-dialog';
 
 const busy = ref(false);
 const dialog = computed(() => appDialogState.current);
+const showModalVisual = computed(() => dialog.value?.hideVisual !== true);
 const symbolText = computed(() => {
   if (dialog.value?.variant === 'agreement') return '✓';
   if (dialog.value?.variant === 'announcement') return '!';
@@ -162,6 +172,10 @@ async function runAction(result: 'primary' | 'secondary' | 'minor') {
   box-shadow: 0 26rpx 60rpx rgba(19, 45, 30, 0.24);
 }
 
+.app-action-modal-card.no-visual {
+  padding-top: 56rpx;
+}
+
 .modal-close {
   position: absolute;
   right: 20rpx;
@@ -256,12 +270,27 @@ async function runAction(result: 'primary' | 'secondary' | 'minor') {
   box-sizing: border-box;
 }
 
+.agreement-content-scroll {
+  max-height: 30vh;
+  padding: 22rpx 24rpx;
+  background:
+    linear-gradient(180deg, rgba(246, 255, 249, 0.92), rgba(255, 255, 255, 0.88));
+  text-align: center;
+}
+
 .modal-rich-text,
 .modal-content-text {
   color: #374151;
   font-size: 26rpx;
   font-weight: 650;
   line-height: 1.7;
+}
+
+.variant-agreement .modal-rich-text {
+  display: block;
+  font-size: 25rpx;
+  font-weight: 700;
+  text-align: center;
 }
 
 .modal-benefits {

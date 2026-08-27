@@ -1,7 +1,7 @@
 {
-  "name": "AI创作工坊",
+  "name": "AI艺术生成工坊",
   "appid": "__UNI__AICREATOR",
-  "description": "AI创作工坊 uni-app 小程序",
+  "description": "AI艺术生成工坊 uni-app 小程序",
   "versionName": "0.1.0",
   "versionCode": "1",
   "transformPx": false,

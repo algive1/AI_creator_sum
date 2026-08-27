@@ -11,7 +11,7 @@
       <block v-if="imageType === '图生图'">
         <LegacyAssetUploadCard
           :types="uploadTypes"
-          :uploaded-count="uploadedAssetCount"
+          :uploaded-count="displayedUploadedAssetCount"
           :max-uploads="maxUploads"
           @pick="pickAsset"
         />
@@ -52,10 +52,13 @@
       <LegacyPromptComposer
         v-model="prompt"
         :expanded="promptExpanded"
-        :placeholder="imageType === '图片编辑' ? '点击下方一键编辑，或写下你想怎么编辑图片' : '写点什么... 输入完成1秒后自动保存，最多2000字'"
+        :placeholder="promptPlaceholder"
         smart-label="✨ 智能补全"
         :show-smart-fill="promptOptimizeEnabled"
+        :smart-loading="promptOptimizing"
+        :show-help-button="showPromptGuide"
         @toggle-expanded="promptExpanded = !promptExpanded"
+        @help="openPromptGuide"
         @paste="pastePrompt"
         @select-all="selectAllPrompt"
         @clear="prompt = ''"
@@ -101,7 +104,7 @@
           </view>
           <view class="param-option-grid">
             <button
-              v-for="item in ratioOptions"
+              v-for="item in visibleRatioOptions"
               :key="item.key"
               class="param-option"
               :class="{ active: selectedRatio === item.key }"
@@ -110,6 +113,13 @@
               <text class="param-option-title">{{ item.label }}</text>
             </button>
           </view>
+          <button
+            v-if="ratioOptionsCollapsible"
+            class="ratio-toggle"
+            @tap="toggleRatioOptionsExpanded"
+          >
+            {{ ratioOptionsExpanded ? '收起比例' : `展开全部 ${ratioOptions.length} 个比例` }}
+          </button>
         </view>
         <view class="param-block">
           <view class="param-block-head">
@@ -157,6 +167,13 @@
               <text class="count-stepper-unit">张</text>
             </view>
           </view>
+          <view v-if="freeQuotaInfoVisible" class="free-quota-card" :class="freeQuotaInfoClass">
+            <view class="free-quota-copy">
+              <view class="free-quota-title">免费生图额度</view>
+              <view class="free-quota-desc">{{ freeQuotaInfoText }}</view>
+            </view>
+            <view class="free-quota-badge">{{ freeQuotaBadgeText }}</view>
+          </view>
         </view>
         <view v-if="shouldShowPlatformWatermarkCard" class="param-block">
           <view
@@ -175,9 +192,10 @@
         </view>
         <view v-if="modelOptions.length > 1 || !modelTiersLoading && !modelOptions.length" class="param-block">
           <view class="param-block-head">
-            <text class="param-block-title">模型档位</text>
+            <text class="param-block-title">入口档位</text>
             <text class="param-block-tip">{{ selectedModelCostLabel }}</text>
           </view>
+          <view class="entry-tier-note">切换入口档位后，比例参数和参考图数量会随当前档位变化</view>
           <view class="param-option-grid model-tier-grid">
             <button
               v-for="(item, index) in modelOptions"
@@ -186,15 +204,15 @@
               :class="{ active: selectedModelIndex === index }"
               @tap="selectModel(index)"
             >
-              <text class="param-option-title">{{ item.tierName }}</text>
+              <text class="param-option-title">{{ shortTierName(item.tierName) }}</text>
               <text class="param-option-desc">
-                <text v-if="item.memberDiscountApplied && item.basePointsCost > item.pointsCost" class="tier-base-cost">{{ item.basePointsCost }}</text>
-                {{ item.pointsCost }} 创作点
+                <text v-if="modelTierHasDiscount(item)" class="tier-base-cost">{{ modelTierBaseCost(item) }}</text>
+                {{ modelTierUnitCost(item) }} 创作点
               </text>
               <text v-if="item.memberDiscountApplied" class="tier-discount">{{ discountLabel(item.memberDiscountPercent) }}</text>
             </button>
           </view>
-          <view v-if="!modelTiersLoading && !modelOptions.length" class="tier-empty">当前功能暂无可用模型档位</view>
+          <view v-if="!modelTiersLoading && !modelOptions.length" class="tier-empty">当前功能暂无可用入口档位</view>
         </view>
       </view>
     </view>
@@ -217,7 +235,7 @@
 
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue';
-import { onLoad, onShow } from '@dcloudio/uni-app';
+import { onLoad, onShareAppMessage, onShareTimeline, onShow } from '@dcloudio/uni-app';
 import LegacyTopTabs from '@/components/legacy/LegacyTopTabs.vue';
 import LegacyPromptComposer from '@/components/legacy/LegacyPromptComposer.vue';
 import LegacyAssetUploadCard from '@/components/legacy/LegacyAssetUploadCard.vue';
@@ -228,6 +246,7 @@ import TemplatePreviewSheet from '@/components/business/TemplatePreviewSheet.vue
 import TemplateStrip from '@/components/business/TemplateStrip.vue';
 import { createImageTask, getImageModels, optimizeImagePrompt } from '@/api/ai-image';
 import { confirmCompliance } from '@/api/config';
+import { getMyFreeImageQuota, type FreeImageQuotaStatus } from '@/api/free-image-quota';
 import { getTemplates, useTemplate as useContentTemplate } from '@/api/template';
 import { updateMe } from '@/api/user';
 import { uploadAsset } from '@/api/upload';
@@ -236,7 +255,20 @@ import { assertPrompt } from '@/utils/validator';
 import { isDevFallbackEnabled, warnDevFallback } from '@/utils/dev-fallback';
 import { discountLabel } from '@/utils/member';
 import { normalizeBackendMediaUrl } from '@/utils/media-url';
-import { showMemberRequiredDialog } from '@/utils/app-dialog';
+import { getVisibleRatioOptions, shouldCollapseRatioOptions } from '@/utils/ratio-options';
+import { normalizeTierPricing, resolveTierPriceEstimate, type TierPricing } from '@/utils/tier-pricing';
+import { showAppDialog, showFreeQuotaInsufficientDialog, showMemberRequiredDialog } from '@/utils/app-dialog';
+import {
+  buildFreeImageQuotaCostText,
+  canUseFreeImageQuotaForSelection,
+  getFreeImageQuotaRemainingImages,
+  isGptImage2FreeQuotaModel,
+  isFreeImageQuotaTierAllowed,
+  resolveFreeQuotaReductionCount
+} from '@/utils/free-image-quota';
+import { getPromptGuide, hasPromptGuideDialog, type PromptGuideModeKey } from '@/utils/prompt-guide';
+import { createShareMessage, createShareTimeline, enableShareMenu, withQuery } from '@/utils/share';
+import { ensureLoggedIn } from '@/utils/login-guard';
 import { useUserStore } from '@/stores/user';
 import { useAuthStore } from '@/stores/auth';
 import { useConfigStore } from '@/stores/config';
@@ -276,10 +308,17 @@ type ModelTier = {
   tierKey: string;
   tierName: string;
   description: string;
+  modelName: string;
+  displayName: string;
+  apiModelName: string;
+  upstreamModelCode: string;
+  providerType: string;
+  freeImageQuotaModelEligible: boolean;
   basePointsCost: number;
   pointsCost: number;
   memberDiscountPercent: number;
   memberDiscountApplied: boolean;
+  pricing?: TierPricing | null;
   capabilities: ModelCapabilities;
   isDefault?: boolean;
 };
@@ -317,21 +356,35 @@ const prompt = computed({
 const form = computed(() => currentState.value.form);
 const assets = computed(() => currentState.value.assets);
 const uploadedAssetCount = computed(() => assets.value.filter(Boolean).length);
+const displayedUploadedAssetCount = computed(() => Math.min(uploadedAssetCount.value, maxUploads.value));
 const editImageState = computed(() => imageStates['图片编辑']);
 const editImageAsset = computed(() => editImageState.value.assets[0] || null);
 const editImagePreviewPath = computed(() => editImageAsset.value?.path || '');
 const promptOptimizeEnabled = computed(() => configStore.features.promptOptimize !== false);
+const promptGuideKey = computed<PromptGuideModeKey>(() => {
+  if (imageType.value === '图生图') return 'ai_image.img2img';
+  if (imageType.value === '图片编辑') return 'ai_image.edit';
+  return 'ai_image.text2img';
+});
+const defaultPromptPlaceholder = computed(() => imageType.value === '图片编辑'
+  ? '点击下方一键编辑，或写下你想怎么编辑图片'
+  : '写点什么... 输入完成1秒后自动保存，最多2000字');
+const currentPromptGuide = computed(() => getPromptGuide(configStore.publicConfig, promptGuideKey.value, defaultPromptPlaceholder.value));
+const promptPlaceholder = computed(() => currentPromptGuide.value.placeholder);
+const showPromptGuide = computed(() => hasPromptGuideDialog(currentPromptGuide.value));
 const hasEditImage = computed(() => Boolean(editImagePreviewPath.value || editImageState.value.uploadKeys[0]));
 const editTool = computed({
   get: () => currentState.value.editTool,
   set: (value: string) => { currentState.value.editTool = value; }
 });
 const promptExpanded = ref(false);
+const promptOptimizing = ref(false);
 const selectedSizeMode = ref<SizeMode>('auto');
 const selectedRatio = ref('auto');
 const selectedResolutionPreset = ref('auto');
 const selectedSizeKey = ref('');
 const selectedImageCount = ref(1);
+const ratioOptionsExpanded = ref(false);
 const editTools = ['换背景', '去水印', '局部重绘', '扩图', '提升清晰度', '改风格'];
 const models = ref<Record<string, unknown>[]>([]);
 const selectedModelIndex = ref(1);
@@ -346,6 +399,7 @@ const authStore = useAuthStore();
 const platformWatermarkEnabled = ref(true);
 const platformWatermarkOffConfirmed = ref(false);
 const isSubmitting = ref(false);
+const freeQuotaStatus = ref<FreeImageQuotaStatus | null>(null);
 const IMAGE_DRAFT_KEY = 'ai_creator_image_task_draft';
 let draftTimer: ReturnType<typeof setTimeout> | null = null;
 const fallbackCapabilities: ModelCapabilities = {
@@ -370,6 +424,12 @@ const fallbackModels: ModelTier[] = [
     tierKey: 'image_standard',
     tierName: '标准生图',
     description: '适合日常生图和电商素材',
+    modelName: '',
+    displayName: '',
+    apiModelName: '',
+    upstreamModelCode: '',
+    providerType: '',
+    freeImageQuotaModelEligible: false,
     basePointsCost: 2,
     pointsCost: 2,
     memberDiscountPercent: 100,
@@ -381,6 +441,12 @@ const fallbackModels: ModelTier[] = [
     tierKey: 'image_pro',
     tierName: '专业生图',
     description: '更高质量的商业图片生成',
+    modelName: '',
+    displayName: '',
+    apiModelName: '',
+    upstreamModelCode: '',
+    providerType: '',
+    freeImageQuotaModelEligible: false,
     basePointsCost: 5,
     pointsCost: 5,
     memberDiscountPercent: 100,
@@ -392,6 +458,12 @@ const fallbackModels: ModelTier[] = [
     tierKey: 'image_top',
     tierName: '顶级生图',
     description: '高质量创意与复杂画面生成',
+    modelName: '',
+    displayName: '',
+    apiModelName: '',
+    upstreamModelCode: '',
+    providerType: '',
+    freeImageQuotaModelEligible: false,
     basePointsCost: 10,
     pointsCost: 10,
     memberDiscountPercent: 100,
@@ -412,10 +484,17 @@ const modelOptions = computed<ModelTier[]>(() => {
     tierKey: String(item.tierKey || 'image_standard'),
     tierName: String(item.tierName || '标准生图'),
     description: String(item.description || ''),
+    modelName: String(item.modelName || ''),
+    displayName: String(item.displayName || ''),
+    apiModelName: String(item.apiModelName || item.api_model_name || item.modelCode || item.model_code || ''),
+    upstreamModelCode: String(item.upstreamModelCode || item.upstream_model_code || ''),
+    providerType: String(item.providerType || item.provider_type || ''),
+    freeImageQuotaModelEligible: item.freeImageQuotaModelEligible === true || item.free_image_quota_model_eligible === true,
     basePointsCost: Number(item.basePointsCost || item.pointsCost || 2),
     pointsCost: Number(item.pointsCost || 2),
     memberDiscountPercent: Number(item.memberDiscountPercent || 100),
     memberDiscountApplied: Boolean(item.memberDiscountApplied),
+    pricing: normalizeTierPricing(item.pricing),
     capabilities: normalizeCapabilities(item.capabilities),
     isDefault: Boolean(item.isDefault)
   }));
@@ -426,17 +505,58 @@ const modelOptions = computed<ModelTier[]>(() => {
 const selectedModel = computed(() => modelOptions.value[selectedModelIndex.value] || modelOptions.value[0]);
 const selectedModelName = computed(() => selectedModel.value?.tierName || '标准生图');
 const selectedModelDescription = computed(() => selectedModel.value?.description || '');
-const selectedModelCost = computed(() => Number(selectedModel.value?.pointsCost || 0));
+const selectedModelCost = computed(() => modelTierUnitCost(selectedModel.value));
 const selectedCapabilities = computed(() => selectedModel.value?.capabilities || fallbackCapabilities);
 const maxImageCount = computed(() => Math.max(1, Math.floor(Number(selectedCapabilities.value.maxImages || 1))));
 const maxUploads = computed(() => normalizeMaxReferenceImages(selectedCapabilities.value.maxReferenceImages));
 const totalModelCost = computed(() => selectedModelCost.value * selectedImageCount.value);
 const selectedModelCostLabel = computed(() => modelTiersLoading.value ? '加载中' : selectedModel.value ? `${selectedModelCost.value} 创作点/张` : '未配置');
-const generationCostText = computed(() => modelTiersLoading.value
-  ? '模型档位加载中'
+const pointsGenerationCostText = computed(() => modelTiersLoading.value
+  ? '入口档位加载中'
   : selectedModel.value
     ? `消耗 ${totalModelCost.value} 创作点 · ${selectedImageCount.value}张`
-    : '请先配置模型档位');
+    : '请先配置入口档位');
+const freeQuotaGenerationMode = computed(() => {
+  if (imageType.value === '图生图') return 'img2img';
+  if (imageType.value === '图片编辑') return 'edit';
+  return 'text2img';
+});
+const selectedModelSupportsFreeQuota = computed(() => isGptImage2FreeQuotaModel(selectedModel.value || null));
+const generationCostText = computed(() => buildFreeImageQuotaCostText(
+  freeQuotaStatus.value,
+  selectedImageCount.value,
+  pointsGenerationCostText.value,
+  selectedModel.value?.tierKey,
+  freeQuotaGenerationMode.value,
+  selectedModel.value || null,
+));
+const freeQuotaRemaining = computed(() => getFreeImageQuotaRemainingImages(freeQuotaStatus.value));
+const freeQuotaDailyLimit = computed(() => Math.max(0, Math.floor(Number(freeQuotaStatus.value?.dailyLimit) || 0)));
+const freeQuotaInfoVisible = computed(() => Boolean(
+  authStore.isLoggedIn
+  && freeQuotaStatus.value?.enabled
+  && freeQuotaStatus.value?.eligible
+  && selectedModelSupportsFreeQuota.value
+));
+const freeQuotaTierAllowed = computed(() => isFreeImageQuotaTierAllowed(freeQuotaStatus.value, selectedModel.value?.tierKey));
+const freeQuotaCanCoverSelection = computed(() => canUseFreeImageQuotaForSelection(
+  freeQuotaStatus.value,
+  selectedImageCount.value,
+  selectedModel.value?.tierKey,
+  freeQuotaGenerationMode.value,
+  selectedModel.value || null,
+));
+const freeQuotaInfoClass = computed(() => ({
+  active: freeQuotaCanCoverSelection.value,
+  muted: !freeQuotaCanCoverSelection.value,
+}));
+const freeQuotaBadgeText = computed(() => `${freeQuotaRemaining.value}/${freeQuotaDailyLimit.value || freeQuotaRemaining.value}`);
+const freeQuotaInfoText = computed(() => {
+  if (!freeQuotaTierAllowed.value) return '当前入口档位不在免费额度范围内，可切换支持的档位使用。';
+  if (freeQuotaRemaining.value <= 0) return freeQuotaStatus.value?.exhaustedMessage || '今日免费生图额度已用完。';
+  if (selectedImageCount.value > freeQuotaRemaining.value) return `本次选择 ${selectedImageCount.value} 张，减少到 ${freeQuotaRemaining.value} 张可免费生成。`;
+  return `本次可免费生成 ${selectedImageCount.value} 张，提交时优先使用免费额度。`;
+});
 const imageCountTip = computed(() => maxImageCount.value > 1 ? `当前最多一次生成 ${maxImageCount.value} 张` : '当前一次生成 1 张');
 const backendSizeOptions = computed<BackendSizeOption[]>(() => {
   const options = selectedCapabilities.value.sizeOptions?.length
@@ -455,6 +575,12 @@ const ratioOptions = computed<RatioOption[]>(() => {
   });
   return options;
 });
+const ratioOptionsCollapsible = computed(() => shouldCollapseRatioOptions(ratioOptions.value));
+const visibleRatioOptions = computed(() => getVisibleRatioOptions(
+  ratioOptions.value,
+  ratioOptionsExpanded.value,
+  selectedRatio.value,
+));
 const resolutionOptions = computed<ResolutionOption[]>(() => {
   const seen = new Set<string>();
   const options: ResolutionOption[] = [];
@@ -498,6 +624,7 @@ onLoad((query) => {
 });
 
 onShow(async () => {
+  enableShareMenu();
   configStore.hydrate();
   configStore.loadPublicConfig().catch(() => undefined);
   await authStore.hydrate();
@@ -505,17 +632,37 @@ onShow(async () => {
     await userStore.hydrate();
     syncWatermarkPreferenceFromProfile();
     userStore.loadFullProfile().then(syncWatermarkPreferenceFromProfile).catch(() => undefined);
+    loadFreeImageQuota().catch(() => undefined);
   } else {
     platformWatermarkEnabled.value = true;
     platformWatermarkOffConfirmed.value = false;
+    freeQuotaStatus.value = null;
   }
   loadImageModelsForMode();
   loadImageTemplates();
 });
 
+onShareAppMessage(() => createShareMessage({
+  title: 'AI 生图，一句话生成创意图片',
+  path: withQuery(PAGE_ROUTES.aiImage, { type: imageType.value })
+}));
+
+onShareTimeline(() => createShareTimeline({
+  title: 'AI 生图，一句话生成创意图片',
+  path: withQuery(PAGE_ROUTES.aiImage, { type: imageType.value })
+}));
+
 watch(imageType, () => {
   loadImageModelsForMode();
   scheduleDraftSave();
+});
+
+watch(() => selectedModel.value?.tierKey, () => {
+  ratioOptionsExpanded.value = false;
+});
+
+watch(() => maxUploads.value, () => {
+  trimCurrentAssetsToMaxUploads();
 });
 
 watch([
@@ -581,6 +728,14 @@ function loadImageModelsForMode() {
     modelTiersLoading.value = false;
     modelTiersLoaded.value = true;
   });
+}
+
+async function loadFreeImageQuota() {
+  if (!authStore.isLoggedIn) {
+    freeQuotaStatus.value = null;
+    return;
+  }
+  freeQuotaStatus.value = await getMyFreeImageQuota();
 }
 
 function loadImageTemplates() {
@@ -664,6 +819,7 @@ async function useTemplate(item: CreativeTemplate) {
   const targetState = imageStates[targetMode];
   targetState.prompt = item.prompt;
   targetState.form.scene = item.category || targetState.form.scene;
+  applyTemplateRatio(item.ratio);
   previewTemplate.value = null;
   if (item.mode === 'edit' && !targetState.assets.length) {
     uni.showToast({ title: '请先上传需要编辑的图片', icon: 'none' });
@@ -693,13 +849,57 @@ function normalizeCreativeTemplate(raw: Record<string, unknown>): CreativeTempla
     mode: imageTemplateMode(targetFeature, usageType),
     category: String(raw.category || raw.scene || raw.style || ''),
     duration: String(raw.duration || params.duration || ''),
+    ratio: normalizedTemplateRatio(raw.ratio || raw.aspectRatio || raw.aspect_ratio || params.ratio || params.aspectRatio || params.aspect_ratio),
     targetFeature,
     usageType,
     displayConfig,
+    createdAt: String(raw.createdAt || raw.created_at || raw.updatedAt || raw.updated_at || ''),
     canUse: raw.canUse !== false,
     canSave: raw.canSave !== false && raw.canUse !== false,
     lockReason: String(raw.lockReason || '')
   };
+}
+
+function normalizedTemplateRatio(value: unknown): string {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return closestKnownRatio(value);
+  }
+  const text = String(value || '').trim();
+  if (!text) return '';
+  if (text.toLowerCase() === 'auto') return 'auto';
+  const match = text.match(/^(\d{1,4})\s*[:\uFF1A/]\s*(\d{1,4})$/);
+  if (!match) return '';
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return '';
+  return ratioFromNumbers(width, height);
+}
+
+function closestKnownRatio(aspectRatio: number): string {
+  const commonRatios = ['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '5:4', '4:5'];
+  let closest = '';
+  let closestDistance = Number.MAX_VALUE;
+  commonRatios.forEach((ratio) => {
+    const [width, height] = ratio.split(':').map(Number);
+    const distance = Math.abs(width / height - aspectRatio);
+    if (distance < closestDistance) {
+      closest = ratio;
+      closestDistance = distance;
+    }
+  });
+  return closestDistance <= 0.02 ? closest : '';
+}
+
+function ratioFromNumbers(width: number, height: number): string {
+  const divisor = greatestCommonDivisor(width, height);
+  return `${width / divisor}:${height / divisor}`;
+}
+
+function greatestCommonDivisor(a: number, b: number): number {
+  let left = Math.abs(Math.round(a));
+  let right = Math.abs(Math.round(b));
+  while (right) [left, right] = [right, left % right];
+  return left || 1;
 }
 
 function numericTemplateId(value: unknown) {
@@ -733,8 +933,14 @@ function sortTemplatesForFeature(list: CreativeTemplate[], feature: string) {
     const bPin = templatePinMeta(b, feature);
     if (aPin.pinned !== bPin.pinned) return bPin.pinned - aPin.pinned;
     if (aPin.pinOrder !== bPin.pinOrder) return bPin.pinOrder - aPin.pinOrder;
-    return numericTemplateId(b.id) - numericTemplateId(a.id);
+    const createdDiff = templateCreatedValue(b) - templateCreatedValue(a);
+    return createdDiff || numericTemplateId(b.id) - numericTemplateId(a.id);
   });
+}
+
+function templateCreatedValue(item: CreativeTemplate) {
+  const time = item.createdAt ? new Date(item.createdAt).getTime() : NaN;
+  return Number.isFinite(time) ? time : 0;
 }
 
 function templatePinMeta(item: CreativeTemplate, feature: string) {
@@ -900,6 +1106,32 @@ function buildUploadKeys(state: ModeState) {
   }, []);
 }
 
+function openPromptGuide() {
+  const guide = currentPromptGuide.value;
+  if (!hasPromptGuideDialog(guide)) return;
+  showAppDialog({
+    variant: 'generic',
+    title: guide.title,
+    subtitle: guide.subtitle,
+    hideVisual: true,
+    richContent: guide.contentHtml || undefined,
+    content: guide.contentHtml ? undefined : guide.copyText,
+    primaryLabel: '我知道了',
+    secondaryLabel: '查看完整帮助',
+    minorLabel: guide.copyText ? guide.copyLabel : undefined,
+    closeOnMinor: false,
+    onMinor: () => {
+      if (!guide.copyText) return false;
+      uni.setClipboardData({ data: guide.copyText, success: () => uni.showToast({ title: '已复制示例', icon: 'success' }) });
+      return false;
+    },
+    onSecondary: () => {
+      const helpId = guide.helpId ? `&helpId=${encodeURIComponent(guide.helpId)}` : '';
+      uni.navigateTo({ url: `/pages/agreement/index?type=help${helpId}` });
+    }
+  });
+}
+
 function pastePrompt() {
   uni.getClipboardData({ success: (res) => { prompt.value = res.data || prompt.value; } });
 }
@@ -909,33 +1141,94 @@ function selectAllPrompt() {
 }
 
 async function optimizePrompt() {
+  if (promptOptimizing.value) return;
   if (!promptOptimizeEnabled.value) {
     uni.showToast({ title: '智能优化功能已关闭', icon: 'none' });
     return;
   }
   if (!assertPrompt(prompt.value)) return;
-  const result = await optimizeImagePrompt<Record<string, unknown>>({
+  promptOptimizing.value = true;
+  try {
+    const result = await optimizeImagePrompt<Record<string, unknown>>({
     featureKey: imageFeatureKey(),
     prompt: prompt.value,
     scene: form.value.scene,
-    ratio: selectedRatio.value !== 'auto' ? selectedRatio.value : undefined
+    ratio: selectedRatio.value !== 'auto' ? selectedRatio.value : undefined,
+    usage: 'deep_completion',
+    context: {
+      feature: 'image',
+      mode: imageType.value,
+      scene: form.value.scene,
+      brand: form.value.brand,
+      sellingPoint: form.value.sellingPoint,
+      sizeMode: selectedSizeMode.value,
+      ratio: selectedRatio.value,
+      resolutionPreset: selectedResolutionPreset.value,
+      imageCount: selectedImageCount.value,
+      hasReferenceImage: uploadedAssetCount.value > 0,
+      editTool: imageType.value === '图片编辑' ? editTool.value : '',
+      tierName: selectedModelName.value,
+      tierDescription: selectedModelDescription.value,
+    },
   });
-  prompt.value = String(result.optimizedPrompt || result.optimized_prompt || prompt.value);
+    prompt.value = String(result.optimizedPrompt || result.optimized_prompt || prompt.value);
+  } finally {
+    promptOptimizing.value = false;
+  }
 }
 
-async function submit() {
+function confirmRatioConflictBeforeSubmit(finalPrompt: string, selectedRatioValue: string) {
+  const conflictRatio = detectPromptRatioConflict(finalPrompt, selectedRatioValue);
+  if (!conflictRatio) return Promise.resolve(true);
+  return new Promise<boolean>((resolve) => {
+    uni.showModal({
+      title: '比例冲突提示',
+      content: `提示词中包含 ${conflictRatio}，当前选择 ${selectedRatioValue}。继续生成将以页面选择的比例为准。`,
+      cancelText: '返回修改',
+      confirmText: '继续生成',
+      success: (res) => resolve(Boolean(res.confirm)),
+      fail: () => resolve(false)
+    });
+  });
+}
+
+function detectPromptRatioConflict(text: string, selectedRatioValue: string) {
+  const selected = normalizedTemplateRatio(selectedRatioValue);
+  if (!selected || selected === 'auto') return '';
+  const promptRatio = promptRatioOf(text);
+  return promptRatio && promptRatio !== selected ? promptRatio : '';
+}
+
+function promptRatioOf(text: string) {
+  const raw = text || '';
+  const pixelMatch = raw.match(/(\d{2,5})\s*[xX\u00D7*]\s*(\d{2,5})/);
+  if (pixelMatch) return ratioFromNumbers(Number(pixelMatch[1]), Number(pixelMatch[2]));
+
+  const ratioMatch = raw.match(/(^|[^\d])(\d{1,4})\s*[:\uFF1A]\s*(\d{1,4})(?!\d)/);
+  if (ratioMatch) return normalizedTemplateRatio(`${ratioMatch[2]}:${ratioMatch[3]}`);
+
+  if (/正方形|方图|正方|square/i.test(raw)) return '1:1';
+  if (/横版|横图|宽屏|landscape/i.test(raw)) return '16:9';
+  if (/竖版|竖图|竖屏|portrait/i.test(raw)) return '9:16';
+  return '';
+}
+
+async function submit(billingSource: 'auto' | 'points' = 'auto') {
   if (isSubmitting.value) return;
   if (!authStore.isLoggedIn) {
-    uni.navigateTo({ url: `${PAGE_ROUTES.login}?redirect=${encodeURIComponent(PAGE_ROUTES.aiImage)}` });
-    return;
+    const loggedIn = await ensureLoggedIn({
+      title: '登录后提交生图任务',
+      subtitle: '登录并授权手机号后，可提交生成任务并同步作品。'
+    });
+    if (!loggedIn) return;
   }
   if (!assertPrompt(prompt.value)) return;
   if (modelTiersLoading.value) {
-    uni.showToast({ title: '模型档位加载中，请稍后再生成', icon: 'none' });
+    uni.showToast({ title: '入口档位加载中，请稍后再生成', icon: 'none' });
     return;
   }
   if (!selectedModel.value) {
-    uni.showToast({ title: '请先在后台配置可用模型档位', icon: 'none' });
+    uni.showToast({ title: '请先在后台配置可用入口档位', icon: 'none' });
     return;
   }
   const state = currentState.value;
@@ -963,12 +1256,14 @@ async function submit() {
     uni.showToast({ title: '当前档位暂无可用尺寸', icon: 'none' });
     return;
   }
+  const finalPrompt = buildFinalPrompt(prompt.value, state.form);
+  if (!(await confirmRatioConflictBeforeSubmit(finalPrompt, sizeOption.ratio))) return;
   isSubmitting.value = true;
   try {
   const result = await createImageTask<Record<string, unknown>>({
     featureKey,
     subType,
-    prompt: buildFinalPrompt(prompt.value, state.form),
+    prompt: finalPrompt,
     tierKey: String(selectedModel.value.tierKey),
     sizeMode: selectedSizeMode.value,
     ratio: sizeOption.ratio !== 'auto' ? sizeOption.ratio : undefined,
@@ -985,8 +1280,9 @@ async function submit() {
     },
     platformWatermarkEnabled: effectivePlatformWatermarkEnabled.value,
     uploadKeys: buildUploadKeys(state),
+    billingSource: billingSource === 'points' ? 'points' : undefined,
     editTool: imageType.value === '图片编辑' ? state.editTool || 'edit' : undefined
-  } as any);
+  } as any, { silent: true });
   const id = Number(result.id || result.taskId);
   if (!Number.isInteger(id) || id <= 0) {
     uni.showToast({ title: '任务提交失败，请稍后重试', icon: 'none' });
@@ -994,8 +1290,28 @@ async function submit() {
   }
   clearDraft();
   uni.redirectTo({ url: `${PAGE_ROUTES.result}?id=${id}&type=image` });
-  } catch {
-    // 请求层已展示错误提示，这里只避免页面产生未处理异常。
+  } catch (error: any) {
+    if (error?.code === 4606 && billingSource !== 'points') {
+      const data = (error.response?.data || {}) as Record<string, any>;
+      const action = await showFreeQuotaInsufficientDialog({ message: error.message, ...data });
+      if (action === 'primary' && data.canUsePoints) {
+        isSubmitting.value = false;
+        await submit('points');
+      }
+      const shouldReduceImageCount = (action === 'secondary' && data.canUsePoints) || action === 'minor';
+      if (shouldReduceImageCount) {
+        const reducedCount = resolveFreeQuotaReductionCount({ ...(freeQuotaStatus.value || {}), ...data }, selectedImageCount.value);
+        if (reducedCount > 0 && reducedCount < selectedImageCount.value) {
+          selectedImageCount.value = reducedCount;
+          uni.showToast({ title: `已调整为 ${reducedCount} 张`, icon: 'none' });
+        } else {
+          uni.showToast({ title: '当前没有可减少的免费张数', icon: 'none' });
+        }
+      }
+      loadFreeImageQuota().catch(() => undefined);
+      return;
+    }
+    uni.showToast({ title: error?.message || '提交失败，请稍后重试', icon: 'none' });
   } finally {
     isSubmitting.value = false;
   }
@@ -1015,6 +1331,10 @@ function selectResolutionOption(item: ResolutionOption) {
     || backendSizeOptions.value.find((size) => size.ratio === selectedRatio.value && size.resolutionPreset === item.key)
     || null;
   applySizeOption(option);
+}
+
+function toggleRatioOptionsExpanded() {
+  ratioOptionsExpanded.value = !ratioOptionsExpanded.value;
 }
 
 function selectModel(index: number) {
@@ -1114,6 +1434,13 @@ function normalizeImageParams() {
     || null;
   applySizeOption(current);
   selectedImageCount.value = Math.min(maxImageCount.value, Math.max(1, selectedImageCount.value));
+  trimCurrentAssetsToMaxUploads();
+}
+
+function trimCurrentAssetsToMaxUploads() {
+  const state = currentState.value;
+  state.assets.splice(maxUploads.value);
+  state.uploadKeys.splice(maxUploads.value);
 }
 
 function applySizeOption(option: BackendSizeOption | null) {
@@ -1128,6 +1455,36 @@ function applySizeOption(option: BackendSizeOption | null) {
   selectedRatio.value = option.ratio;
   selectedResolutionPreset.value = option.resolutionPreset;
   selectedSizeMode.value = option.ratio === 'auto' ? 'auto' : 'ratio';
+}
+
+function applyTemplateRatio(value: unknown) {
+  const ratio = normalizedTemplateRatio(value);
+  if (!ratio || ratio === selectedRatio.value) return;
+  const options = backendSizeOptions.value.filter((item) => item.ratio === ratio);
+  const option = options.find((item) => item.resolutionPreset === selectedResolutionPreset.value)
+    || chooseClosestSizeOption(options, selectedResolutionPreset.value);
+  if (option) applySizeOption(option);
+}
+
+function currentPricingParams() {
+  return { resolutionPreset: selectedResolutionPreset.value };
+}
+
+function modelTierPrice(model?: ModelTier) {
+  return resolveTierPriceEstimate(model, currentPricingParams());
+}
+
+function modelTierUnitCost(model?: ModelTier) {
+  return modelTierPrice(model).pointsCost;
+}
+
+function modelTierBaseCost(model?: ModelTier) {
+  return modelTierPrice(model).basePointsCost;
+}
+
+function modelTierHasDiscount(model?: ModelTier) {
+  const price = modelTierPrice(model);
+  return Boolean(model?.memberDiscountApplied && price.basePointsCost > price.pointsCost);
 }
 
 function chooseClosestSizeOption(options: BackendSizeOption[], currentResolution: string) {
@@ -1224,6 +1581,10 @@ function normalizeCapabilities(value: unknown): ModelCapabilities {
     maxImages: Number(caps.maxImages || fallbackCapabilities.maxImages || 1),
     maxReferenceImages: normalizeMaxReferenceImages(caps.maxReferenceImages)
   };
+}
+
+function shortTierName(value: unknown) {
+  return String(value || '').slice(0, 5);
 }
 
 function normalizeMaxReferenceImages(value: unknown) {
@@ -1641,6 +2002,14 @@ function buildFinalPrompt(basePrompt: string, data: FormState) {
   margin-bottom: 14rpx;
 }
 
+.entry-tier-note {
+  margin: -4rpx 0 14rpx;
+  color: #64748b;
+  font-size: 21rpx;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
 .param-block-title {
   color: #172033;
   font-size: 25rpx;
@@ -1657,6 +2026,26 @@ function buildFinalPrompt(basePrompt: string, data: FormState) {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12rpx;
+}
+
+.ratio-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 58rpx;
+  margin-top: 12rpx;
+  border: 2rpx solid #dce8f6;
+  border-radius: 14rpx;
+  background: #ffffff;
+  color: #6d4cff;
+  font-size: 23rpx;
+  font-weight: 900;
+  line-height: 58rpx;
+}
+
+.ratio-toggle::after {
+  border: 0;
 }
 
 .param-option {
@@ -1750,6 +2139,67 @@ function buildFinalPrompt(basePrompt: string, data: FormState) {
   font-size: 21rpx;
   font-weight: 700;
   line-height: 1.35;
+}
+
+.free-quota-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18rpx;
+  min-height: 86rpx;
+  margin-top: 14rpx;
+  padding: 16rpx 18rpx;
+  border: 2rpx solid #dce8f6;
+  border-radius: 16rpx;
+  background: #f8fbff;
+}
+
+.free-quota-card.active {
+  border-color: rgba(22, 163, 74, 0.32);
+  background: #f0fdf4;
+}
+
+.free-quota-card.muted {
+  background: #f8fafc;
+}
+
+.free-quota-copy {
+  min-width: 0;
+}
+
+.free-quota-title {
+  color: #172033;
+  font-size: 25rpx;
+  font-weight: 900;
+}
+
+.free-quota-desc {
+  margin-top: 8rpx;
+  color: #475569;
+  font-size: 21rpx;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.free-quota-card.active .free-quota-title,
+.free-quota-card.active .free-quota-badge {
+  color: #15803d;
+}
+
+.free-quota-badge {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 88rpx;
+  height: 46rpx;
+  padding: 0 14rpx;
+  border-radius: 23rpx;
+  background: #ffffff;
+  color: #64748b;
+  font-size: 22rpx;
+  font-weight: 900;
+  line-height: 46rpx;
 }
 
 .platform-watermark-card {
