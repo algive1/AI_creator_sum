@@ -38,13 +38,17 @@ export function normalizeImageParams(input: Record<string, any> = {}): Normalize
   };
 }
 
-export function isGptImage2Model(model: string): boolean {
-  return String(model || '').toLowerCase().includes('gpt-image-2');
+export function isGptImage2Model(model: string, providerType?: string): boolean {
+  const normalized = String(model || '').toLowerCase();
+  return normalized.includes('gpt-image-2')
+    || (String(providerType || '').toLowerCase() === 'xiaoma' && normalized.includes('tt-image-2'));
 }
 
 export function isNanoBananaModel(model: string): boolean {
   const normalized = String(model || '').toLowerCase();
-  return normalized.includes('nano-banana') || (normalized.includes('gemini') && normalized.includes('image-preview'));
+  return normalized.includes('nano-banana')
+    || (normalized.includes('gemini') && normalized.includes('image-preview'))
+    || hasCurrentXiaomaBananaModelToken(normalized);
 }
 
 export function applyGptImage2Params(body: Record<string, any>, normalized: NormalizedImageParams): void {
@@ -69,7 +73,14 @@ export function applyNanoBananaParams(body: Record<string, any>, normalized: Nor
 }
 
 function isNanoBanana2Model(model: unknown): boolean {
-  return String(model || '').toLowerCase().includes('gemini-3.1-flash-image-preview');
+  const normalized = String(model || '').toLowerCase();
+  return normalized.includes('gemini-3.1-flash-image-preview')
+    || hasCurrentXiaomaBananaModelToken(normalized, 'banana-2');
+}
+
+function hasCurrentXiaomaBananaModelToken(value: string, expected?: 'banana-2'): boolean {
+  const models = new Set(['banana-pro', 'banana-pro-token', 'banana-2', 'banana-2-token']);
+  return value.split(/\s+/).some((token) => models.has(token) && (!expected || token.startsWith(expected)));
 }
 
 export function applyGenericImageParams(body: Record<string, any>, normalized: NormalizedImageParams): void {

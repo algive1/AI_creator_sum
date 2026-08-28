@@ -48,6 +48,7 @@ export interface QueryTaskConfig {
   timeout: number;
   authType: string;
   queryTaskUrl?: string;
+  model?: string;
 }
 
 export interface QueryTaskResult {
@@ -100,13 +101,19 @@ export interface IProviderAdapter {
 
 const STATUS_FALLBACK: Record<string, string> = {
   created: 'pending',
+  submitted: 'queued',
+  waiting: 'queued',
   pending: 'processing',
   queued: 'queued',
   running: 'processing',
   processing: 'processing',
+  in_progress: 'processing',
+  'in-progress': 'processing',
   generating: 'processing',
   success: 'completed',
   succeeded: 'completed',
+  complete: 'completed',
+  finished: 'completed',
   completed: 'completed',
   done: 'completed',
   error: 'failed',
@@ -151,18 +158,30 @@ const RESULT_CONTAINER_KEYS = [
   'audios',
   'audio_urls',
   'urls',
+  'task',
+  'response',
+  'payload',
 ];
 const RESULT_VALUE_KEYS = [
   'url',
   'image_url',
+  'imageUrl',
   'output_url',
+  'outputUrl',
   'result_url',
+  'resultUrl',
   'download_url',
+  'downloadUrl',
   'video_url',
+  'videoUrl',
   'audio_url',
+  'audioUrl',
   'file_url',
+  'fileUrl',
   'b64_json',
+  'b64Json',
   'b64_video',
+  'b64Video',
   'remixed_from_video_id',   // Agnes AI video output URL
 ];
 

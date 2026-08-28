@@ -172,12 +172,13 @@ router.get('/tasks', adminAuthMiddleware, async (req: Request, res: Response) =>
     const list = await query<any>(
       `SELECT t.id, t.task_no, t.user_id, t.task_type, t.title, t.status, t.progress, t.points_cost, t.points_refunded,
               t.fail_reason, t.created_at, t.completed_at, t.failed_at, t.actual_model_id,
-              u.nickname, mt.tier_name, m.name AS model_name, p.name AS provider_name
+              u.nickname, mt.tier_name, COALESCE(m.name, ma.name) AS model_name, p.name AS provider_name
          FROM ai_tasks t
          JOIN users u ON u.id = t.user_id
          LEFT JOIN model_tiers mt ON mt.id = t.tier_id
          LEFT JOIN ai_models m ON m.id = t.actual_model_id
-         LEFT JOIN ai_model_providers p ON p.id = m.provider_id
+         LEFT JOIN ai_model_catalog_archive ma ON ma.original_model_id = t.actual_model_id
+         LEFT JOIN ai_model_providers p ON p.id = COALESCE(m.provider_id, ma.provider_id)
         WHERE ${where}
         ORDER BY t.created_at DESC LIMIT ? OFFSET ?`,
       [...p, ps, off],
@@ -276,13 +277,14 @@ router.get('/tasks/:id(\\d+)', adminAuthMiddleware, async (req: Request, res: Re
     const tid = parseInt(req.params.id);
     pollProviderTaskIfDue(tid).catch(() => undefined);
     const t = await queryOne<any>(
-      `SELECT t.*, u.nickname, mt.tier_name, mt.tier_key, m.name AS actual_model_name,
-              m.api_model_name, p.name AS provider_name, p.provider_type
+      `SELECT t.*, u.nickname, mt.tier_name, mt.tier_key, COALESCE(m.name, ma.name) AS actual_model_name,
+              COALESCE(m.api_model_name, ma.api_model_name) AS api_model_name, p.name AS provider_name, p.provider_type
          FROM ai_tasks t
          JOIN users u ON u.id = t.user_id
          LEFT JOIN model_tiers mt ON mt.id = t.tier_id
          LEFT JOIN ai_models m ON m.id = t.actual_model_id
-         LEFT JOIN ai_model_providers p ON p.id = m.provider_id
+         LEFT JOIN ai_model_catalog_archive ma ON ma.original_model_id = t.actual_model_id
+         LEFT JOIN ai_model_providers p ON p.id = COALESCE(m.provider_id, ma.provider_id)
         WHERE t.id = ?`,
       [tid],
     );
@@ -300,10 +302,11 @@ router.get('/tasks/:id(\\d+)', adminAuthMiddleware, async (req: Request, res: Re
     const callLogs = await query<any>(
       `SELECT l.id, l.task_id, l.model_id, l.provider_id, l.user_id, l.call_type, l.attempt_number,
               l.status_code, l.is_success, l.error_type, l.error_message, l.latency_ms, l.created_at,
-              m.name AS model_name, p.name AS provider_name, p.provider_type
+              COALESCE(m.name, ma.name) AS model_name, p.name AS provider_name, p.provider_type
          FROM ai_model_call_logs l
          LEFT JOIN ai_models m ON m.id = l.model_id
-         LEFT JOIN ai_model_providers p ON p.id = l.provider_id
+         LEFT JOIN ai_model_catalog_archive ma ON ma.original_model_id = l.model_id
+         LEFT JOIN ai_model_providers p ON p.id = COALESCE(l.provider_id, m.provider_id, ma.provider_id)
         WHERE l.task_id = ?
         ORDER BY l.created_at`,
       [tid],

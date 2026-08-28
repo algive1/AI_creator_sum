@@ -40,3 +40,16 @@ test('generation pages keep uploaded asset counts within the selected entry tier
     );
   }
 });
+
+test('image page keeps text-to-image text-only and uses a large image-edit upload card', () => {
+  assert.match(imageSource, /<block v-if="imageType === '图生图'">/);
+  assert.match(imageSource, /<view v-else-if="imageType === '图片编辑'" class="image-edit-upload-section">/);
+  assert.match(imageSource, /class="[^"]*image-edit-upload-card/);
+  assert.match(imageSource, /继续上传/);
+  assert.match(imageSource, /:max="maxUploads"/);
+  assert.match(imageSource, /已上传 \{\{ displayedUploadedAssetCount \}\}\/\{\{ maxUploads \}\}/);
+  assert.match(imageSource, /function chooseAndSetEditImage\(replaceIndex\?: number\)/);
+  assert.doesNotMatch(imageSource, /showDynamicReferenceUpload/);
+  assert.doesNotMatch(imageSource, /supportsReferenceUpload/);
+  assert.doesNotMatch(imageSource, /imageUploadTypes/);
+});

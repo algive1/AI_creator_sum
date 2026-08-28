@@ -41,16 +41,16 @@ async function main() {
   }
 
   const pixels = resolveImageSize({ prompt: '生成一张 320x100 像素的电商横幅', ratio: '9:16', tierDefaultRatio: '1:1' });
-  if (pixels.width !== 320 || pixels.height !== 100 || pixels.source !== 'prompt_pixel') {
-    throw new Error('prompt 像素尺寸没有优先于 UI ratio');
+  if (pixels.width !== 864 || pixels.height !== 1536 || pixels.source !== 'ui_ratio') {
+    throw new Error('UI ratio 没有覆盖提示词像素尺寸');
   }
-  if (!pixels.conflict || pixels.conflictType !== 'prompt_pixel_overrides_ui_ratio') {
-    throw new Error('prompt 像素尺寸和 UI ratio 冲突未记录 warning');
+  if (!pixels.conflict || pixels.conflictType !== 'ui_ratio_overrides_prompt_pixel') {
+    throw new Error('UI ratio 和提示词像素尺寸冲突未记录 warning');
   }
 
   const ratio = resolveImageSize({ prompt: '生成一张 16:9 横版海报', ratio: '9:16', tierDefaultRatio: '1:1' });
-  if (ratio.ratio !== '16:9' || ratio.source !== 'prompt_ratio' || !ratio.conflict) {
-    throw new Error('prompt 16:9 没有优先于 UI ratio');
+  if (ratio.ratio !== '9:16' || ratio.source !== 'ui_ratio' || !ratio.conflict) {
+    throw new Error('UI ratio 没有优先于提示词比例');
   }
 
   const fallback = resolveImageSize({ prompt: '生成一张产品图', tierDefaultRatio: '1:1' });

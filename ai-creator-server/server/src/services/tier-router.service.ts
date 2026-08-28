@@ -213,7 +213,7 @@ export function mapCapabilities(row: any): TierCapabilities {
     postprocessModes: parseJson(row.postprocess_modes, ['cover', 'contain', 'resize']),
     allowUpscale: !!row.allow_upscale,
     maxImages: row.max_images || 1,
-    maxReferenceImages: row.max_reference_images || 4,
+    maxReferenceImages: row.max_reference_images ?? 4,
     maxVideoUrls: row.max_video_urls === null || row.max_video_urls === undefined ? undefined : Number(row.max_video_urls),
     maxAudioUrls: row.max_audio_urls === null || row.max_audio_urls === undefined ? undefined : Number(row.max_audio_urls),
     maxDurationSeconds: row.max_duration_seconds || 30,
@@ -395,6 +395,7 @@ function enrichModelCapabilities(featureKey: string, tierKey: string, caps: Tier
     ratios: caps.ratios,
     qualities: caps.qualities,
     maxImages: caps.maxImages,
+    maxReferenceImages: caps.maxReferenceImages,
   });
   return {
     ...caps,
@@ -404,6 +405,7 @@ function enrichModelCapabilities(featureKey: string, tierKey: string, caps: Tier
     sizeOptions: sizeCaps.sizeOptions,
     defaultSizeKey: sizeCaps.defaultSizeKey,
     maxImages: sizeCaps.maxImages,
+    maxReferenceImages: sizeCaps.maxReferenceImages,
   };
 }
 

@@ -18,6 +18,7 @@ export const XIAOMA_VIDEO_PARAM_NAMES = [
   'reference_videos',
   'reference_video_url',
   'reference_video_urls',
+  'clips',
 ] as const;
 
 export const XIAOMA_AUDIO_PARAM_NAMES = [

@@ -573,10 +573,12 @@ async function runAiGenerationTest(req: Request, res: Response, expectedType: 'i
   const adapter = AdapterRegistry.get(model.provider_type);
   if (!adapter) { error(res, ErrorCodes.PARAM_ERROR, '当前供应商类型暂未支持测试。'); return; }
   try {
+    const modelConfig = typeof model.config === 'string' ? JSON.parse(model.config || '{}') : (model.config || {});
     const result = await adapter.submitTask({
       upstreamCode: model.upstream_model_code || model.api_model_name,
       taskType: expectedType === 'image' ? 'text_to_image' : 'text_to_video',
       prompt: req.body?.prompt || (expectedType === 'image' ? '一张简洁的上线测试图片' : '一个 3 秒的上线测试视频'),
+      modelConfig,
       params: expectedType === 'image'
         ? { imageCount: 1, nativeSize: '1024x1024', quality: 'standard' }
         : { duration: 3, ratio: '16:9', quality: 'standard' },
@@ -601,6 +603,7 @@ async function runAiGenerationTest(req: Request, res: Response, expectedType: 'i
           apiKey: decryptApiKey(model.api_key),
           timeout: 30000,
           authType: model.auth_type || 'bearer',
+          model: model.upstream_model_code || model.api_model_name,
         });
         const mapping = typeof model.status_mapping === 'string' ? JSON.parse(model.status_mapping || '{}') : (model.status_mapping || {});
         const status = adapter.mapStatus(queryResult.status, mapping);

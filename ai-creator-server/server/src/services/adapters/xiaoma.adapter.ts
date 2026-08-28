@@ -21,6 +21,8 @@ import {
 } from './image-param-mapper';
 import {
   applyXiaomaRemoteMediaParams,
+  applyXiaomaDeclaredScalarParams,
+  applyXiaomaDeclaredValueFormats,
   applyXiaomaVideoParams,
   isXiaomaVideoTaskType,
 } from './xiaoma-video-param-mapper';
@@ -101,8 +103,8 @@ export class XiaomaAdapter implements IProviderAdapter {
       timeout: Math.max(timeout, 60000),
     });
 
-    const data = resp.data;
-    const providerError = extractProviderError(data);
+    const data = unwrapXiaomaBody(resp.data);
+    const providerError = extractProviderError(data, { requireSuccessCode: true });
     if (providerError) {
       return {
         type: 'sync',
@@ -112,8 +114,12 @@ export class XiaomaAdapter implements IProviderAdapter {
       };
     }
     const result = this.parseResult(data, '');
-    const taskId = extractString(data, ['task_id', 'id', 'data.task_id', 'data.id', 'data.taskId']);
-    const status = extractString(data, ['status', 'state', 'data.status', 'data.state']) || (taskId ? 'queued' : 'success');
+    const taskId = extractString(data, [
+      'task_id', 'id', 'data.task_id', 'data.id', 'data.taskId', 'data.task.id', 'data.task.task_id', 'data.result.id', 'data.result.task_id', 'task.id', 'task.task_id', 'result.id', 'result.task_id',
+    ]);
+    const status = extractString(data, [
+      'status', 'state', 'status_group', 'data.status', 'data.state', 'data.status_group', 'data.task.status', 'data.task.state', 'data.result.status', 'data.result.state', 'task.status', 'task.state', 'result.status', 'result.state',
+    ]) || (taskId ? 'queued' : 'success');
 
     if (result.urls.length > 0) {
       return {
@@ -282,7 +288,7 @@ export class XiaomaAdapter implements IProviderAdapter {
         timeout: config.timeout || 30000,
       });
 
-      const data = resp.data;
+      const data = unwrapXiaomaBody(resp.data);
       const providerError = extractProviderError(data);
       if (providerError) {
         recordCircuitFailure(circuitKey);
@@ -294,10 +300,14 @@ export class XiaomaAdapter implements IProviderAdapter {
         };
       }
       recordCircuitSuccess(circuitKey);
-      const status = extractString(data, ['state', 'status', 'data.state', 'data.status', 'status_group']) || 'running';
+      const status = extractString(data, [
+        'state', 'status', 'status_group', 'data.state', 'data.status', 'data.status_group', 'data.task.state', 'data.task.status', 'data.result.status', 'data.result.state', 'task.status', 'task.state', 'result.status', 'result.state',
+      ]) || 'running';
       const normalized = this.mapStatus(status, {});
       const result = this.parseResult(data, '');
-      const errorMessage = extractString(data, ['error.message', 'error', 'data.error.message', 'data.error', 'message']);
+      const errorMessage = extractString(data, [
+        'error.message', 'error', 'data.error.message', 'data.error', 'data.task.error.message', 'data.task.error', 'data.result.error.message', 'data.result.error', 'task.error.message', 'result.error.message', 'message', 'msg', 'data.message', 'data.msg',
+      ]);
       const isFinal = extractBoolean(data, ['is_final', 'data.is_final']) || ['completed', 'failed', 'cancelled'].includes(normalized);
 
       if (!isFinal && !['failed', 'cancelled'].includes(normalized)) {
@@ -340,7 +350,7 @@ export class XiaomaAdapter implements IProviderAdapter {
     ]);
     const cost = normalizeNumber(value, Number.NaN);
     if (!Number.isFinite(cost)) return null;
-    return { apiCostCents: Math.round(cost * 100), apiCurrency: 'USD', apiRawCost: cost };
+    return { apiCostCents: Math.round(cost * 100), apiCurrency: 'CNY', apiRawCost: cost };
   }
 
   mapStatus(relayStatus: string, mapping: Record<string, string>): string {
@@ -423,27 +433,84 @@ export function buildXiaomaMediaParams(params: SubmitTaskParams): JsonObject {
 
   const model = String(params.upstreamCode || '').toLowerCase();
   if (isXiaomaVideoTaskType(params.taskType)) {
+    applyXiaomaDefaultParams(out, params.modelConfig);
     applyXiaomaVideoParams(out, input, model);
   } else {
+    applyXiaomaDefaultParams(out, params.modelConfig);
     const normalized = normalizeImageParams(input);
-    if (isGptImage2Model(model)) {
+    if (isGptImage2Model(model, 'xiaoma')) {
       applyGptImage2Params(out, normalized);
     } else if (isNanoBananaModel(model)) {
       applyNanoBananaParams(out, normalized, model);
     } else {
       applyGenericImageParams(out, normalized);
-      applyXiaomaGenericImageParams(out, normalized);
+      applyXiaomaGenericImageParams(out, normalized, params.modelConfig);
     }
   }
+  applyXiaomaDeclaredScalarParams(out, input, params.modelConfig);
+  applyXiaomaDeclaredValueFormats(out, params.modelConfig);
   applyXiaomaRemoteMediaParams(out, params.modelConfig);
   return out;
 }
 
-function applyXiaomaGenericImageParams(out: JsonObject, normalized: ReturnType<typeof normalizeImageParams>): void {
+function applyXiaomaGenericImageParams(
+  out: JsonObject,
+  normalized: ReturnType<typeof normalizeImageParams>,
+  modelConfig?: Record<string, any>,
+): void {
   const ratio = String(normalized.ratio || '').trim();
-  if (ratio && ratio !== 'auto') out.aspect_ratio = ratio;
   const resolution = String(normalized.resolutionPreset || '').trim();
-  if (resolution && resolution !== 'auto') out.resolution = resolution;
+  const parameterNames = new Set<string>([
+    ...(Array.isArray(modelConfig?.param_names) ? modelConfig.param_names : []),
+    ...(Array.isArray(modelConfig?.paramNames) ? modelConfig.paramNames : []),
+    ...collectDeclaredParameterNames(modelConfig?.remote_parameters || modelConfig?.remoteParameters),
+  ].map((item) => String(item || '').trim().toLowerCase().replace(/[-_\s]/g, '')));
+  const hasDeclaredParameters = parameterNames.size > 0;
+  const hasAspectRatioParam = parameterNames.has('aspectratio') || parameterNames.has('ratio');
+  const hasSizeParam = parameterNames.has('size');
+  const hasResolutionParam = parameterNames.has('resolution');
+  const hasQualityParam = parameterNames.has('quality');
+  const hasImageCountParam = ['n', 'count', 'imagecount', 'numimages', 'numberofimages', 'outputcount'].some((name) => parameterNames.has(name));
+  const upstreamSize = String(normalized.sizeOption?.upstreamSize || '').trim();
+
+  if (hasDeclaredParameters && !hasAspectRatioParam) delete out.aspect_ratio;
+  else if (ratio && ratio !== 'auto') out.aspect_ratio = ratio;
+
+  if (hasSizeParam) {
+    if (upstreamSize && upstreamSize !== 'auto') out.size = upstreamSize;
+  } else if (hasDeclaredParameters) {
+    delete out.size;
+  }
+
+  if (hasResolutionParam) {
+    if (resolution && resolution !== 'auto') out.resolution = resolution;
+  } else if (hasDeclaredParameters) {
+    delete out.resolution;
+  }
+
+  if (hasDeclaredParameters && !hasQualityParam) delete out.quality;
+  if (hasDeclaredParameters && !hasImageCountParam) delete out.n;
+
+  if (!hasDeclaredParameters && resolution && resolution !== 'auto') {
+    out.resolution = resolution;
+  }
+}
+
+function applyXiaomaDefaultParams(out: JsonObject, modelConfig?: Record<string, any>): void {
+  const defaults = modelConfig?.default_params || modelConfig?.defaultParams;
+  if (!defaults || typeof defaults !== 'object' || Array.isArray(defaults)) return;
+  const declared = collectDeclaredParameterNames(modelConfig?.remote_parameters || modelConfig?.remoteParameters)
+    .concat(Array.isArray(modelConfig?.param_names) ? modelConfig.param_names : [])
+    .concat(Array.isArray(modelConfig?.paramNames) ? modelConfig.paramNames : [])
+    .map((item) => String(item || '').trim().toLowerCase().replace(/[-_\s]/g, ''))
+    .filter(Boolean);
+  const declaredNames = new Set(declared);
+  for (const [key, value] of Object.entries(defaults)) {
+    if (value === undefined || value === null || out[key] !== undefined) continue;
+    if (declaredNames.size && !declaredNames.has(String(key).trim().toLowerCase().replace(/[-_\s]/g, ''))) continue;
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') out[key] = value;
+    else if (Array.isArray(value)) out[key] = value.map((item) => String(item)) as JsonValue;
+  }
 }
 
 function isInternalParamKey(key: string): boolean {
@@ -460,12 +527,29 @@ function isInternalParamKey(key: string): boolean {
     'sizeWarnings',
     'sizeOption',
     'sizeKey',
+    'width',
+    'height',
     'resolutionPreset',
     'resolutionLabel',
     'qualityPreset',
     'qualityLabel',
     'imageCount',
   ].includes(key);
+}
+
+function collectDeclaredParameterNames(remoteParams: unknown): string[] {
+  if (!Array.isArray(remoteParams)) return [];
+  const names: string[] = [];
+  const visit = (item: any): void => {
+    if (!item || typeof item !== 'object') return;
+    for (const key of ['name', 'key', 'field', 'mapsTo']) {
+      const value = trimString(item[key]);
+      if (value) names.push(value);
+    }
+    if (Array.isArray(item.parameters)) item.parameters.forEach(visit);
+  };
+  remoteParams.forEach(visit);
+  return names;
 }
 
 function joinUrl(baseUrl: string, path: string): string {
@@ -526,15 +610,38 @@ function getPath(value: unknown, path: string): unknown {
   return current;
 }
 
-function extractProviderError(data: unknown): { code: string; message: string } | null {
-  const numericCode = getFirstPath(data, ['code', 'error.code', 'data.code']);
+function extractProviderError(data: unknown, options: { requireSuccessCode?: boolean } = {}): { code: string; message: string } | null {
+  const numericCode = getFirstPath(data, ['code', 'error.code', 'data.code', 'data.error.code', 'data.task.code', 'data.result.code']);
   const codeText = String(numericCode ?? '').trim();
-  const isErrorCode = codeText !== '' && !['0', '200', 'success', 'ok'].includes(codeText.toLowerCase());
-  const message = extractString(data, ['msg', 'message', 'error.message', 'error', 'data.msg', 'data.message', 'data.error.message']);
-  const explicitFailure = ['false', 'failed', 'error'].includes(String(getFirstPath(data, ['success', 'status', 'state']) ?? '').toLowerCase());
-  if (!isErrorCode && !explicitFailure) return null;
+  const allowedCodes = options.requireSuccessCode
+    ? ['200']
+    : ['0', '200', '201', '202', '204', 'success', 'ok', 'accepted', 'created', 'queued', 'pending', 'processing', 'completed'];
+  const isErrorCode = codeText !== '' && !allowedCodes.includes(codeText.toLowerCase());
+  const missingRequiredCode = Boolean(options.requireSuccessCode && !codeText);
+  const message = extractString(data, [
+    'msg', 'message', 'error.message', 'error', 'data.msg', 'data.message', 'data.error.message', 'data.task.message', 'data.task.msg', 'data.task.error.message', 'data.result.message', 'data.result.msg', 'data.result.error.message', 'task.message', 'task.msg', 'task.error.message', 'result.message', 'result.msg', 'result.error.message',
+  ]);
+  const statusValues = [
+    'success', 'status', 'state', 'status_group',
+    'data.success', 'data.status', 'data.state', 'data.status_group',
+    'data.task.success', 'data.task.status', 'data.task.state',
+    'data.result.success', 'data.result.status', 'data.result.state',
+    'task.success', 'task.status', 'task.state',
+    'result.success', 'result.status', 'result.state',
+  ].map((path) => getPath(data, path));
+  const explicitFailure = statusValues.some((value) => ['false', 'failed', 'error', 'cancelled', 'canceled'].includes(String(value ?? '').toLowerCase()));
+  if (!isErrorCode && !missingRequiredCode && !explicitFailure) return null;
   return {
     code: codeText || 'XIAOMA_ERROR',
     message: message || `小马AI返回业务错误：${summarizeProviderResponse(data, 600)}`,
   };
+}
+
+function unwrapXiaomaBody(data: any): any {
+  if (typeof data !== 'string') return data;
+  try {
+    return JSON.parse(data);
+  } catch {
+    return data;
+  }
 }

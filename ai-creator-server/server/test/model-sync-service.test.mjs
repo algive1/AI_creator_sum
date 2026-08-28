@@ -84,6 +84,17 @@ assert.deepEqual(
 assert.equal(preview.updates[0].before.modelType, 'unknown');
 assert.equal(preview.updates[0].after.modelType, 'image');
 
+const incompletePreview = service.buildModelSyncPreview({
+  providerId: 3,
+  providerName: '小马 AI',
+  existingRows,
+  remoteModels: [],
+  catalogComplete: false,
+  removalPolicy: 'delete',
+});
+assert.equal(incompletePreview.removalBlocked, true);
+assert.equal(incompletePreview.removals.length, 0);
+
 const updatePatch = service.buildExistingModelUpdatePatch(preview.updates[0]);
 assert.deepEqual(Object.keys(updatePatch).sort(), ['config', 'model_type', 'query_task_url']);
 assert.equal(updatePatch.model_type, 'image');
@@ -166,6 +177,8 @@ const hongniaoSeed = service.generateHongniaoSeedMigration({
   checkedAt: '2026-06-19',
 });
 assert.match(hongniaoSeed, /'sdquan-2'.*?, 58, 580, 8800,/s);
+assert.match(hongniaoSeed, /hard-delete/i);
+assert.doesNotMatch(hongniaoSeed, /soft-disable|inactive/i);
 
 const textPreview = service.buildModelSyncPreview({
   providerId: 4,

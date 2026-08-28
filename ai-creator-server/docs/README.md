@@ -35,3 +35,11 @@
 ## 专项运维
 
 - [TASK_TIMEOUT_RECOVERY_20260619.md](TASK_TIMEOUT_RECOVERY_20260619.md)：图片/视频异步生成超时误判后的补查、补保存、积分纠正和 dry-run/apply 脚本说明。
+
+## 发布记录
+
+- [RELEASE_BASELINE_1.0.74_HANDOFF_2026-08-27.md](releases/RELEASE_BASELINE_1.0.74_HANDOFF_2026-08-27.md)：1.0.74 发布基线、验证结果和上线边界。
+
+## 开发记录
+
+- [WORKSPACE_ORGANIZATION_20260828.md](WORKSPACE_ORGANIZATION_20260828.md)：工作区目录整理、归档范围和本次验证结果。

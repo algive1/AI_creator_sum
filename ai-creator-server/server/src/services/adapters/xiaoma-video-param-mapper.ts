@@ -183,12 +183,236 @@ export function applyXiaomaRemoteMediaParams(
   body: Record<string, JsonValue>,
   modelConfig: Record<string, any> | undefined,
 ): void {
-  const remoteParams = modelConfig?.remote_parameters || modelConfig?.remoteParameters;
-  if (!Array.isArray(remoteParams) || !remoteParams.length) return;
+  const configuredRemoteParams = modelConfig?.remote_parameters || modelConfig?.remoteParameters;
+  const remoteParams = Array.isArray(configuredRemoteParams) && configuredRemoteParams.length
+    ? configuredRemoteParams
+    : (Array.isArray(modelConfig?.param_names)
+      ? modelConfig.param_names.map((name: unknown) => ({ name, maxItems: fallbackMediaMaxItems(name, modelConfig) }))
+      : []);
+  if (!remoteParams.length) return;
 
   remapDeclaredMediaParam(body, remoteParams, [...XIAOMA_IMAGE_PARAM_NAMES]);
   remapDeclaredMediaParam(body, remoteParams, [...XIAOMA_VIDEO_PARAM_NAMES]);
   remapDeclaredMediaParam(body, remoteParams, [...XIAOMA_AUDIO_PARAM_NAMES]);
+}
+
+/**
+ * The mini-program normalizes quality labels for display (for example 720P
+ * becomes 720p), while Xiaoma model configs can require the original enum
+ * spelling. Restore the value declared by the provider before sending it.
+ */
+export function applyXiaomaDeclaredValueFormats(
+  body: Record<string, JsonValue>,
+  modelConfig: Record<string, any> | undefined,
+): void {
+  const configuredValues = [
+    ...(Array.isArray(modelConfig?.supported_qualities) ? modelConfig.supported_qualities : []),
+    ...(Array.isArray(modelConfig?.supportedQualities) ? modelConfig.supportedQualities : []),
+    ...declaredQualityValues(modelConfig?.remote_parameters || modelConfig?.remoteParameters),
+  ].map((item) => trimString(item)).filter(Boolean);
+  if (!configuredValues.length) return;
+
+  for (const key of ['size', 'imageSize', 'resolution', 'quality']) {
+    const current = trimString(body[key]);
+    if (!current) continue;
+    const declared = configuredValues.find((item) => item.toLowerCase() === current.toLowerCase());
+    if (declared) body[key] = declared;
+  }
+}
+
+function declaredQualityValues(remoteParams: any): string[] {
+  if (!Array.isArray(remoteParams)) return [];
+  const values: string[] = [];
+  const visit = (item: any) => {
+    if (!item || typeof item !== 'object') return;
+    const name = normalizeParamKey(item.name || item.key || item.field || item.mapsTo);
+    if (['size', 'imagesize', 'quality', 'resolution'].includes(name)) {
+      const options = item.options || item.values || item.enum || item.allowedValues;
+      if (Array.isArray(options)) {
+        values.push(...options.map((option: any) => trimString(option?.value ?? option?.label ?? option)));
+      } else if (typeof options === 'string') {
+        values.push(...options.split(','));
+      }
+    }
+    if (Array.isArray(item.parameters)) item.parameters.forEach(visit);
+  };
+  remoteParams.forEach(visit);
+  return values;
+}
+
+/**
+ * Convert the mini-program's canonical fields to the exact scalar names and
+ * value types declared by the current Xiaoma model. Xiaoma's catalog uses
+ * several equivalent names (for example size/imageSize/quality and
+ * aspect_ratio/aspectRatio), so copying the canonical field verbatim can
+ * silently leave a required upstream field unset.
+ */
+export function applyXiaomaDeclaredScalarParams(
+  body: Record<string, JsonValue>,
+  input: Record<string, any>,
+  modelConfig: Record<string, any> | undefined,
+): void {
+  const declaredParams = getDeclaredParameterEntries(modelConfig);
+  if (!declaredParams.length) return;
+
+  const ratioTarget = findDeclaredParameterName(declaredParams, ['ratio', 'aspect_ratio', 'aspectRatio']);
+  const ratio = normalizeRatio(firstDefined([
+    input.ratio,
+    input.aspect_ratio,
+    input.aspectRatio,
+    input.sizeOption?.ratio,
+    body.ratio,
+    body.aspect_ratio,
+    body.aspectRatio,
+  ]));
+  applyDeclaredAliasValue(body, ratioTarget, ['ratio', 'aspect_ratio', 'aspectRatio'], ratio || undefined);
+
+  const sizeTarget = findDeclaredParameterName(declaredParams, ['size', 'imageSize', 'resolution', 'quality']);
+  const selectedPreset = trimString(input.resolutionPreset || input.resolution_preset);
+  const selectedQuality = trimString(input.quality);
+  const nativeSize = trimString(input.sizeOption?.upstreamSize || input.nativeSize || input.native_size);
+  const requestedResolution = trimString(input.resolution || input.resolutionPreset || input.resolution_preset || input.quality || input.size);
+  const sizeValue = chooseDeclaredSizeValue({
+    targetName: sizeTarget,
+    declaredParams,
+    body,
+    ratio,
+    selectedPreset,
+    selectedQuality,
+    nativeSize,
+    requestedResolution,
+  });
+  applyDeclaredAliasValue(body, sizeTarget, ['size', 'imageSize', 'resolution', 'quality'], sizeValue || undefined);
+
+  const durationTarget = findDeclaredParameterName(declaredParams, ['duration', 'seconds', 'audio_duration']);
+  const duration = normalizeProviderDuration(firstDefined([
+    input.durationText,
+    input.durationRaw,
+    input.durationSeconds,
+    input.duration,
+    body.duration,
+    body.seconds,
+    body.audio_duration,
+  ]));
+  applyDeclaredAliasValue(body, durationTarget, ['duration', 'seconds', 'audio_duration'], duration || undefined);
+
+  const audioTarget = findDeclaredParameterName(declaredParams, ['generate_audio', 'audio']);
+  const audioMode = normalizeAudioMode(input.audioMode || input.audio_mode);
+  if (audioTarget && audioMode) body[audioTarget] = audioMode === 'audio';
+  clearUndeclaredAliases(body, ['generate_audio', 'audio'], audioTarget);
+
+  const generationTypeTarget = findDeclaredParameterName(declaredParams, ['generation_type']);
+  if (generationTypeTarget) {
+    const images = stringList(body.images || input.images || input.uploadKeys);
+    body[generationTypeTarget] = veoGenerationType(trimString(input.videoMode), images.length);
+  }
+
+  const imageCountTarget = findDeclaredParameterName(declaredParams, ['n', 'count', 'imageCount', 'numImages', 'numberOfImages', 'outputCount']);
+  if (imageCountTarget) {
+    const imageCount = Number(input.imageCount);
+    if (Number.isInteger(imageCount) && imageCount > 0) body[imageCountTarget] = imageCount;
+  }
+  clearUndeclaredAliases(body, ['n', 'count', 'imageCount', 'numImages', 'numberOfImages', 'outputCount'], imageCountTarget);
+}
+
+function getDeclaredParameterEntries(modelConfig: Record<string, any> | undefined): Record<string, any>[] {
+  const remoteParams = modelConfig?.remote_parameters || modelConfig?.remoteParameters;
+  if (Array.isArray(remoteParams) && remoteParams.length) {
+    const entries: Record<string, any>[] = [];
+    const visit = (item: any): void => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return;
+      if ([item.name, item.key, item.field, item.mapsTo].some((value) => trimString(value))) entries.push(item);
+      if (Array.isArray(item.parameters)) item.parameters.forEach(visit);
+      if (Array.isArray(item.params)) item.params.forEach(visit);
+    };
+    remoteParams.forEach(visit);
+    if (entries.length) return entries;
+  }
+  return Array.isArray(modelConfig?.param_names)
+    ? modelConfig.param_names.map((name: unknown) => ({ name }))
+    : [];
+}
+
+function findDeclaredParameterName(params: Record<string, any>[], aliases: string[]): string {
+  const targets = new Set(aliases.map(normalizeParamKey));
+  for (const param of params) {
+    const name = trimString(param.name || param.key || param.field || param.mapsTo);
+    if (targets.has(normalizeParamKey(name))) return name;
+  }
+  return '';
+}
+
+function applyDeclaredAliasValue(
+  body: Record<string, JsonValue>,
+  targetName: string,
+  aliases: string[],
+  value: JsonValue | undefined,
+): void {
+  if (!targetName) {
+    clearUndeclaredAliases(body, aliases, '');
+    return;
+  }
+  if (value !== undefined && value !== null && value !== '') body[targetName] = value;
+  clearUndeclaredAliases(body, aliases, targetName);
+}
+
+function clearUndeclaredAliases(body: Record<string, JsonValue>, aliases: string[], targetName: string): void {
+  const target = normalizeParamKey(targetName);
+  for (const alias of aliases) {
+    if (normalizeParamKey(alias) !== target) delete body[alias];
+  }
+}
+
+function chooseDeclaredSizeValue(input: {
+  targetName: string;
+  declaredParams: Record<string, any>[];
+  body: Record<string, JsonValue>;
+  ratio: string;
+  selectedPreset: string;
+  selectedQuality: string;
+  nativeSize: string;
+  requestedResolution: string;
+}): string {
+  const target = normalizeParamKey(input.targetName);
+  if (!target) return '';
+  const declared = input.declaredParams.find((param) => normalizeParamKey(param.name || param.key || param.field || param.mapsTo) === target);
+  const options = declaredValues(declared);
+  const existing = trimString(input.body[input.targetName]);
+  const candidates = target === 'imagesize'
+    ? [input.selectedPreset, existing]
+    : target === 'size'
+      ? [input.nativeSize, input.ratio, input.selectedPreset, input.requestedResolution, existing]
+      : [input.selectedQuality, input.requestedResolution, input.selectedPreset, existing];
+  for (const candidate of candidates) {
+    const value = trimString(candidate);
+    if (!value || value.toLowerCase() === 'auto' && target !== 'size' && target !== 'imagesize') continue;
+    const declaredValue = options.find((item) => item.toLowerCase() === value.toLowerCase());
+    if (declaredValue) return declaredValue;
+    if (!options.length) return value;
+  }
+  return existing;
+}
+
+function declaredValues(param: Record<string, any> | undefined): string[] {
+  const options = param?.options || param?.values || param?.enum || param?.allowedValues;
+  if (Array.isArray(options)) return options
+    .filter((item: any) => !(item && typeof item === 'object' && (item.currently_unavailable === true || item.available === false)))
+    .map((item: any) => trimString(item?.value ?? item?.label ?? item))
+    .filter(Boolean);
+  if (typeof options === 'string') return options.split(',').map((item: string) => item.trim()).filter(Boolean);
+  return [];
+}
+
+function firstDefined(values: unknown[]): unknown {
+  return values.find((value) => value !== undefined && value !== null && trimString(value) !== '');
+}
+
+function normalizeProviderDuration(value: unknown): string {
+  const text = trimString(value);
+  if (!text) return '';
+  if (text.toLowerCase() === 'auto') return 'auto';
+  const match = text.match(/^(\d+(?:\.\d+)?)\s*(?:s|秒)?$/i);
+  return match ? match[1] : text;
 }
 
 function remapDeclaredMediaParam(
@@ -214,11 +438,30 @@ function remapDeclaredMediaParam(
 
 function mediaParamExpectsArray(name: string, param: Record<string, any>): boolean {
   const normalizedName = normalizeParamKey(name);
-  if (['images', 'imageurls', 'referenceurls', 'videos', 'videourls', 'referencevideos', 'referencevideourls', 'audios', 'audiourls', 'audiofiles', 'soundfiles'].includes(normalizedName)) {
+  if (['images', 'imageurls', 'referenceurls', 'videos', 'videourls', 'referencevideos', 'referencevideourls', 'clips', 'audios', 'audiourls', 'audiofiles', 'soundfiles'].includes(normalizedName)) {
     return true;
   }
   if (Number(param.maxItems ?? param.max_items ?? 0) > 1) return true;
   return /array|list/i.test(String(param.type || param.valueType || param.value_type || ''));
+}
+
+function fallbackMediaMaxItems(name: unknown, modelConfig: Record<string, any> | undefined): number | undefined {
+  const normalized = normalizeParamKey(name);
+  if (['image', 'images', 'imageurl', 'imageurls', 'referenceurl', 'referenceurls', 'inputreference'].includes(normalized)) {
+    return positiveConfigNumber(modelConfig?.max_reference_images || modelConfig?.maxReferenceImages);
+  }
+  if (['video', 'videos', 'videourl', 'videourls', 'referencevideo', 'referencevideos', 'clips'].includes(normalized)) {
+    return positiveConfigNumber(modelConfig?.max_video_urls || modelConfig?.maxVideoUrls);
+  }
+  if (['audio', 'audios', 'audiourl', 'audiourls', 'audiofile', 'audiofiles', 'soundfile', 'soundfiles'].includes(normalized)) {
+    return positiveConfigNumber(modelConfig?.max_audio_urls || modelConfig?.maxAudioUrls);
+  }
+  return undefined;
+}
+
+function positiveConfigNumber(value: unknown): number | undefined {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : undefined;
 }
 
 function normalizeParamKey(value: unknown): string {

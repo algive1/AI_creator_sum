@@ -7,6 +7,7 @@ import {
 } from './xiaoma-media-parameters';
 
 export type SyncMode = 'preview' | 'apply';
+export type ModelRemovalPolicy = 'none' | 'delete';
 
 export interface ProviderForModelSync {
   id: number;
@@ -43,6 +44,7 @@ interface NormalizedRemoteModel {
   id: string;
   name: string;
   modelType: string;
+  isAsync: boolean;
   queryTaskUrl: string;
   config: Record<string, any>;
   pointsCost: number;
@@ -60,6 +62,7 @@ export interface ModelSyncAddition {
   apiModelName: string;
   name: string;
   modelType: string;
+  isAsync: boolean;
   queryTaskUrl: string;
   config: Record<string, any>;
   pointsCost: number;
@@ -107,6 +110,9 @@ export interface ModelSyncPreview {
   providerId: number;
   providerName: string;
   totalRemote: number;
+  catalogComplete: boolean;
+  removalPolicy: ModelRemovalPolicy;
+  removalBlocked: boolean;
   additions: ModelSyncAddition[];
   updates: ModelSyncUpdate[];
   removals: ModelSyncRemoval[];
@@ -122,6 +128,7 @@ export interface ModelSyncResult extends ModelSyncPreview {
   removed: number;
   bindingDeleted: number;
   fallbackDeleted: number;
+  tierDisabled: number;
   skippedCount: number;
   message: string;
 }
@@ -131,7 +138,25 @@ const MODEL_TYPES = new Set(['image', 'video', 'audio', 'text']);
 const MANAGED_CONFIG_KEYS = [
   'sync_source',
   'sync_provider_type',
+  'source',
+  'source_checked_at',
+  'capability_source',
+  'capability_confidence',
   'capabilities',
+  'description',
+  'input_hint',
+  'tags',
+  'api_endpoint',
+  'api_endpoints',
+  'supported_endpoint_types',
+  'documentation_url',
+  'model_object',
+  'owned_by',
+  'model_id',
+  'input_modalities',
+  'output_modalities',
+  'supported_sizes',
+  'unsupported_inputs',
   'param_names',
   'default_params',
   'supported_ratios',
@@ -294,23 +319,40 @@ export function generateHongniaoSeedMigration(input: {
     '            AND m.deleted_at IS NULL',
     '       );',
     '',
-    '-- Soft-delete only Hongniao models that are no longer present in the upstream model list.',
-    'UPDATE ai_models m',
-    'LEFT JOIN tmp_hongniao_models_refresh x',
-    '  ON m.api_model_name COLLATE utf8mb4_unicode_ci = x.api_model_name COLLATE utf8mb4_unicode_ci',
-    '   SET m.deleted_at = NOW(3),',
-    "       m.status = 'inactive',",
-    '       m.updated_at = NOW(3)',
+    '-- Archive and hard-delete only Hongniao models that are no longer present in the upstream model list.',
+    'INSERT IGNORE INTO ai_model_catalog_archive',
+    '  (provider_id, original_model_id, name, display_name, model_type, sub_type, api_model_name, upstream_model_code, is_async,',
+    '   query_task_url, request_template, result_path, status_mapping, error_mapping, timeout_seconds, retry_times, retry_delay_ms,',
+    '   daily_limit, daily_limit_per_user, max_concurrency, priority, points_cost, api_cost_cents, sort_order, config, remark, archived_at)',
+    'SELECT m.provider_id, m.id, m.name, m.display_name, m.model_type, m.sub_type, m.api_model_name, m.upstream_model_code, m.is_async,',
+    '       m.query_task_url, m.request_template, m.result_path, m.status_mapping, m.error_mapping, m.timeout_seconds, m.retry_times, m.retry_delay_ms,',
+    '       m.daily_limit, m.daily_limit_per_user, m.max_concurrency, m.priority, m.points_cost, m.api_cost_cents, m.sort_order, m.config, m.remark, NOW(3)',
+    '  FROM ai_models m',
+    '  LEFT JOIN tmp_hongniao_models_refresh x',
+    '    ON m.api_model_name COLLATE utf8mb4_unicode_ci = x.api_model_name COLLATE utf8mb4_unicode_ci',
     ' WHERE m.provider_id = @hongniao_id',
     '   AND m.deleted_at IS NULL',
     '   AND x.api_model_name IS NULL;',
     '',
-    '-- Remove bindings that still point to obsolete Hongniao models after the refresh.',
-    'DELETE b',
-    '  FROM tier_model_bindings b',
-    '  JOIN ai_models m ON m.id = b.model_id',
-    ' WHERE m.provider_id = @hongniao_id',
-    '   AND m.deleted_at IS NOT NULL;',
+    '-- Remove bindings, fallback rules and capability rows before physical deletion.',
+    'DELETE b FROM tier_model_bindings b JOIN ai_models m ON m.id = b.model_id',
+    ' WHERE m.provider_id = @hongniao_id AND m.deleted_at IS NULL',
+    '   AND NOT EXISTS (SELECT 1 FROM tmp_hongniao_models_refresh x WHERE x.api_model_name COLLATE utf8mb4_unicode_ci = m.api_model_name COLLATE utf8mb4_unicode_ci);',
+    'DELETE r FROM ai_model_fallback_rules r',
+    ' WHERE r.model_id IN (SELECT m.id FROM ai_models m LEFT JOIN tmp_hongniao_models_refresh x ON x.api_model_name COLLATE utf8mb4_unicode_ci = m.api_model_name COLLATE utf8mb4_unicode_ci WHERE m.provider_id = @hongniao_id AND m.deleted_at IS NULL AND x.api_model_name IS NULL)',
+    '    OR r.fallback_model_id IN (SELECT m.id FROM ai_models m LEFT JOIN tmp_hongniao_models_refresh x ON x.api_model_name COLLATE utf8mb4_unicode_ci = m.api_model_name COLLATE utf8mb4_unicode_ci WHERE m.provider_id = @hongniao_id AND m.deleted_at IS NULL AND x.api_model_name IS NULL);',
+    'DELETE c FROM ai_model_capabilities c JOIN ai_models m ON m.id = c.model_id',
+    ' WHERE m.provider_id = @hongniao_id AND m.deleted_at IS NULL',
+    '   AND NOT EXISTS (SELECT 1 FROM tmp_hongniao_models_refresh x WHERE x.api_model_name COLLATE utf8mb4_unicode_ci = m.api_model_name COLLATE utf8mb4_unicode_ci);',
+    'DELETE p FROM ai_model_price_rules p JOIN ai_models m ON m.id = p.model_id',
+    ' WHERE m.provider_id = @hongniao_id AND m.deleted_at IS NULL',
+    '   AND NOT EXISTS (SELECT 1 FROM tmp_hongniao_models_refresh x WHERE x.api_model_name COLLATE utf8mb4_unicode_ci = m.api_model_name COLLATE utf8mb4_unicode_ci);',
+    'UPDATE ai_models m',
+    'JOIN (SELECT m2.id FROM ai_models m2 LEFT JOIN tmp_hongniao_models_refresh x ON x.api_model_name COLLATE utf8mb4_unicode_ci = m2.api_model_name COLLATE utf8mb4_unicode_ci WHERE m2.provider_id = @hongniao_id AND m2.deleted_at IS NULL AND x.api_model_name IS NULL) stale ON stale.id = m.fallback_model_id',
+    '   SET m.fallback_model_id = NULL;',
+    'DELETE m FROM ai_models m',
+    'LEFT JOIN tmp_hongniao_models_refresh x ON x.api_model_name COLLATE utf8mb4_unicode_ci = m.api_model_name COLLATE utf8mb4_unicode_ci',
+    ' WHERE m.provider_id = @hongniao_id AND m.deleted_at IS NULL AND x.api_model_name IS NULL;',
     '',
     '-- Refresh public/admin capability fields for tiers already bound to active Hongniao primary models.',
     'INSERT INTO tier_capabilities',
@@ -380,21 +422,22 @@ export async function syncProviderModels(options: {
   const remote = await fetchRemoteModels(
     options.provider,
     options.apiKey,
-    existingRows.map((item) => ({
-      id: item.api_model_name,
-      name: item.display_name || item.name || item.api_model_name,
-      type: item.model_type,
-    })),
   );
+  const strictCatalog = isStrictCatalogProvider(options.provider);
   const preview = buildModelSyncPreview({
     providerId: options.provider.id,
     providerName: options.provider.name,
     existingRows,
     remoteModels: remote.models,
     failures: remote.failures,
-    removalPolicy: isHongniaoProvider(options.provider) ? 'soft' : 'none',
+    catalogComplete: remote.catalogComplete,
+    removalPolicy: strictCatalog ? 'delete' : 'none',
   });
   await hydrateRemovalImpacts(preview);
+
+  if (options.mode === 'apply' && preview.removalBlocked) {
+    throw new Error(`模型目录未完整获取，已阻止应用同步，避免误删或保留过期模型：${preview.failures.map((item) => item.scope).join(', ') || 'catalog_incomplete'}`);
+  }
 
   let applied = false;
   let added = 0;
@@ -402,6 +445,7 @@ export async function syncProviderModels(options: {
   let removed = 0;
   let bindingDeleted = 0;
   let fallbackDeleted = 0;
+  let tierDisabled = 0;
   if (options.mode === 'apply') {
     const appliedCounts = await applyModelSyncPreview(options.provider.id, preview);
     applied = true;
@@ -410,6 +454,7 @@ export async function syncProviderModels(options: {
     removed = appliedCounts.removed;
     bindingDeleted = appliedCounts.bindingDeleted;
     fallbackDeleted = appliedCounts.fallbackDeleted;
+    tierDisabled = appliedCounts.tierDisabled;
   }
 
   return {
@@ -421,23 +466,25 @@ export async function syncProviderModels(options: {
     removed,
     bindingDeleted,
     fallbackDeleted,
+    tierDisabled,
     skippedCount: preview.skipped.length,
-    message: buildSyncMessage(options.mode, preview, added, updated, removed),
+    message: buildSyncMessage(options.mode, preview, added, updated, removed, tierDisabled),
   };
 }
 
 export async function fetchRemoteModels(
   provider: ProviderForModelSync,
   apiKey: string,
-  additionalModels: Array<Pick<RemoteProviderModel, 'id' | 'name' | 'type'>> = [],
 ): Promise<{
   models: RemoteProviderModel[];
   failures: Array<{ scope: string; message: string }>;
+  catalogComplete: boolean;
 }> {
   const baseUrl = String(provider.api_base_url || '').replace(/\/v1\/?$/i, '').replace(/\/+$/, '');
   const providerType = String(provider.provider_type || '').toLowerCase();
   const providerKey = String(provider.provider_key || '').toLowerCase();
   const failures: Array<{ scope: string; message: string }> = [];
+  let catalogComplete = true;
   let models: RemoteProviderModel[] = [];
 
   if (providerType === 'bagege' || providerKey === 'bagege') {
@@ -450,12 +497,12 @@ export async function fetchRemoteModels(
   } else if (providerType === 'xiaoma' || providerKey === 'xiaoma') {
     const fetchDetailedModel = async (
       item: Record<string, any>,
-      mediaType: string,
-      requireDetail: boolean,
+      catalogType: string,
     ): Promise<RemoteProviderModel | null> => {
       const mid = cleanString(item.id || item.model || item.model_id || item.name);
       if (!mid) return null;
       let raw = item;
+      let detailFetched = true;
       try {
         const detailResp = await axios.get(`${baseUrl}/v1/skills/models/${encodeURIComponent(mid)}`, {
           headers: { Authorization: `Bearer ${apiKey}` },
@@ -464,52 +511,49 @@ export async function fetchRemoteModels(
         const detail = detailResp.data?.data || detailResp.data;
         if (detail && typeof detail === 'object' && !Array.isArray(detail)) raw = { ...item, ...detail };
       } catch (err: any) {
+        detailFetched = false;
         failures.push({
-          scope: `xiaoma:${requireDetail ? 'existing:' : ''}${mediaType}:${mid}`,
+          scope: `xiaoma:detail:${catalogType}:${mid}`,
           message: String(err?.message || 'detail fetch failed').slice(0, 200),
         });
-        if (requireDetail) return null;
       }
       const display = cleanString(raw.display_name || raw.displayName || raw.title || raw.name || item.name || mid);
+      const modelType = catalogType === 'chat' ? 'text' : catalogType;
       return {
         id: mid,
         name: display || mid,
-        type: mediaType,
-        config: buildMediaModelConfig(mediaType, raw, providerType || providerKey),
+        type: modelType,
+        config: catalogType === 'chat'
+          ? buildXiaomaTextModelConfig(raw, providerType || providerKey, detailFetched)
+          : buildMediaModelConfig(catalogType, raw, providerType || providerKey, detailFetched),
         raw,
       };
     };
 
-    for (const mediaType of ['image', 'video', 'audio']) {
+    for (const mediaType of ['image', 'video', 'audio', 'chat']) {
       try {
         const resp = await axios.get(`${baseUrl}/v1/skills/models?type=${mediaType}`, {
           headers: { Authorization: `Bearer ${apiKey}` },
           timeout: 15000,
         });
+        if (resp.status >= 400 || resp.data?.error) {
+          throw new Error(resp.data?.error?.message || `HTTP ${resp.status}`);
+        }
         const list = normalizeRemoteList(resp.data);
-        const detailedModels = await mapWithConcurrency(list, 6, (item) => fetchDetailedModel(item, mediaType, false));
+        const detailedModels = await mapWithConcurrency(list, 6, (item) => fetchDetailedModel(item, mediaType));
         models.push(...detailedModels.filter((item): item is NonNullable<typeof item> => item !== null));
       } catch (err: any) {
+        catalogComplete = false;
         failures.push({ scope: `xiaoma:${mediaType}`, message: String(err?.message || 'fetch failed').slice(0, 200) });
       }
     }
-
-    const listedIds = new Set(models.map((item) => item.id));
-    const existingMediaModels = additionalModels.filter((item) => (
-      item.id
-      && ['image', 'video', 'audio'].includes(String(item.type || '').toLowerCase())
-      && !listedIds.has(String(item.id))
-    ));
-    const legacyDetails = await mapWithConcurrency(existingMediaModels, 6, (item) => (
-      fetchDetailedModel(item as Record<string, any>, String(item.type || '').toLowerCase(), true)
-    ));
-    models.push(...legacyDetails.filter((item): item is NonNullable<typeof item> => item !== null));
   } else if (providerType === 'hongniao' || providerKey === 'hongniao') {
     const resp = await axios.get(`${baseUrl}/v1/models`, {
       headers: { 'X-API-Key': apiKey },
       timeout: 15000,
       validateStatus: (status) => status < 500,
     });
+    if (resp.status >= 400) throw new Error(`HTTP ${resp.status}`);
     const data = unwrapHongniaoBody(resp.data);
     if (data?.error) throw new Error(data.error.message || 'Provider API returned an error');
     if (data?.code !== undefined && !['0', '200', 'success'].includes(String(data.code).toLowerCase())) {
@@ -528,12 +572,35 @@ export async function fetchRemoteModels(
           raw: item,
         };
       });
+  } else if (providerKey === 'agnes_ai') {
+    const resp = await axios.get(`${baseUrl}/v1/models`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      timeout: 15000,
+      validateStatus: (status) => status < 500,
+    });
+    if (resp.status >= 400) throw new Error(`HTTP ${resp.status}`);
+    if (resp.data?.error) throw new Error(resp.data.error.message || 'Provider API returned an error');
+    const data = normalizeRemoteList(resp.data);
+    models = data
+      .filter((item: any) => item?.id && item.id !== 'unknown')
+      .map((item: any) => {
+        const id = String(item.id);
+        const modelType = inferAgnesModelType(id, item);
+        return {
+          id,
+          name: String(item.name || item.display_name || item.displayName || id),
+          type: modelType,
+          config: buildAgnesModelConfig(modelType, item),
+          raw: item,
+        };
+      });
   } else {
     const resp = await axios.get(`${baseUrl}/v1/models`, {
       headers: { Authorization: `Bearer ${apiKey}` },
       timeout: 15000,
       validateStatus: (status) => status < 500,
     });
+    if (resp.status >= 400) throw new Error(`HTTP ${resp.status}`);
     if (resp.data?.error) throw new Error(resp.data.error.message || 'Provider API returned an error');
     const data = resp.data?.data || [];
     models = data
@@ -546,7 +613,11 @@ export async function fetchRemoteModels(
     if (!model.id || unique.has(model.id)) continue;
     unique.set(model.id, model);
   }
-  return { models: [...unique.values()], failures };
+  if (isStrictCatalogProvider(provider) && unique.size === 0) {
+    catalogComplete = false;
+    failures.push({ scope: 'catalog:empty', message: '严格同步供应商返回空模型目录，已阻止删除现有模型' });
+  }
+  return { models: [...unique.values()], failures, catalogComplete };
 }
 
 export function buildModelSyncPreview(input: {
@@ -555,8 +626,13 @@ export function buildModelSyncPreview(input: {
   existingRows: ExistingModelRow[];
   remoteModels: RemoteProviderModel[];
   failures?: Array<{ scope: string; message: string }>;
-  removalPolicy?: 'none' | 'soft';
+  catalogComplete?: boolean;
+  removalPolicy?: ModelRemovalPolicy;
 }): ModelSyncPreview {
+  const failures = input.failures || [];
+  const catalogComplete = input.catalogComplete !== false;
+  const removalPolicy = input.removalPolicy || 'delete';
+  const removalBlocked = removalPolicy !== 'none' && !catalogComplete;
   const existingByApiName = new Map(input.existingRows.map((row) => [String(row.api_model_name || ''), row]));
   const remoteApiNames = new Set<string>();
   const additions: ModelSyncAddition[] = [];
@@ -574,6 +650,7 @@ export function buildModelSyncPreview(input: {
         apiModelName: normalized.id,
         name: normalized.name,
         modelType: normalized.modelType,
+        isAsync: normalized.isAsync,
         queryTaskUrl: normalized.queryTaskUrl,
         config: normalized.config,
         pointsCost: normalized.pointsCost,
@@ -611,7 +688,7 @@ export function buildModelSyncPreview(input: {
     }
   }
 
-  if (input.removalPolicy !== 'none') {
+  if (removalPolicy !== 'none' && !removalBlocked) {
     for (const row of input.existingRows) {
       const apiModelName = String(row.api_model_name || '');
       if (!apiModelName || remoteApiNames.has(apiModelName)) continue;
@@ -633,11 +710,14 @@ export function buildModelSyncPreview(input: {
     providerId: input.providerId,
     providerName: input.providerName,
     totalRemote: input.remoteModels.length,
+    catalogComplete,
+    removalPolicy,
+    removalBlocked,
     additions,
     updates,
     removals,
     skipped,
-    failures: input.failures || [],
+    failures,
   };
 }
 
@@ -658,6 +738,7 @@ export async function applyModelSyncPreview(providerId: number, preview: ModelSy
   removed: number;
   bindingDeleted: number;
   fallbackDeleted: number;
+  tierDisabled: number;
 }> {
   const conn = await getConnection();
   try {
@@ -667,12 +748,13 @@ export async function applyModelSyncPreview(providerId: number, preview: ModelSy
     let removed = 0;
     let bindingDeleted = 0;
     let fallbackDeleted = 0;
+    let tierDisabled = 0;
 
     for (const item of preview.additions) {
       const [result] = await conn.execute(
         `INSERT IGNORE INTO ai_models
          (provider_id, name, display_name, model_type, sub_type, api_model_name, upstream_model_code, is_async, query_task_url, request_template, timeout_seconds, retry_times, retry_delay_ms, daily_limit, daily_limit_per_user, max_concurrency, priority, points_cost, api_cost_cents, sort_order, config, remark, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, '', ?, ?, 1, ?, '{}', 300, 3, 3000, 0, 0, 5, 0, ?, ?, 999, ?, 'auto-synced', 'active', NOW(3), NOW(3))`,
+         VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, '{}', 300, 3, 3000, 0, 0, 5, 0, ?, ?, 999, ?, 'auto-synced', 'active', NOW(3), NOW(3))`,
         [
           providerId,
           item.name,
@@ -680,6 +762,7 @@ export async function applyModelSyncPreview(providerId: number, preview: ModelSy
           item.modelType,
           item.apiModelName,
           item.apiModelName,
+          item.isAsync ? 1 : 0,
           item.queryTaskUrl,
           item.pointsCost,
           item.apiCostCents,
@@ -721,6 +804,36 @@ export async function applyModelSyncPreview(providerId: number, preview: ModelSy
     const removalIds = preview.removals.map((item) => Number(item.modelId)).filter(Boolean);
     if (removalIds.length) {
       const placeholders = removalIds.map(() => '?').join(',');
+
+      const [runningTasks] = await conn.execute(
+        `SELECT id, task_no
+           FROM ai_tasks
+          WHERE status IN ('pending', 'queued', 'processing')
+            AND (model_id IN (${placeholders}) OR actual_model_id IN (${placeholders}))
+          LIMIT 1`,
+        [...removalIds, ...removalIds],
+      ) as any;
+      if (Array.isArray(runningTasks) && runningTasks.length) {
+        throw new Error(`待删除模型仍被运行中任务使用：${runningTasks[0].task_no || runningTasks[0].id}`);
+      }
+
+      await conn.execute(
+        `INSERT IGNORE INTO ai_model_catalog_archive
+          (provider_id, original_model_id, name, display_name, model_type, sub_type,
+           api_model_name, upstream_model_code, is_async, query_task_url, request_template,
+           result_path, status_mapping, error_mapping, timeout_seconds, retry_times,
+           retry_delay_ms, daily_limit, daily_limit_per_user, max_concurrency, priority,
+           points_cost, api_cost_cents, sort_order, config, remark, archived_at)
+         SELECT provider_id, id, name, display_name, model_type, sub_type,
+                api_model_name, upstream_model_code, is_async, query_task_url, request_template,
+                result_path, status_mapping, error_mapping, timeout_seconds, retry_times,
+                retry_delay_ms, daily_limit, daily_limit_per_user, max_concurrency, priority,
+                points_cost, api_cost_cents, sort_order, config, remark, NOW(3)
+           FROM ai_models
+          WHERE provider_id = ? AND id IN (${placeholders}) AND deleted_at IS NULL`,
+        [providerId, ...removalIds],
+      );
+
       const [bindingResult] = await conn.execute(
         `DELETE FROM tier_model_bindings WHERE model_id IN (${placeholders})`,
         removalIds,
@@ -733,28 +846,62 @@ export async function applyModelSyncPreview(providerId: number, preview: ModelSy
       ) as any;
       fallbackDeleted = Number(fallbackResult?.affectedRows || 0);
 
-      const removedAt = new Date().toISOString();
-      for (const item of preview.removals) {
-        const before = parseJsonObject(item.config);
-        const nextConfig = stableStringify({
-          ...before,
-          upstream_removed_at: removedAt,
-          upstream_removed_reason: 'remote_model_missing',
-        });
-        const [result] = await conn.execute(
-          `UPDATE ai_models
-              SET status = 'inactive',
-                  config = ?,
-                  updated_at = NOW(3)
-            WHERE id = ? AND provider_id = ? AND deleted_at IS NULL`,
-          [nextConfig, item.modelId, providerId],
+      await conn.execute(
+        `UPDATE ai_models
+            SET fallback_model_id = NULL
+          WHERE provider_id = ? AND fallback_model_id IN (${placeholders})`,
+        [providerId, ...removalIds],
+      );
+      await conn.execute(
+        `DELETE FROM ai_model_capabilities WHERE model_id IN (${placeholders})`,
+        removalIds,
+      );
+      await conn.execute(
+        `DELETE FROM ai_model_price_rules WHERE model_id IN (${placeholders})`,
+        removalIds,
+      );
+      const [modelResult] = await conn.execute(
+        `DELETE FROM ai_models WHERE provider_id = ? AND id IN (${placeholders}) AND deleted_at IS NULL`,
+        [providerId, ...removalIds],
+      ) as any;
+      removed = Number(modelResult?.affectedRows || 0);
+
+      const affectedTierIds = [...new Set(preview.removals.flatMap((item) => item.affectedTiers
+        .map((tier) => Number(tier.tierId))
+        .filter(Boolean)))];
+      if (affectedTierIds.length) {
+        const tierPlaceholders = affectedTierIds.map(() => '?').join(',');
+        const [emptyTiers] = await conn.execute(
+          `SELECT t.id
+             FROM model_tiers t
+             LEFT JOIN tier_model_bindings b ON b.tier_id = t.id
+             LEFT JOIN ai_models m
+               ON m.id = b.model_id
+              AND m.status = 'active'
+              AND m.deleted_at IS NULL
+            WHERE t.id IN (${tierPlaceholders})
+            GROUP BY t.id
+           HAVING COUNT(m.id) = 0`,
+          affectedTierIds,
         ) as any;
-        removed += Number(result?.affectedRows || 0);
+        const emptyTierIds = (Array.isArray(emptyTiers) ? emptyTiers : [])
+          .map((tier: any) => Number(tier.id))
+          .filter(Boolean);
+        if (emptyTierIds.length) {
+          const emptyTierPlaceholders = emptyTierIds.map(() => '?').join(',');
+          const [tierResult] = await conn.execute(
+            `UPDATE model_tiers
+                SET status = 'inactive', updated_at = NOW(3)
+              WHERE id IN (${emptyTierPlaceholders}) AND status = 'active'`,
+            emptyTierIds,
+          ) as any;
+          tierDisabled = Number(tierResult?.affectedRows || 0);
+        }
       }
     }
 
     await conn.commit();
-    return { added, updated, removed, bindingDeleted, fallbackDeleted };
+    return { added, updated, removed, bindingDeleted, fallbackDeleted, tierDisabled };
   } catch (err) {
     await conn.rollback();
     throw err;
@@ -763,10 +910,14 @@ export async function applyModelSyncPreview(providerId: number, preview: ModelSy
   }
 }
 
-function isHongniaoProvider(provider: ProviderForModelSync): boolean {
+function isStrictCatalogProvider(provider: ProviderForModelSync): boolean {
   const providerType = String(provider.provider_type || '').toLowerCase();
   const providerKey = String(provider.provider_key || '').toLowerCase();
-  return providerType === 'hongniao' || providerKey === 'hongniao';
+  return providerType === 'xiaoma'
+    || providerKey === 'xiaoma'
+    || providerType === 'hongniao'
+    || providerKey === 'hongniao'
+    || providerKey === 'agnes_ai';
 }
 
 async function hydrateRemovalImpacts(preview: ModelSyncPreview): Promise<void> {
@@ -847,16 +998,35 @@ function normalizeRemoteModel(remote: RemoteProviderModel): NormalizedRemoteMode
   const config = remote.config && Object.keys(remote.config).length
     ? remote.config
     : buildDefaultModelConfig(modelType, remote.raw || remote);
+  const isAsync = inferRemoteModelIsAsync(modelType, config);
   const queryTaskUrl = cleanString(config.endpoints?.query || config.query_task_url || config.queryTaskUrl)
-    || (isMediaModelType(modelType) ? MEDIA_QUERY_TASK_URL : '');
+    || (isAsync && isMediaModelType(modelType) ? MEDIA_QUERY_TASK_URL : '');
   return {
     id,
     name,
     modelType,
+    isAsync,
     queryTaskUrl,
     config,
     ...deriveModelPricingFromConfig(config),
   };
+}
+
+function inferRemoteModelIsAsync(modelType: string, config: Record<string, any>): boolean {
+  if (config.is_async !== undefined) return parseBooleanFlag(config.is_async, false);
+  if (config.isAsync !== undefined) return parseBooleanFlag(config.isAsync, false);
+  const apiFormat = cleanString(config.api_format).toLowerCase();
+  if (apiFormat === 'xiaoma_media' || apiFormat === 'hongniao_image' || apiFormat === 'hongniao_video') return true;
+  return modelType === 'video';
+}
+
+function parseBooleanFlag(value: any, fallback: boolean): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  const normalized = cleanString(value).toLowerCase();
+  if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+  if (['false', '0', 'no', 'off', ''].includes(normalized)) return false;
+  return fallback;
 }
 
 function buildDefaultModelConfig(modelType: string, raw: Record<string, any>): Record<string, any> {
@@ -870,7 +1040,202 @@ function buildDefaultModelConfig(modelType: string, raw: Record<string, any>): R
   });
 }
 
-function buildMediaModelConfig(mediaType: string, raw: Record<string, any>, providerType: string): Record<string, any> {
+function buildXiaomaTextModelConfig(raw: Record<string, any>, providerType: string, detailFetched = true): Record<string, any> {
+  const params = extractMediaParamEntries(raw);
+  const attachmentParam = findMediaParam(params, ['attachments', 'images', 'videos', 'files', 'reference_urls']);
+  const attachmentDescription = cleanString(attachmentParam?.description || attachmentParam?.help || attachmentParam?.hint);
+  const supportsVision = Boolean(attachmentParam)
+    && /image|video|audio|图片|视频|音频|图像|多模态/i.test(attachmentDescription);
+  const capabilities = ['text_chat', 'text_generation'];
+  if (supportsVision) capabilities.push('vision_chat');
+
+  return compactObject({
+    source: 'xiaoma_api',
+    source_checked_at: new Date().toISOString().slice(0, 10),
+    sync_source: 'admin_model_sync',
+    sync_provider_type: providerType || 'xiaoma',
+    capability_source: detailFetched ? 'xiaoma_skill_model_detail' : 'xiaoma_models_catalog_fallback',
+    capability_confidence: detailFetched ? 'declared' : 'inferred',
+    capabilities,
+    param_names: extractParamNames(raw),
+    remote_parameters: params,
+    description: cleanString(raw.description),
+    input_hint: cleanString(raw.input_hint || raw.inputHint),
+    tags: arrayFromAliases(raw, ['tags']),
+    api_endpoint: cleanString(raw.api_endpoint || raw.apiEndpoint),
+    api_endpoints: raw.api_endpoints || raw.apiEndpoints,
+    endpoints: { create: '/v1/chat/completions' },
+    api_format: 'openai',
+  });
+}
+
+function inferAgnesModelType(id: string, raw: Record<string, any>): string {
+  const declared = cleanString(raw.type || raw.model_type || raw.modelType).toLowerCase();
+  if (MODEL_TYPES.has(declared)) return declared;
+  if (/^agnes-image-/i.test(id)) return 'image';
+  if (/^agnes-video-/i.test(id)) return 'video';
+  return 'text';
+}
+
+const AGNES_TEXT_CAPABILITIES = [
+  'text_chat',
+  'text_generation',
+  'vision_chat',
+  'image_understanding',
+  'tool_calling',
+  'agent_workflow',
+  'reasoning',
+  'code_generation',
+  'long_context',
+  'streaming',
+];
+
+const AGNES_MODEL_DOCUMENTATION: Record<string, Record<string, any>> = {
+  'agnes-2.0-flash': {
+    modelType: 'text',
+    capabilities: AGNES_TEXT_CAPABILITIES,
+    documentationUrl: 'https://wiki.agnes-ai.com/en/docs/agnes-20-flash',
+    params: ['model', 'messages', 'messages[].content', 'temperature', 'top_p', 'max_tokens', 'stream', 'tools', 'tool_choice', 'chat_template_kwargs', 'thinking', 'input'],
+    inputModalities: ['text', 'image_url'],
+    outputModalities: ['text'],
+    endpoints: { create: '/v1/chat/completions', responses: '/v1/responses', messages: '/v1/messages' },
+  },
+  'agnes-2.5-flash': {
+    modelType: 'text',
+    capabilities: AGNES_TEXT_CAPABILITIES,
+    documentationUrl: 'https://wiki.agnes-ai.com/en/docs/agnes-25-flash',
+    params: ['model', 'messages', 'messages[].content', 'temperature', 'top_p', 'max_tokens', 'stream', 'tools', 'tool_choice', 'chat_template_kwargs', 'thinking', 'input'],
+    inputModalities: ['text', 'image_url'],
+    outputModalities: ['text'],
+    endpoints: { create: '/v1/chat/completions', responses: '/v1/responses', messages: '/v1/messages' },
+  },
+  'agnes-2.5-pro-alpha': {
+    modelType: 'text',
+    capabilities: AGNES_TEXT_CAPABILITIES,
+    documentationUrl: 'https://wiki.agnes-ai.com/en/docs/agnes-25-pro-alpha',
+    params: ['model', 'messages', 'messages[].content', 'temperature', 'top_p', 'max_tokens', 'stream', 'tools', 'tool_choice', 'chat_template_kwargs', 'thinking', 'input'],
+    inputModalities: ['text', 'image_url'],
+    outputModalities: ['text'],
+    endpoints: { create: '/v1/chat/completions', responses: '/v1/responses', messages: '/v1/messages' },
+  },
+  'agnes-2.5-pro-beta': {
+    modelType: 'text',
+    capabilities: AGNES_TEXT_CAPABILITIES,
+    documentationUrl: 'https://wiki.agnes-ai.com/en/docs/agnes-25-pro-beta',
+    params: ['model', 'messages', 'messages[].content', 'temperature', 'top_p', 'max_tokens', 'stream', 'tools', 'tool_choice', 'chat_template_kwargs', 'thinking', 'input'],
+    inputModalities: ['text', 'image_url'],
+    outputModalities: ['text'],
+    endpoints: { create: '/v1/chat/completions', responses: '/v1/responses', messages: '/v1/messages' },
+  },
+  'agnes-2.5-pro': {
+    modelType: 'text',
+    capabilities: AGNES_TEXT_CAPABILITIES,
+    documentationUrl: 'https://wiki.agnes-ai.com/en/docs/agnes-25-pro',
+    params: ['model', 'messages', 'messages[].content', 'temperature', 'top_p', 'max_tokens', 'stream', 'tools', 'tool_choice', 'chat_template_kwargs', 'thinking', 'input'],
+    inputModalities: ['text', 'image_url'],
+    outputModalities: ['text'],
+    endpoints: { create: '/v1/chat/completions', responses: '/v1/responses', messages: '/v1/messages' },
+  },
+  'agnes-image-2.0-flash': {
+    modelType: 'image',
+    capabilities: ['text_to_image', 'image_to_image', 'image_edit', 'multi_image_composition', 'style_control', 'image_output_url', 'image_output_base64'],
+    documentationUrl: 'https://wiki.agnes-ai.com/en/docs/agnes-image-20-flash',
+    params: ['model', 'prompt', 'size', 'image', 'return_base64', 'extra_body.response_format'],
+    inputModalities: ['text', 'image_url', 'image_base64'],
+    outputModalities: ['image_url', 'image_base64'],
+    endpoints: { create: '/v1/images/generations' },
+  },
+  'agnes-image-2.1-flash': {
+    modelType: 'image',
+    capabilities: ['text_to_image', 'image_to_image', 'image_edit', 'multi_image_composition', 'style_control', 'image_output_url', 'image_output_base64'],
+    documentationUrl: 'https://wiki.agnes-ai.com/en/docs/agnes-image-21-flash',
+    params: ['model', 'prompt', 'size', 'ratio', 'image', 'return_base64', 'extra_body.response_format'],
+    inputModalities: ['text', 'image_url', 'image_base64'],
+    outputModalities: ['image_url', 'image_base64'],
+    endpoints: { create: '/v1/images/generations' },
+  },
+  'agnes-video-v2.0': {
+    modelType: 'video',
+    isAsync: true,
+    capabilities: ['text_to_video', 'image_to_video', 'first_last_frame_video', 'keyframe_animation', 'motion_control', 'visual_consistency', 'cinematic_output', 'async_generation'],
+    documentationUrl: 'https://wiki.agnes-ai.com/en/docs/agnes-video-v20',
+    params: ['model', 'prompt', 'image', 'mode', 'height', 'width', 'num_frames', 'frame_rate', 'num_inference_steps', 'seed', 'negative_prompt', 'extra_body.image'],
+    inputModalities: ['text', 'image_url'],
+    outputModalities: ['video_url'],
+    defaultParams: { width: 1152, height: 768, num_frames: 121, frame_rate: 24 },
+    endpoints: { create: '/v1/videos', query: 'https://apihub.agnes-ai.com/agnesapi?video_id={task_id}' },
+  },
+  'agnes-video-2.5': {
+    modelType: 'video',
+    isAsync: true,
+    capabilities: ['text_to_video', 'image_to_video', 'first_last_frame_video', 'video_reference', 'video_to_video', 'video_edit', 'audio_reference', 'audio_visual_sync', 'async_generation'],
+    documentationUrl: 'https://wiki.agnes-ai.com/en/docs/agnes-video-25',
+    params: ['model', 'prompt', 'mode', 'seconds', 'size', 'aspect_ratio', 'seed', 'n', 'first_frame', 'last_frame', 'images', 'audios', 'videos', 'videos[].url', 'videos[].start_seconds', 'videos[].require_audio'],
+    inputModalities: ['text', 'image_url', 'audio_url', 'video_url'],
+    outputModalities: ['video_url'],
+    supportedSizes: ['720P', '960P', '2K'],
+    supportedDurations: ['4s', '5s', '6s', '7s', '8s', '9s', '10s', '11s', '12s'],
+    endpoints: { create: '/v1/videos', query: 'https://apihub.agnes-ai.com/agnesapi?video_id={task_id}&model_name={model}' },
+  },
+  'agnes-video-2.5-flash': {
+    modelType: 'video',
+    isAsync: true,
+    capabilities: ['text_to_video', 'image_to_video', 'first_last_frame_video', 'audio_reference', 'async_generation'],
+    documentationUrl: 'https://wiki.agnes-ai.com/en/docs/agnes-video-25-flash',
+    params: ['model', 'prompt', 'mode', 'seconds', 'size', 'aspect_ratio', 'seed', 'n', 'first_frame', 'last_frame', 'images', 'audios'],
+    inputModalities: ['text', 'image_url', 'audio_url'],
+    outputModalities: ['video_url'],
+    supportedSizes: ['720P'],
+    unsupportedInputs: ['videos'],
+    supportedDurations: ['4s', '5s', '6s', '7s', '8s', '9s', '10s', '11s', '12s'],
+    maxReferenceImages: 5,
+    endpoints: { create: '/v1/videos', query: 'https://apihub.agnes-ai.com/agnesapi?video_id={task_id}&model_name={model}' },
+  },
+};
+
+function buildAgnesModelConfig(modelType: string, raw: Record<string, any>): Record<string, any> {
+  const id = cleanString(raw.id || raw.name || '');
+  const documented = AGNES_MODEL_DOCUMENTATION[id];
+  const effectiveType = documented?.modelType || modelType;
+  const capabilities = documented?.capabilities || (effectiveType === 'image'
+    ? ['text_to_image']
+    : effectiveType === 'video'
+      ? ['text_to_video']
+      : ['text_chat', 'text_generation']);
+  const endpoint = documented?.endpoints?.create || (effectiveType === 'image'
+    ? '/v1/images/generations'
+    : effectiveType === 'video'
+      ? '/v1/videos'
+      : '/v1/chat/completions');
+  return compactObject({
+    source: 'agnes_models_api',
+    source_checked_at: new Date().toISOString().slice(0, 10),
+    sync_source: 'admin_model_sync',
+    sync_provider_type: 'agnes_ai',
+    capability_source: documented ? 'agnes_official_model_docs' : 'conservative_model_id_classification',
+    capability_confidence: documented ? 'documented' : 'inferred',
+    capabilities,
+    param_names: documented?.params || [],
+    remote_parameters: (documented?.params || []).map((name: string) => ({ name })),
+    supported_endpoint_types: arrayFromAliases(raw, ['supported_endpoint_types', 'supportedEndpointTypes']),
+    endpoints: documented?.endpoints || { create: endpoint },
+    documentation_url: documented?.documentationUrl,
+    input_modalities: documented?.inputModalities,
+    output_modalities: documented?.outputModalities,
+    supported_sizes: documented?.supportedSizes,
+    unsupported_inputs: documented?.unsupportedInputs,
+    supported_durations: documented?.supportedDurations,
+    default_params: documented?.defaultParams,
+    max_reference_images: documented?.maxReferenceImages,
+    is_async: documented?.isAsync,
+    api_format: 'openai_compatible',
+    model_object: cleanString(raw.object),
+    owned_by: cleanString(raw.owned_by || raw.ownedBy),
+    model_id: id,
+  });
+}
+
+function buildMediaModelConfig(mediaType: string, raw: Record<string, any>, providerType: string, detailFetched = true): Record<string, any> {
   const type = guessModelType(mediaType, cleanString(raw.name || raw.id || raw.model || ''));
   const modelId = cleanString(raw.name || raw.id || raw.model || '');
   const params = extractMediaParamEntries(raw);
@@ -918,6 +1283,8 @@ function buildMediaModelConfig(mediaType: string, raw: Record<string, any>, prov
   return compactObject({
     sync_source: 'admin_model_sync',
     sync_provider_type: providerType || undefined,
+    capability_source: detailFetched ? 'xiaoma_skill_model_detail' : 'xiaoma_models_catalog_fallback',
+    capability_confidence: detailFetched ? 'declared' : 'inferred',
     capabilities: explicitCapabilities.length ? explicitCapabilities : inferred.capabilities,
     param_names: paramNames,
     remote_parameters: params,
@@ -1014,10 +1381,20 @@ function inferXiaomaMediaCapabilities(type: string, modelId: string, params: Rec
   const id = modelId.toLowerCase();
   const images = findMediaParam(params, [...XIAOMA_IMAGE_PARAM_NAMES]);
   const videos = findMediaParam(params, [...XIAOMA_VIDEO_PARAM_NAMES]);
-  const firstLast = /first.?last|shouweizhen/.test(id);
+  const imageDescription = cleanString([
+    images?.name,
+    images?.label,
+    images?.description,
+    images?.help,
+    images?.hint,
+  ].filter(Boolean).join(' '));
+  const firstLast = /first.?last|shouweizhen|首尾帧|首帧[\s\S]{0,30}尾帧|尾帧[\s\S]{0,30}首帧/i.test(`${id} ${imageDescription}`);
   const capabilities: string[] = [];
   if (videos || /video.?edit|videoref|motion.?control|animate/.test(id)) capabilities.push('video_edit');
-  if (images) capabilities.push(firstLast ? 'first_last_frame_video' : 'image_to_video');
+  if (images) {
+    capabilities.push('image_to_video');
+    if (firstLast) capabilities.push('first_last_frame_video');
+  }
   if (!images?.required && !videos) capabilities.unshift('text_to_video');
   if (!capabilities.length) capabilities.push('text_to_video');
   const inputMode = videos ? 'source_video' : firstLast ? 'first_last' : images ? (inferMediaParamMaxItems(images) || 1) > 1 ? 'reference_images' : 'first_frame' : 'text';
@@ -1115,6 +1492,8 @@ function buildHongniaoImageModelConfig(raw: Record<string, any>): Record<string,
     sync_source: 'admin_model_sync',
     sync_provider_type: 'hongniao',
     source_checked_at: new Date().toISOString().slice(0, 10),
+    capability_source: 'hongniao_models_api',
+    capability_confidence: 'declared',
     api_format: 'hongniao_image',
     remote_status: cleanString(raw.status),
     remote_parameters: normalizeHongniaoRemoteParameters(raw),
@@ -1176,6 +1555,8 @@ function buildHongniaoVideoModelConfig(raw: Record<string, any>): Record<string,
     sync_source: 'admin_model_sync',
     sync_provider_type: 'hongniao',
     source_checked_at: new Date().toISOString().slice(0, 10),
+    capability_source: 'hongniao_models_api',
+    capability_confidence: 'declared',
     api_format: 'hongniao_video',
     remote_status: cleanString(raw.status),
     remote_parameters: normalizeHongniaoRemoteParameters(raw),
@@ -1614,14 +1995,10 @@ function cleanString(value: unknown): string {
   return String(value ?? '').trim();
 }
 
-function buildSyncMessage(mode: SyncMode, preview: ModelSyncPreview, added: number, updated: number, removed: number): string {
+function buildSyncMessage(mode: SyncMode, preview: ModelSyncPreview, added: number, updated: number, removed: number, tierDisabled = 0): string {
   if (mode === 'preview') {
-    return `Sync preview: remote ${preview.totalRemote}, add ${preview.additions.length}, update ${preview.updates.length}, remove ${preview.removals.length}, skip ${preview.skipped.length}.`;
+    const blocked = preview.removalBlocked ? ' removal-blocked' : '';
+    return `Sync preview: remote ${preview.totalRemote}, add ${preview.additions.length}, update ${preview.updates.length}, remove ${preview.removals.length}, skip ${preview.skipped.length}.${blocked}`;
   }
-  return `Sync applied: added ${added}, updated ${updated}, soft-disabled ${removed}, skipped ${preview.skipped.length}.`;
-
-  if (mode === 'preview') {
-    return `同步预览完成：远端 ${preview.totalRemote} 个模型，新增 ${preview.additions.length} 个，待覆盖 ${preview.updates.length} 个，跳过 ${preview.skipped.length} 个。`;
-  }
-  return `同步已应用：新增 ${added} 个，覆盖能力参数 ${updated} 个，跳过 ${preview.skipped.length} 个。`;
+  return `Sync applied: added ${added}, updated ${updated}, hard-deleted ${removed}, empty tiers disabled ${tierDisabled}, skipped ${preview.skipped.length}.`;
 }

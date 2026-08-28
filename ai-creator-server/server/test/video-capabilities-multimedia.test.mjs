@@ -43,6 +43,29 @@ test('video capabilities infer multimedia inputs from param names and keep text-
   assert.equal(textOnly.maxAudioUrls, 0);
 });
 
+test('video capabilities prefer model-declared nested media limits over tier defaults', () => {
+  const caps = buildVideoCapabilities({
+    featureKey: 'image_to_video',
+    maxReferenceImages: 4,
+    modelConfig: {
+      remote_parameters: [{
+        taskKind: 'video.generate',
+        parameters: [
+          { name: 'images', type: 'array', maxItems: 9 },
+          { name: 'videoUrls', type: 'array', maxItems: 3 },
+          { name: 'audioUrls', type: 'array', maxItems: 2 },
+        ],
+      }],
+    },
+  });
+
+  assert.equal(caps.referenceUploadMode, 'reference_images');
+  assert.equal(caps.maxReferenceImages, 9);
+  assert.equal(caps.maxVideoUrls, 3);
+  assert.equal(caps.maxAudioUrls, 2);
+  assert.deepEqual(caps.inputMediaTypes, ['image', 'video', 'audio']);
+});
+
 test('video capabilities recognize bare media parameter names and preserve explicit zero overrides', () => {
   const inferred = buildVideoCapabilities({
     featureKey: 'video_edit',

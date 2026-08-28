@@ -46,6 +46,8 @@ assert(featureConfig.includes("prev.primaryModelId !== cur.primaryModelId"), 'pr
 assert(featureConfig.includes('pricingModelOptionsKey'), 'pricing defaults should track the selected model option set before deciding whether to rebuild rows');
 
 assertIncludesAll(providerModels, ['deepseek', 'DeepSeek', 'https://api.deepseek.com', 'deepseek-v4-flash', 'text_chat'], 'admin provider page should include DeepSeek preset and text capability');
+assertIncludesAll(providerModels, ['确认同步并硬删除过期模型', '先归档快照，再硬删除 live model', 'okButtonProps: { disabled: preview.removalBlocked }'], 'admin provider sync UI should describe and guard hard deletion');
+assert(!providerModels.includes('确认同步并软停用'), 'admin provider sync UI must not describe upstream removal as soft disable');
 assertIncludesAll(providerKeySync, ["providerKey: 'deepseek'", 'DEEPSEEK_API_KEY'], 'DeepSeek API key should sync from environment without plaintext in repo');
 assertIncludesAll(deepseekMigration, ['provider_key, provider_type', 'deepseek', 'https://api.deepseek.com', 'deepseek-v4-flash', 'prompt_optimize', 'ai.prompt_optimize.model_id'], 'DeepSeek migration should seed provider, model, and binding');
 

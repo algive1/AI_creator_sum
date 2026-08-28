@@ -22,6 +22,7 @@ export class OpenAICompatibleAdapter implements IProviderAdapter {
 
   async submitTask(params: SubmitTaskParams): Promise<SubmitTaskResult> {
     if (params.taskType.includes('text') || isTextTask(params.taskType)) return this.submitTextTask(params);
+    if (isAgnesModel(params.modelConfig)) return this.submitAgnesMediaTask(params);
 
     const { baseUrl, apiKey, timeout } = params.providerConfig;
     const isVideo = params.taskType.includes('video');
@@ -109,6 +110,112 @@ export class OpenAICompatibleAdapter implements IProviderAdapter {
     };
   }
 
+  private async submitAgnesMediaTask(params: SubmitTaskParams): Promise<SubmitTaskResult> {
+    return params.taskType.includes('video')
+      ? this.submitAgnesVideoTask(params)
+      : this.submitAgnesImageTask(params);
+  }
+
+  private async submitAgnesImageTask(params: SubmitTaskParams): Promise<SubmitTaskResult> {
+    const { baseUrl, apiKey, timeout } = params.providerConfig;
+    const config = params.modelConfig || {};
+    const template = safeParseJson(params.requestTemplate) || {};
+    const body: Record<string, any> = {
+      model: params.upstreamCode,
+      prompt: params.prompt,
+      ...copyObject(template),
+    };
+    const supportedParams = new Set<string>(Array.isArray(config.param_names) ? config.param_names.map(String) : []);
+    const requestedSize = params.params.nativeSize || params.params.size || params.params.resolution;
+    if (requestedSize) body.size = requestedSize;
+    else if (!body.size) body.size = '1024x1024';
+    if (supportedParams.has('ratio') && params.params.ratio) body.ratio = params.params.ratio;
+    if (params.params.returnBase64 !== undefined || params.params.return_base64 !== undefined) {
+      body.return_base64 = params.params.returnBase64 ?? params.params.return_base64;
+    }
+    if (params.images?.length) {
+      const extraBody = body.extra_body && typeof body.extra_body === 'object' && !Array.isArray(body.extra_body)
+        ? body.extra_body
+        : {};
+      body.extra_body = { ...extraBody, image: params.images };
+    }
+    const submitPath = config.endpoints?.create || '/v1/images/generations';
+    const resp = await axios.post(joinBasePath(baseUrl, submitPath), body, {
+      headers: { Authorization: 'Bearer ' + apiKey, 'Content-Type': 'application/json' },
+      timeout,
+      validateStatus: () => true,
+    });
+    const data = resp.data || {};
+    const error = extractProviderError(data, resp.status);
+    if (error) return { type: 'sync', status: 'failed', error, result: { urls: [], metadata: { raw: data } } };
+    const result = this.parseResult(data, '');
+    if (!result.urls.length) {
+      return { type: 'sync', status: extractProviderStatus(data) || 'completed', result, error: { code: 'NO_RESULT', message: providerNoResultMessage(data) } };
+    }
+    return { type: 'sync', status: extractProviderStatus(data) || 'completed', result };
+  }
+
+  private async submitAgnesVideoTask(params: SubmitTaskParams): Promise<SubmitTaskResult> {
+    const { baseUrl, apiKey, timeout } = params.providerConfig;
+    const config = params.modelConfig || {};
+    const images = normalizeStringArray(params.images || params.params.images || params.params.imageUrls || params.params.image_urls);
+    const audios = normalizeStringArray(params.params.audios || params.params.audioUrls || params.params.audio_urls || params.params.audioUrl || params.params.audio_url);
+    const videos = normalizeStringArray(params.params.videos || params.params.videoUrls || params.params.video_urls || params.params.videoUrl || params.params.video_url);
+    const isV25 = params.upstreamCode.includes('2.5');
+    const isKeyframe = params.taskType.includes('first_last_frame') || String(params.params.videoMode || '').includes('first_last');
+    const hasReference = images.length > 0 || audios.length > 0 || videos.length > 0;
+    const body: Record<string, any> = {
+      model: params.upstreamCode,
+      prompt: params.prompt,
+    };
+    if (isV25) {
+      body.mode = isKeyframe ? 'keyframe' : hasReference ? 'reference' : 'text';
+      body.seconds = String(params.params.duration || params.params.durationText || '5').replace(/s$/i, '');
+      body.size = resolveAgnesVideoSize(params.params, config);
+      body.aspect_ratio = params.params.ratio || params.params.aspectRatio || '16:9';
+      if (isKeyframe) {
+        if (images[0]) body.first_frame = images[0];
+        if (images[1]) body.last_frame = images[1];
+      } else if (images.length) body.images = images;
+      if (audios.length) body.audios = audios;
+      if (videos.length && !hasUnsupportedInput(config, 'videos')) body.videos = videos.map((url) => ({ url }));
+    } else if (images.length) {
+      if (isKeyframe) {
+        body.extra_body = { image: images, mode: 'keyframes' };
+      } else {
+        body.image = images[0];
+      }
+    }
+    if (!isV25) {
+      const defaults = config.default_params || config.defaultParams || {};
+      body.width = positiveNumber(params.params.width) || positiveNumber(defaults.width) || 1152;
+      body.height = positiveNumber(params.params.height) || positiveNumber(defaults.height) || 768;
+      const frameRate = positiveNumber(params.params.fps || params.params.frame_rate)
+        || positiveNumber(defaults.frame_rate || defaults.frameRate)
+        || 24;
+      body.frame_rate = frameRate;
+      body.num_frames = positiveInteger(params.params.num_frames)
+        || positiveInteger(defaults.num_frames || defaults.numFrames)
+        || resolveAgnesV20FrameCount(params.params, frameRate);
+    }
+    const submitPath = config.endpoints?.create || '/v1/videos';
+    const resp = await axios.post(joinBasePath(baseUrl, submitPath), body, {
+      headers: { Authorization: 'Bearer ' + apiKey, 'Content-Type': 'application/json' },
+      timeout,
+      validateStatus: () => true,
+    });
+    const data = resp.data || {};
+    const error = extractProviderError(data, resp.status);
+    if (error) return { type: 'sync', status: 'failed', error };
+    const providerTaskId = extractProviderTaskId(data);
+    const status = extractProviderStatus(data) || (providerTaskId ? 'queued' : 'completed');
+    if (providerTaskId && !isTerminalStatus(status)) return { type: 'async', providerTaskId, status };
+    const result = this.parseResult(data, '');
+    return result.urls.length
+      ? { type: 'sync', status, result }
+      : { type: 'sync', status: 'failed', result, error: { code: 'NO_RESULT', message: providerNoResultMessage(data) } };
+  }
+
   private async submitTextTask(params: SubmitTaskParams): Promise<SubmitTaskResult> {
     const { baseUrl, apiKey, timeout } = params.providerConfig;
     const template = safeParseJson(params.requestTemplate);
@@ -157,19 +264,24 @@ export class OpenAICompatibleAdapter implements IProviderAdapter {
   }
 
   async queryTask(providerTaskId: string, config: QueryTaskConfig): Promise<QueryTaskResult> {
-    const url = buildQueryTaskUrl(config.queryTaskUrl || '', config.baseUrl, providerTaskId);
+    const url = buildQueryTaskUrl(config.queryTaskUrl || '', config.baseUrl, providerTaskId, config.model);
     const resp = await axios.get(url, {
       headers: { Authorization: 'Bearer ' + config.apiKey },
       timeout: config.timeout,
+      validateStatus: () => true,
     });
     const data = resp.data;
     const result = this.parseResult(data, '');
+    const error = extractProviderError(data, resp.status);
+    const status = extractProviderStatus(data);
     return {
       providerTaskId: extractProviderTaskId(data) || providerTaskId,
-      status: extractProviderStatus(data) || 'running',
+      status: status || 'running',
       result,
       cost: null,
-      error: result.urls.length ? undefined : { code: 'NO_RESULT', message: providerNoResultMessage(data) },
+      error: error || (result.urls.length || !['completed', 'success', 'done'].includes(status.toLowerCase())
+        ? undefined
+        : { code: 'NO_RESULT', message: providerNoResultMessage(data) }),
     };
   }
 
@@ -197,15 +309,19 @@ function isTerminalStatus(status: string): boolean {
   return ['completed', 'failed', 'cancelled'].includes(mapped);
 }
 
-function buildQueryTaskUrl(queryTaskUrl: string, baseUrl: string, providerTaskId: string): string {
+function buildQueryTaskUrl(queryTaskUrl: string, baseUrl: string, providerTaskId: string, model?: string): string {
   const encoded = encodeURIComponent(providerTaskId);
+  const encodedModel = encodeURIComponent(String(model || ''));
   const template = String(queryTaskUrl || '').trim();
   if (template) {
-    if (template.includes('{task_id}')) return template.replace(/\{task_id\}/g, encoded);
-    if (template.includes(':task_id')) return template.replace(/:task_id/g, encoded);
-    return joinBasePath(template, '/' + encoded);
+    const replaced = template
+      .replace(/\{task_id\}/g, encoded)
+      .replace(/:task_id/g, encoded)
+      .replace(/\{model\}/g, encodedModel)
+      .replace(/:model/g, encodedModel);
+    return /^https?:\/\//i.test(replaced) ? replaced : joinBasePath(baseUrl, replaced);
   }
-  // 默认用视频端点查询（兼容 Agnes AI /v1/video/generations/{id}）
+  // 默认用视频端点查询，兼容通用 OpenAI-compatible 视频接口。
   return joinBasePath(baseUrl, '/v1/video/generations/' + encoded);
 }
 
@@ -242,6 +358,51 @@ function copyDefined(target: Record<string, any>, key: string, value: any): void
   if (value !== undefined && value !== null && value !== '') target[key] = value;
 }
 
+function copyObject(value: any): Record<string, any> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? { ...value } : {};
+}
+
+function normalizeStringArray(value: any): string[] {
+  if (Array.isArray(value)) return value.map((item) => String(item || '').trim()).filter(Boolean);
+  if (value === undefined || value === null || value === '') return [];
+  return [String(value).trim()].filter(Boolean);
+}
+
+function isAgnesModel(config: any): boolean {
+  return String(config?.sync_provider_type || '').toLowerCase() === 'agnes_ai';
+}
+
+function resolveAgnesVideoSize(params: Record<string, any>, config: Record<string, any>): string {
+  const supported = Array.isArray(config.supported_sizes) ? config.supported_sizes.map(String) : [];
+  const requested = String(params.nativeSize || params.size || params.resolution || '').trim();
+  if (requested && (!supported.length || supported.includes(requested))) return requested;
+  return supported[0] || '720P';
+}
+
+function hasUnsupportedInput(config: Record<string, any>, inputName: string): boolean {
+  const unsupported = config.unsupported_inputs || config.unsupportedInputs;
+  return Array.isArray(unsupported) && unsupported.map(String).some((item) => item === inputName);
+}
+
+function positiveNumber(value: unknown): number | undefined {
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) && numberValue > 0 ? numberValue : undefined;
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  const numberValue = positiveNumber(value);
+  return numberValue === undefined ? undefined : Math.floor(numberValue);
+}
+
+function resolveAgnesV20FrameCount(params: Record<string, any>, frameRate: number): number {
+  const duration = positiveNumber(params.durationSeconds)
+    || positiveNumber(params.duration)
+    || positiveNumber(String(params.durationText || '').replace(/s$/i, ''))
+    || 5;
+  const estimated = Math.max(1, Math.min(441, Math.round(duration * frameRate)));
+  return Math.max(1, Math.min(441, Math.round((estimated - 1) / 8) * 8 + 1));
+}
+
 function extractProviderStatus(data: any): string {
   return String(
     data?.status
@@ -256,16 +417,31 @@ function extractProviderStatus(data: any): string {
   ).trim();
 }
 
+function extractProviderError(data: any, status?: number): { code: string; message: string } | undefined {
+  const error = data?.error;
+  const message = typeof error === 'string'
+    ? error
+    : error?.message || data?.message || data?.error_message || data?.detail || '';
+  if (status !== undefined && status >= 400) return { code: `HTTP_${status}`, message: String(message || `Provider returned HTTP ${status}`) };
+  return message ? { code: String(error?.code || data?.code || 'PROVIDER_ERROR'), message: String(message) } : undefined;
+}
+
 function extractProviderTaskId(data: any): string {
-  const value = data?.task_id
+  const value = data?.video_id
+    || data?.videoId
+    || data?.task_id
     || data?.taskId
     || data?.id
     || data?.result?.task_id
     || data?.result?.taskId
     || data?.result?.id
+    || data?.result?.video_id
+    || data?.result?.videoId
     || data?.data?.task_id
     || data?.data?.taskId
     || data?.data?.id
+    || data?.data?.video_id
+    || data?.data?.videoId
     || data?.output?.task_id
     || data?.output?.taskId
     || data?.output?.id

@@ -183,7 +183,7 @@ const result = await api.post('/tasks/image', {
   prompt: '去除图片中的水印',
   subType: 'edit',
   tierKey: 'image_edit_standard',
-  uploadKeys: [img.fileNo],      // 待编辑图（必填 1 张，也可传 fileId 或 url）
+  uploadKeys: [img.fileNo],      // 待编辑图（至少 1 张，最多以当前档位 maxReferenceImages 为准）
   editTool: 'eraser'            // 编辑工具（必填）
 });
 ```
@@ -203,7 +203,7 @@ const result = await api.post('/tasks/video', {
 });
 ```
 
-视频页面只展示 `capabilities.ratios/qualities/durations/audioModes` 返回的可用项，不要在前端追加默认比例、清晰度、时长或声音模式。单一能力项也要展示为锁定态，例如固定 `8秒`、固定 `1080p`、固定 `有声/无声`，让用户知道模型限制。`capabilities.referenceUploadMode` 决定上传 UI：`first_frame` 对应「图生视频」单首图，`reference_images` 对应「参考生视频」多参考素材，`first_last` 对应首尾帧，`source_video` 对应视频编辑；「图生视频」和「参考生视频」后端都走 `image_to_video`，提交时带 `referenceMode`。`capabilities.inputMediaTypes/maxVideoUrls/maxAudioUrls` 决定参考生视频页是否展示参考视频、参考音频入口；小程序应按 `minReferenceImages/maxReferenceImages/maxVideoUrls/maxAudioUrls` 做提交前校验，后端创建任务时会按同一档位能力二次校验。供应商专属镜头枚举等不可通用渲染的必填字段，应先在后台模型模板中配置默认值。
+视频页面只展示 `capabilities.ratios/qualities/durations/audioModes` 返回的可用项，不要在前端追加默认比例、清晰度、时长或声音模式。单一能力项也要展示为锁定态，例如固定 `8秒`、固定 `1080p`、固定 `有声/无声`，让用户知道模型限制。`capabilities.referenceUploadMode` 决定上传 UI：`first_frame` 对应「图生视频」单首图，`reference_images` 对应「参考生视频」多参考素材，`first_last` 对应首尾帧，`source_video` 对应视频编辑；「图生视频」和「参考生视频」后端都走 `image_to_video`，提交时带 `referenceMode`。`capabilities.inputMediaTypes/maxVideoUrls/maxAudioUrls` 决定素材入口及各类型数量；参考生视频按 `maxReferenceImages/maxVideoUrls/maxAudioUrls` 允许图片、视频、音频，视频编辑在 `maxVideoUrls > 1` 时允许多个源视频。小程序应按 `minReferenceImages/maxReferenceImages/maxVideoUrls/maxAudioUrls` 做提交前校验，后端创建任务时会按同一档位能力二次校验。模型配置中的真实媒体上限优先于档位旧默认值；没有模型明示上限时才回退兼容配置。供应商专属镜头枚举等不可通用渲染的必填字段，应先在后台模型模板中配置默认值。
 
 ### 3.7 轮询任务结果
 

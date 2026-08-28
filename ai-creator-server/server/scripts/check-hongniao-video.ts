@@ -5,6 +5,7 @@ import axios from 'axios';
 import { HongniaoAdapter, buildHongniaoQueryUrl } from '../src/services/adapters/hongniao.adapter';
 import { AdapterRegistry } from '../src/services/adapters/adapter.registry';
 import { fetchRemoteModels } from '../src/services/model-sync.service';
+import { buildVideoCapabilities } from '../src/services/video-capabilities.service';
 
 type AxiosPost = typeof axios.post;
 type AxiosGet = typeof axios.get;
@@ -81,6 +82,23 @@ async function main(): Promise<void> {
   assert.equal(buildHongniaoQueryUrl('https://open.hongniaoai.com/v1', '', 'video_1'), 'https://open.hongniaoai.com/api/v1/videos/video_1');
   assert.equal(buildHongniaoQueryUrl('https://open.hongniaoai.com', '/api/v1/videos/{id}', 'video_1'), 'https://open.hongniaoai.com/api/v1/videos/video_1');
   assert.equal(buildHongniaoQueryUrl('https://open.hongniaoai.com', 'https://open.hongniaoai.com/api/v1/videos/id', 'video_1'), 'https://open.hongniaoai.com/api/v1/videos/video_1');
+
+  const sizeRatioCaps = buildVideoCapabilities({
+    featureKey: 'image_to_video',
+    providerType: 'hongniao',
+    modelName: 'Hongniao Veo 3.1 XS',
+    modelConfig: {
+      supported_ratios: ['1280x720', '720x1280'],
+      supported_durations: ['8s'],
+    },
+    ratios: ['1280x720', '720x1280'],
+    durations: ['8s'],
+    inputMode: 'reference_images',
+    referenceUploadMode: 'reference_images',
+    minReferenceImages: 1,
+    maxReferenceImages: 2,
+  });
+  assert.deepEqual(sizeRatioCaps.ratios, ['16:9', '9:16'], 'Hongniao size ratios should become mini-program ratios');
 
   await withMockedHttp((call) => {
     assert.equal(call.method, 'GET');
@@ -275,6 +293,49 @@ async function main(): Promise<void> {
   });
 
   await withMockedHttp((call) => {
+    assert.equal(call.method, call.url.includes('/videos/') ? 'GET' : 'POST');
+    if (call.method === 'POST') {
+      return { code: 202, data: { task: { id: 'nested_video_1', status: 'queued' } } };
+    }
+    return {
+      data: {
+        task: {
+          id: 'nested_video_1',
+          status: 'completed',
+          output: { video_url: 'https://cdn.example/nested.mp4' },
+        },
+      },
+    };
+  }, async (calls) => {
+    const submit = await adapter.submitTask({
+      upstreamCode: 'sdquan-2',
+      taskType: 'text_to_video',
+      prompt: 'nested response',
+      params: { ratio: '16:9', duration: '15s' },
+      providerConfig: {
+        baseUrl: 'https://open.hongniaoai.com/v1',
+        apiKey: 'sk_test',
+        timeout: 30000,
+        protocolType: 'rest',
+        authType: 'api_key',
+      },
+    });
+    assert.equal(submit.type, 'async');
+    assert.equal(submit.providerTaskId, 'nested_video_1');
+    assert.equal(calls[0].body.resolution, undefined, 'missing UI quality must not become an implicit 720p parameter');
+
+    const polled = await adapter.queryTask('nested_video_1', {
+      baseUrl: 'https://open.hongniaoai.com/v1',
+      apiKey: 'sk_test',
+      timeout: 30000,
+      authType: 'api_key',
+      queryTaskUrl: '/api/v1/videos/{id}',
+    });
+    assert.equal(adapter.mapStatus(polled.status, {}), 'completed');
+    assert.deepEqual(polled.result?.urls, ['https://cdn.example/nested.mp4']);
+  });
+
+  await withMockedHttp((call) => {
     assert.equal(call.method, 'POST');
     assert.equal(call.url, 'https://open.hongniaoai.com/v1/videos');
     assert.equal(call.body.model, 'zh-grok-video-1.5');
@@ -307,6 +368,30 @@ async function main(): Promise<void> {
     });
     assert.equal(submit.type, 'async');
     assert.equal(submit.providerTaskId, 'video_size_ratio_1');
+  });
+
+  await withMockedHttp((call) => {
+    assert.equal(call.method, 'POST');
+    assert.equal(call.body.model, 'me-kuaile1.0');
+    assert.equal(call.body.resolution, '1080P', 'Hongniao should restore the provider-declared quality casing');
+    return { id: 'video_quality_case_1', status: 'queued' };
+  }, async () => {
+    const submit = await adapter.submitTask({
+      upstreamCode: 'me-kuaile1.0',
+      taskType: 'text_to_video',
+      prompt: 'quality enum',
+      params: { ratio: '16:9', duration: '15s', resolution: '1080p' },
+      modelConfig: { supported_qualities: ['720P', '1080P'] },
+      providerConfig: {
+        baseUrl: 'https://open.hongniaoai.com/v1',
+        apiKey: 'sk_test',
+        timeout: 30000,
+        protocolType: 'rest',
+        authType: 'api_key',
+      },
+    });
+    assert.equal(submit.type, 'async');
+    assert.equal(submit.providerTaskId, 'video_quality_case_1');
   });
 
   await withMockedHttp((call) => {
@@ -419,6 +504,68 @@ async function main(): Promise<void> {
     });
     assert.equal(adapter.mapStatus(polled.status, {}), 'completed');
     assert.equal(polled.result?.urls[0], 'https://cdn.example/out.png');
+  });
+
+  await withMockedHttp((call) => {
+    assert.equal(call.method, 'POST');
+    assert.equal(call.body.model, 'banana2-S');
+    assert.equal(call.body.aspectRatio, '16:9');
+    assert.equal(call.body.resolution, '2K');
+    assert.equal(call.body.size, undefined, 'Hongniao image models without size declaration must not receive native pixels');
+    assert.equal(call.body.n, undefined, 'Hongniao image models without count declaration must not receive n');
+    return { id: 'image_banana_1', status: 'queued' };
+  }, async () => {
+    const submit = await adapter.submitTask({
+      upstreamCode: 'banana2-S',
+      taskType: 'text_to_image',
+      prompt: 'declared image fields only',
+      params: {
+        ratio: '16:9',
+        resolutionPreset: '2K',
+        nativeSize: '2048x1152',
+        sizeOption: { ratio: '16:9', resolutionPreset: '2K', upstreamSize: '2048x1152' },
+      },
+      modelConfig: {
+        param_names: ['prompt', 'aspectRatio', 'images', 'resolution'],
+        supported_qualities: ['1K', '2K'],
+      },
+      providerConfig: {
+        baseUrl: 'https://open.hongniaoai.com/v1',
+        apiKey: 'sk_test',
+        timeout: 30000,
+        protocolType: 'rest',
+        authType: 'api_key',
+      },
+    });
+    assert.equal(submit.type, 'async');
+    assert.equal(submit.providerTaskId, 'image_banana_1');
+  });
+
+  await withMockedHttp((call) => {
+    assert.equal(call.method, 'POST');
+    return { id: 'image_default_quality_1', status: 'queued' };
+  }, async (calls) => {
+    const submit = await adapter.submitTask({
+      upstreamCode: 'ph-gpt-image-2',
+      taskType: 'text_to_image',
+      prompt: 'default quality',
+      params: { ratio: '16:9', resolutionPreset: '1K' },
+      modelConfig: {
+        param_names: ['prompt', 'aspectRatio', 'images', 'quality'],
+        supported_qualities: ['high', 'medium', 'low'],
+        default_params: { quality: 'high' },
+      },
+      providerConfig: {
+        baseUrl: 'https://open.hongniaoai.com/v1',
+        apiKey: 'sk_test',
+        timeout: 30000,
+        protocolType: 'rest',
+        authType: 'api_key',
+      },
+    });
+    assert.equal(submit.type, 'async');
+    assert.equal(calls[0].body.quality, 'high', 'declared Hongniao image default quality should be preserved');
+    assert.equal(calls[0].body.resolution, undefined);
   });
 
   assert(AdapterRegistry.list().includes('hongniao'), 'AdapterRegistry should register hongniao provider type');

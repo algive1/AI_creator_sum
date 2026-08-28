@@ -118,7 +118,7 @@ export async function getModelTierList(featureKey: string, userId?: number, opti
       allowPostprocess: !!cap.allow_postprocess,
       postprocessModes: parseJson(cap.postprocess_modes, []),
       maxImages: cap.max_images,
-      maxReferenceImages: cap.max_reference_images || 4,
+      maxReferenceImages: cap.max_reference_images ?? 4,
       maxVideoUrls: cap.max_video_urls === null || cap.max_video_urls === undefined ? undefined : Number(cap.max_video_urls),
       maxAudioUrls: cap.max_audio_urls === null || cap.max_audio_urls === undefined ? undefined : Number(cap.max_audio_urls),
       inputMode: cap.input_mode || null,
@@ -140,6 +140,7 @@ export async function getModelTierList(featureKey: string, userId?: number, opti
           ratios: baseCapabilities.ratios,
           qualities: baseCapabilities.qualities,
           maxImages: baseCapabilities.maxImages,
+          maxReferenceImages: baseCapabilities.maxReferenceImages,
         })
       : null;
     const videoCaps = baseCapabilities && isVideoFeature(feature.feature_key)
@@ -207,6 +208,7 @@ export async function getModelTierList(featureKey: string, userId?: number, opti
           sizeOptions: sizeCaps.sizeOptions,
           defaultSizeKey: sizeCaps.defaultSizeKey,
           maxImages: sizeCaps.maxImages,
+          maxReferenceImages: sizeCaps.maxReferenceImages,
         } : {}),
         ...(videoCaps ? {
           ratios: videoCaps.ratios,

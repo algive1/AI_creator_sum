@@ -125,9 +125,12 @@ function main(): void {
   assertIncludes(
     speech,
     "JSON_ARRAY('speed','pitch','emotion','sound_effects','quality')",
-    'speech-2.8 must match the latest documented parameter list',
+    'speech-2.8 historical migration snapshot should retain its original parameter list',
   );
-  assert.ok(!speech.includes('voice_id'), 'speech-2.8 docs no longer list voice_id in model params');
+  // This migration is a historical snapshot. The current live catalog is
+  // validated by check:provider-model-catalog; as of 2026-08-28 live
+  // speech-2.8 also declares voice_id, so do not treat this old SQL row as
+  // the runtime source of truth.
 
   const gemini31 = rowFor(sql, 'gemini-3.1-flash-tts-preview');
   assertIncludes(gemini31, 'JSON_ARRAY()', 'Gemini 3.1 Flash TTS currently exposes no model-specific params');
@@ -139,17 +142,17 @@ function main(): void {
   const modelSyncService = readFileSync(modelSyncServicePath, 'utf8');
   assertIncludes(
     modelSyncService,
-    "['image', 'video', 'audio']",
-    'Xiaoma model sync must fetch image, video, and audio media model lists',
+    "['image', 'video', 'audio', 'chat']",
+    'Xiaoma model sync must fetch image, video, audio, and chat model lists',
   );
   assertIncludes(
     modelSyncService,
-    'type: mediaType',
-    'Xiaoma model sync must preserve mediaType so audio models are inserted as audio, not guessed as text',
+    'const modelType = catalogType === \'chat\' ? \'text\' : catalogType;',
+    'Xiaoma model sync must preserve catalog media types, mapping chat to text only',
   );
   assertIncludes(
     modelSyncService,
-    'config: buildMediaModelConfig(mediaType',
+    'buildMediaModelConfig(catalogType',
     'Xiaoma model sync should seed basic media config for newly discovered models',
   );
   assertIncludes(

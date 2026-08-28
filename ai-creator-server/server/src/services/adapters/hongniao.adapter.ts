@@ -182,6 +182,8 @@ function buildVideoBody(params: SubmitTaskParams): JsonObject {
   copyDefined(body, 'negativePrompt', input.negativePrompt || input.negative_prompt);
   copyDefined(body, 'seed', input.seed);
   mergeDeclaredHongniaoParameters(body, params.modelConfig, input);
+  applyHongniaoDeclaredDefaults(body, params.modelConfig);
+  applyHongniaoDeclaredValueFormats(body, params.modelConfig);
   return compactObject(body);
 }
 
@@ -200,9 +202,7 @@ function buildImageBody(params: SubmitTaskParams): JsonObject {
   } else if (isNanoBananaModel(params.upstreamCode)) {
     applyNanoBananaParams(body, normalized, params.upstreamCode);
   } else {
-    applyGenericImageParams(body, normalized);
-    copyDefined(body, 'aspectRatio', input.aspectRatio || input.aspect_ratio || input.ratio);
-    copyDefined(body, 'resolution', input.resolution || input.resolutionPreset || input.quality);
+    applyHongniaoGenericImageParams(body, normalized, input, params.modelConfig);
   }
 
   const images = normalizeStringArray(params.images || input.images || input.imageUrls || input.image_urls || input.imageUrl || input.image_url);
@@ -210,7 +210,127 @@ function buildImageBody(params: SubmitTaskParams): JsonObject {
   copyDefined(body, 'maskUrl', input.maskUrl || input.mask_url);
   copyDefined(body, 'seed', input.seed);
   mergeDeclaredHongniaoParameters(body, params.modelConfig, input);
+  applyHongniaoDeclaredDefaults(body, params.modelConfig);
+  applyHongniaoDeclaredValueFormats(body, params.modelConfig);
   return compactObject(body);
+}
+
+function applyHongniaoDeclaredDefaults(body: JsonObject, modelConfig: any): void {
+  const defaults = modelConfig?.default_params || modelConfig?.defaultParams;
+  if (!defaults || typeof defaults !== 'object' || Array.isArray(defaults)) return;
+  const declared = collectHongniaoParameterNames(modelConfig);
+  const aliases: Record<string, string[]> = {
+    aspectratio: ['aspectRatio', 'aspect_ratio', 'ratio'],
+    seconds: ['seconds', 'duration'],
+    resolution: ['resolution', 'quality'],
+    quality: ['quality', 'resolution'],
+    size: ['size', 'nativeSize', 'native_size'],
+  };
+  const targets: Record<string, string> = {
+    aspectratio: 'aspectRatio',
+    seconds: 'seconds',
+    resolution: 'resolution',
+    quality: 'quality',
+    size: 'size',
+  };
+
+  for (const [normalizedName, target] of Object.entries(targets)) {
+    if (!declared.has(normalizedName) || body[target] !== undefined) continue;
+    const value = aliases[normalizedName]
+      .map((key) => defaults[key])
+      .find((item) => item !== undefined && item !== null && item !== '');
+    if (value !== undefined && value !== null && value !== '') body[target] = value;
+  }
+}
+
+function applyHongniaoDeclaredValueFormats(body: JsonObject, modelConfig: any): void {
+  const declaredValues = readHongniaoDeclaredValues(modelConfig);
+  if (!declaredValues.length) return;
+  for (const key of ['resolution', 'quality']) {
+    const current = String(body[key] || '').trim();
+    if (!current) continue;
+    const declared = declaredValues.find((item) => item.toLowerCase() === current.toLowerCase());
+    if (declared) body[key] = declared;
+  }
+}
+
+function applyHongniaoGenericImageParams(
+  body: JsonObject,
+  normalized: ReturnType<typeof normalizeImageParams>,
+  input: JsonObject,
+  modelConfig: any,
+): void {
+  applyGenericImageParams(body, normalized);
+  const parameterNames = collectHongniaoParameterNames(modelConfig);
+  if (!parameterNames.size) {
+    copyDefined(body, 'aspectRatio', input.aspectRatio || input.aspect_ratio || input.ratio);
+    copyDefined(body, 'resolution', input.resolution || input.resolutionPreset || input.quality);
+    return;
+  }
+
+  const hasAspectRatio = parameterNames.has('aspectratio') || parameterNames.has('ratio');
+  const hasSize = parameterNames.has('size');
+  const hasResolution = parameterNames.has('resolution');
+  const hasQuality = parameterNames.has('quality');
+  const hasImageCount = ['n', 'count', 'imagecount', 'numimages', 'numberofimages', 'outputcount'].some((name) => parameterNames.has(name));
+
+  if (hasAspectRatio) {
+    const ratio = String(normalized.ratio || input.aspectRatio || input.aspect_ratio || input.ratio || '').trim();
+    if (ratio) body.aspectRatio = ratio;
+  } else {
+    delete body.aspectRatio;
+  }
+  if (!hasSize) delete body.size;
+  if (!hasImageCount) delete body.n;
+  if (!hasResolution) delete body.resolution;
+  if (!hasQuality) delete body.quality;
+
+  if (hasResolution && !body.resolution) {
+    const resolution = String(normalized.resolutionPreset || '').trim();
+    if (resolution && resolution !== 'auto') body.resolution = resolution;
+  }
+  if (hasQuality && !body.quality) {
+    const requestedQuality = String(normalized.quality || '').trim();
+    const resolution = String(normalized.resolutionPreset || '').trim();
+    const availableQualities = readHongniaoDeclaredValues(modelConfig);
+    const mappedResolution = availableQualities.find((item) => item.toLowerCase() === resolution.toLowerCase());
+    if (requestedQuality && !isResolutionPresetValue(requestedQuality)) body.quality = requestedQuality;
+    else if (mappedResolution) body.quality = mappedResolution;
+  }
+  applyHongniaoDeclaredValueFormats(body, modelConfig);
+}
+
+function collectHongniaoParameterNames(modelConfig: any): Set<string> {
+  const names = [
+    ...(Array.isArray(modelConfig?.param_names) ? modelConfig.param_names : []),
+    ...(Array.isArray(modelConfig?.paramNames) ? modelConfig.paramNames : []),
+    ...flattenRemoteParameterEntries(modelConfig).flatMap((param) => [param?.name, param?.key, param?.field, param?.mapsTo]),
+  ];
+  return new Set(names.map((item) => normalizeParameterName(item)).filter(Boolean));
+}
+
+function readHongniaoDeclaredValues(modelConfig: any): string[] {
+  const values = [
+    ...(Array.isArray(modelConfig?.supported_qualities) ? modelConfig.supported_qualities : []),
+    ...(Array.isArray(modelConfig?.supportedQualities) ? modelConfig.supportedQualities : []),
+    ...flattenRemoteParameterEntries(modelConfig).flatMap((param) => {
+      const name = normalizeParameterName(param?.name || param?.key || param?.field || param?.mapsTo);
+      if (!['resolution', 'quality', 'size'].includes(name)) return [];
+      const options = param?.values || param?.options || param?.enum || param?.allowedValues;
+      if (Array.isArray(options)) return options.map((item: any) => item?.value ?? item?.label ?? item);
+      if (typeof options === 'string') return options.split(',');
+      return [];
+    }),
+  ];
+  return values.map((item) => String(item ?? '').trim()).filter(Boolean);
+}
+
+function isResolutionPresetValue(value: string): boolean {
+  return /^(?:auto|\d+(?:\.\d+)?k)$/i.test(value);
+}
+
+function normalizeParameterName(value: unknown): string {
+  return String(value || '').trim().toLowerCase().replace(/[-_\s]/g, '');
 }
 
 function normalizeGptImage2Quality(value: unknown): string {
@@ -386,19 +506,29 @@ function isTerminalStatus(status: string): boolean {
 }
 
 function extractProviderStatus(data: any): string {
-  return String(data?.status || data?.state || data?.data?.status || data?.data?.state || '').trim();
+  for (const item of providerResponseCandidates(data)) {
+    const status = item?.status || item?.state || item?.status_group || item?.statusGroup;
+    if (status !== undefined && status !== null && String(status).trim()) return String(status).trim();
+  }
+  return '';
 }
 
 function extractProviderTaskId(data: any): string {
-  return String(data?.id || data?.task_id || data?.taskId || data?.data?.id || data?.data?.task_id || data?.data?.taskId || '').trim();
+  for (const item of providerResponseCandidates(data)) {
+    const taskId = item?.id || item?.task_id || item?.taskId;
+    if (taskId !== undefined && taskId !== null && String(taskId).trim()) return String(taskId).trim();
+  }
+  return '';
 }
 
 function extractProviderError(data: any, statusCode = 200): { code: string; message: string } | null {
-  const apiCode = data?.code ?? data?.status_code ?? data?.statusCode;
+  const candidates = providerResponseCandidates(data);
+  const apiCode = candidates.map((item) => item?.code ?? item?.status_code ?? item?.statusCode).find((value) => value !== undefined && value !== null && value !== '');
   const hasApiErrorCode = apiCode !== undefined
-    && !['0', '200', 'success', 'queued', 'processing', 'completed'].includes(String(apiCode).trim().toLowerCase());
-  const status = String(data?.status || data?.state || '').trim().toLowerCase();
-  const error = data?.error || (hasApiErrorCode || statusCode >= 400 ? data : null);
+    && !['0', '200', '201', '202', '204', 'success', 'ok', 'accepted', 'created', 'queued', 'pending', 'processing', 'completed'].includes(String(apiCode).trim().toLowerCase());
+  const status = extractProviderStatus(data).toLowerCase();
+  const error = candidates.map((item) => item?.error).find((value) => value !== undefined && value !== null && value !== '')
+    || (hasApiErrorCode || statusCode >= 400 ? data : null);
   if (!error && status !== 'failed' && statusCode < 400) return null;
   return {
     code: String(error?.code || apiCode || statusCode || 'HONGNIAO_ERROR'),
@@ -407,17 +537,34 @@ function extractProviderError(data: any, statusCode = 200): { code: string; mess
 }
 
 function extractFailureMessage(data: any): string {
-  return String(
-    data?.error?.message
-    || data?.error
-    || data?.fail_reason
-    || data?.failure_reason
-    || data?.message
-    || data?.msg
-    || data?.data?.error?.message
-    || data?.data?.message
-    || '',
-  ).trim();
+  for (const item of providerResponseCandidates(data)) {
+    const value = item?.error?.message
+      || (typeof item?.error === 'string' ? item.error : '')
+      || item?.fail_reason
+      || item?.failure_reason
+      || item?.message
+      || item?.msg;
+    if (value !== undefined && value !== null && String(value).trim()) return String(value).trim();
+  }
+  return '';
+}
+
+function providerResponseCandidates(data: any): any[] {
+  const result: any[] = [];
+  const queue: Array<{ value: any; depth: number }> = [{ value: data, depth: 0 }];
+  const seen = new Set<any>();
+  while (queue.length) {
+    const current = queue.shift()!;
+    if (!current.value || typeof current.value !== 'object' || seen.has(current.value)) continue;
+    seen.add(current.value);
+    result.push(current.value);
+    if (current.depth >= 4) continue;
+    for (const key of ['data', 'task', 'result', 'output', 'response', 'payload']) {
+      const nested = current.value[key];
+      if (nested && typeof nested === 'object') queue.push({ value: nested, depth: current.depth + 1 });
+    }
+  }
+  return result;
 }
 
 function pickNumber(data: any, paths: string[]): number | null {

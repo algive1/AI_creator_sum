@@ -1,3 +1,5 @@
+import { getModelMediaInputMax } from './media-input-limits.service';
+
 export interface ImageSizeOption {
   key: string;
   ratio: string;
@@ -19,6 +21,7 @@ export interface ImageSizeCapabilityInput {
   ratios?: string[];
   qualities?: string[];
   maxImages?: number;
+  maxReferenceImages?: number;
 }
 
 export interface ImageSizeCapabilityResult {
@@ -27,10 +30,11 @@ export interface ImageSizeCapabilityResult {
   sizeOptions: ImageSizeOption[];
   defaultSizeKey: string;
   maxImages: number;
+  maxReferenceImages: number;
 }
 
 const PRODUCT_RATIOS = ['auto', '1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9', '1:4', '4:1', '1:8', '8:1'];
-const GPT_IMAGE_2_RATIOS = ['auto', '1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9'];
+const GPT_IMAGE_2_RATIOS = ['auto', '1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '1:2', '2:1'];
 const GENERIC_NANO_BANANA_RATIOS = ['auto', '1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '9:16', '16:9', '21:9'];
 const XIAOMA_NANO_BANANA_PRO_RATIOS = ['auto', '1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9'];
 const XIAOMA_NANO_BANANA_2_RATIOS = [...XIAOMA_NANO_BANANA_PRO_RATIOS, '1:4', '4:1', '1:8', '8:1'];
@@ -45,8 +49,12 @@ const GPT_IMAGE_2_SIZE_MAP: Record<string, Record<string, string>> = {
     '3:2': '1536x1024',
     '3:4': '960x1280',
     '4:3': '1280x960',
+    '4:5': '1024x1280',
+    '5:4': '1280x1024',
     '9:16': '1088x1920',
     '16:9': '1920x1088',
+    '1:2': '960x1920',
+    '2:1': '1920x960',
   },
   '2K': {
     '1:1': '2048x2048',
@@ -54,8 +62,12 @@ const GPT_IMAGE_2_SIZE_MAP: Record<string, Record<string, string>> = {
     '3:2': '3072x2048',
     '3:4': '1920x2560',
     '4:3': '2560x1920',
+    '4:5': '2048x2560',
+    '5:4': '2560x2048',
     '9:16': '1440x2560',
     '16:9': '2560x1440',
+    '1:2': '1280x2560',
+    '2:1': '2560x1280',
   },
   '4K': {
     '1:1': '2880x2880',
@@ -63,8 +75,12 @@ const GPT_IMAGE_2_SIZE_MAP: Record<string, Record<string, string>> = {
     '3:2': '3456x2304',
     '3:4': '2400x3200',
     '4:3': '3200x2400',
+    '4:5': '2560x3200',
+    '5:4': '3200x2560',
     '9:16': '2160x3840',
     '16:9': '3840x2160',
+    '1:2': '1920x3840',
+    '2:1': '3840x1920',
   },
 };
 
@@ -77,11 +93,12 @@ export function buildImageSizeCapabilities(input: ImageSizeCapabilityInput): Ima
     && (!xiaomaNanoProfile || optionsCoverProfile(explicitOptions, xiaomaNanoProfile));
   const generatedOptions = shouldUseExplicitOptions
     ? explicitOptions
-    : generateSizeOptions({
-        ratios: chooseRatios(input, config, modelName),
-        resolutions: chooseResolutions(input, config, modelName),
-        modelName,
-      });
+      : generateSizeOptions({
+          ratios: chooseRatios(input, config, modelName),
+          resolutions: chooseResolutions(input, config, modelName),
+          modelName,
+          providerType: input.providerType,
+        });
 
   const sizeOptions = uniqueSizeOptions(generatedOptions)
     .filter((item) => PRODUCT_RATIOS.includes(item.ratio))
@@ -92,8 +109,16 @@ export function buildImageSizeCapabilities(input: ImageSizeCapabilityInput): Ima
   const resolutionPresets = uniqueStrings(safeOptions.map((item) => item.resolutionPreset));
   const defaultSizeKey = chooseDefaultSizeKey(safeOptions, config.default_size_key || config.defaultSizeKey, input.tierKey);
   const maxImages = resolveMaxImages(input, config);
+  const maxReferenceImages = resolveMaxReferenceImages(input, config);
 
-  return { ratios, resolutionPresets, sizeOptions: safeOptions, defaultSizeKey, maxImages };
+  return {
+    ratios,
+    resolutionPresets,
+    sizeOptions: safeOptions,
+    defaultSizeKey,
+    maxImages,
+    maxReferenceImages,
+  };
 }
 
 export function findImageSizeOption(options: ImageSizeOption[] | undefined, sizeKey?: string, ratio?: string, resolutionPreset?: string): ImageSizeOption | null {
@@ -133,6 +158,8 @@ export function normalizeRatioPreset(value: unknown): string {
   const a = Number(match[1]);
   const b = Number(match[2]);
   if (!a || !b) return text;
+  const canonical = `${a}:${b}`;
+  if (PRODUCT_RATIOS.includes(canonical)) return canonical;
   const divisor = gcd(a, b);
   return `${a / divisor}:${b / divisor}`;
 }
@@ -149,9 +176,9 @@ export function resolveGptImage2UpstreamSize(ratio: unknown, resolutionPreset: u
   return GPT_IMAGE_2_SIZE_MAP[normalizedResolution]?.[normalizedRatio] || '';
 }
 
-function generateSizeOptions(input: { ratios: string[]; resolutions: string[]; modelName?: string }): ImageSizeOption[] {
+function generateSizeOptions(input: { ratios: string[]; resolutions: string[]; modelName?: string; providerType?: string }): ImageSizeOption[] {
   const modelName = String(input.modelName || '');
-  const isGptImage2 = isGptImage2Model(modelName);
+  const isGptImage2 = isGptImage2Model(modelName, input.providerType);
   const isNanoBanana = isNanoBananaModel(modelName);
   const ratios = input.ratios.length ? input.ratios : (isGptImage2 ? GPT_IMAGE_2_RATIOS : isNanoBanana ? GENERIC_NANO_BANANA_RATIOS : ['1:1']);
   const resolutions = input.resolutions.length ? input.resolutions : (isGptImage2 ? GPT_IMAGE_2_RESOLUTIONS : isNanoBanana ? ['1K', '2K', '4K'] : ['1K']);
@@ -186,7 +213,7 @@ function chooseRatios(input: ImageSizeCapabilityInput, config: Record<string, an
   if (xiaomaNanoProfile) {
     return xiaomaNanoProfile.ratios;
   }
-  if (isGptImage2Model(modelName)) {
+  if (isGptImage2Model(modelName, input.providerType)) {
     const configured = normalizeRatios(config.supported_ratios || config.supportedRatios);
     const source = configured.length ? configured : inputRatios;
     const ratios = source.length > 1 ? source : GPT_IMAGE_2_RATIOS;
@@ -205,7 +232,7 @@ function chooseResolutions(input: ImageSizeCapabilityInput, config: Record<strin
   if (xiaomaNanoProfile) {
     return xiaomaNanoProfile.resolutions;
   }
-  if (isGptImage2Model(modelName)) {
+  if (isGptImage2Model(modelName, input.providerType)) {
     const configured = normalizeResolutionList(config.resolution_presets || config.resolutionPresets);
     const source = configured.length ? configured : GPT_IMAGE_2_RESOLUTIONS;
     return uniqueStrings(['auto', ...source]).filter((item) => PRODUCT_RESOLUTIONS.includes(item));
@@ -304,30 +331,38 @@ function resolveMaxImages(input: ImageSizeCapabilityInput, config: any): number 
   return supportsCount ? Math.max(1, Math.min(tierMax, modelMax)) : 1;
 }
 
+function resolveMaxReferenceImages(input: ImageSizeCapabilityInput, config: any): number {
+  const modelMax = getModelMediaInputMax(config, 'image');
+  if (modelMax !== undefined) return modelMax;
+  const tierMax = Number(input.maxReferenceImages);
+  return Number.isFinite(tierMax) && tierMax >= 0 ? Math.floor(tierMax) : 4;
+}
+
 function modelSupportsImageCount(input: ImageSizeCapabilityInput, config: any): boolean {
   if (config.supports_image_count !== undefined) return Boolean(config.supports_image_count);
   if (config.supportsImageCount !== undefined) return Boolean(config.supportsImageCount);
   const providerType = String(input.providerType || '').toLowerCase();
-  const names = [input.modelName, input.apiModelName, input.upstreamModelCode].map((item) => String(item || '').toLowerCase());
   if (providerType === 'xiaoma') {
     const params = Array.isArray(config.param_names) ? config.param_names.map((item: any) => String(item).toLowerCase()) : [];
-    return params.includes('n') || names.some((item) => isGptImage2Model(item));
+    return params.includes('n');
   }
   return true;
 }
 
-function isGptImage2Model(value: unknown): boolean {
+function isGptImage2Model(value: unknown, providerType?: unknown): boolean {
   const text = String(value || '').toLowerCase();
   const compact = text.replace(/[^a-z0-9]/g, '');
-  return text.includes('gpt-image-2') || compact.includes('gptimage2');
+  return text.includes('gpt-image-2')
+    || compact.includes('gptimage2')
+    || (String(providerType || '').toLowerCase() === 'xiaoma' && text.includes('tt-image-2'));
 }
 
 function isNanoBananaModel(value: unknown): boolean {
   const text = String(value || '').toLowerCase();
-  const compact = text.replace(/[^a-z0-9]/g, '');
   return text.includes('nano-banana')
-    || compact.includes('nanobanana')
-    || (text.includes('gemini') && text.includes('image-preview'));
+    || text.replace(/[^a-z0-9]/g, '').includes('nanobanana')
+    || (text.includes('gemini') && text.includes('image-preview'))
+    || hasCurrentXiaomaBananaModelToken(text);
 }
 
 function getXiaomaNanoBananaProfile(providerType: unknown, modelName?: string): { ratios: string[]; resolutions: string[] } | null {
@@ -336,10 +371,21 @@ function getXiaomaNanoBananaProfile(providerType: unknown, modelName?: string): 
   if (text.includes('gemini-3.1-flash-image-preview')) {
     return { ratios: XIAOMA_NANO_BANANA_2_RATIOS, resolutions: XIAOMA_NANO_BANANA_2_RESOLUTIONS };
   }
+  if (hasCurrentXiaomaBananaModelToken(text, 'banana-2')) {
+    return { ratios: XIAOMA_NANO_BANANA_2_RATIOS, resolutions: XIAOMA_NANO_BANANA_2_RESOLUTIONS };
+  }
   if (text.includes('gemini-3-pro-image-preview')) {
     return { ratios: XIAOMA_NANO_BANANA_PRO_RATIOS, resolutions: XIAOMA_NANO_BANANA_PRO_RESOLUTIONS };
   }
+  if (hasCurrentXiaomaBananaModelToken(text, 'banana-pro')) {
+    return { ratios: XIAOMA_NANO_BANANA_PRO_RATIOS, resolutions: XIAOMA_NANO_BANANA_PRO_RESOLUTIONS };
+  }
   return null;
+}
+
+function hasCurrentXiaomaBananaModelToken(value: string, expected?: 'banana-pro' | 'banana-2'): boolean {
+  const models = new Set(['banana-pro', 'banana-pro-token', 'banana-2', 'banana-2-token']);
+  return value.split(/\s+/).some((token) => models.has(token) && (!expected || token.startsWith(expected)));
 }
 
 function optionsCoverProfile(options: ImageSizeOption[], profile: { ratios: string[]; resolutions: string[] }): boolean {

@@ -1,4 +1,4 @@
-import { createVideoTask } from '../src/services/task.service';
+import { createVideoTask, uniqueReferenceItems } from '../src/services/task.service';
 import { resolveImageSize } from '../src/utils/image-size';
 
 async function expectFail(label: string, fn: () => Promise<any>, pattern: RegExp) {
@@ -41,13 +41,24 @@ async function main() {
   }
 
   const pixels = resolveImageSize({ prompt: '生成 1280x720 的视频', ratio: '9:16', tierDefaultRatio: '1:1' });
-  if (pixels.source !== 'prompt_pixel' || pixels.width !== 1280 || pixels.height !== 720) {
-    throw new Error('video prompt pixel priority failed');
+  if (pixels.source !== 'ui_ratio' || pixels.width !== 864 || pixels.height !== 1536) {
+    throw new Error('video UI ratio priority failed');
   }
 
   const ratio = resolveImageSize({ prompt: '生成 16:9 电影感视频', ratio: '9:16', tierDefaultRatio: '1:1' });
-  if (ratio.source !== 'prompt_ratio' || ratio.ratio !== '16:9') {
-    throw new Error('video prompt ratio priority failed');
+  if (ratio.source !== 'ui_ratio' || ratio.ratio !== '9:16') {
+    throw new Error('video UI ratio should override prompt ratio');
+  }
+
+  const duplicateReferences = uniqueReferenceItems([
+    { fileId: 88, fileNo: 'FILE_88', url: 'https://cdn.example/ref.png' },
+    'FILE_88',
+    88,
+    'https://cdn.example/ref.png',
+    'https://cdn.example/other.png',
+  ]);
+  if (duplicateReferences.length !== 2 || duplicateReferences[0]?.fileId !== 88 || duplicateReferences[1] !== 'https://cdn.example/other.png') {
+    throw new Error('video reference deduplication failed');
   }
 
   const fallback = resolveImageSize({ prompt: '生成产品展示视频', tierDefaultRatio: '9:16' });

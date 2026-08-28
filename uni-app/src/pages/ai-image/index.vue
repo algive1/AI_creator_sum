@@ -23,30 +23,41 @@
           @hint="showUploadHint"
         />
       </block>
-      <view v-else-if="imageType === '图片编辑'" class="card image-edit-upload-card">
-        <view class="upload-head">
-          <view class="section-title">上传待编辑图</view>
-          <view class="image-edit-upload-status">
-            <view v-if="hasEditImage" class="image-edit-upload-actions">
-              <view class="image-edit-upload-action" @tap.stop="replaceEditImage">替换</view>
-              <view class="image-edit-upload-action danger" @tap.stop="removeEditImage">删除</view>
+      <view v-else-if="imageType === '图片编辑'" class="image-edit-upload-section">
+        <view class="card image-edit-upload-card">
+          <view class="upload-head">
+            <view class="section-title">上传待编辑图</view>
+            <view class="image-edit-upload-status">
+              <view class="upload-count">已上传 {{ displayedUploadedAssetCount }}/{{ maxUploads }}</view>
+              <view v-if="hasEditImage" class="image-edit-upload-actions">
+                <view v-if="canAddEditImage" class="image-edit-upload-action" @tap.stop="pickEditImage">继续上传</view>
+                <view class="image-edit-upload-action" @tap.stop="replaceEditImage">替换</view>
+                <view class="image-edit-upload-action danger" @tap.stop="removeEditImage">删除</view>
+              </view>
             </view>
-            <view v-else class="upload-count">已上传 0/1</view>
+          </view>
+          <view class="image-edit-upload-area" :class="{ filled: hasEditImage }" @tap="hasEditImage ? replaceEditImage() : pickEditImage()">
+            <block v-if="editImagePreviewPath">
+              <image class="image-edit-upload-preview" :src="editImagePreviewPath" mode="aspectFill" />
+            </block>
+            <block v-else>
+              <view class="upload-line-icon image-edit-empty-icon">
+                <image class="line-icon-img" src="/static/icons/icon_upload_image_line.svg" mode="aspectFit" />
+                <text class="upload-line-plus">+</text>
+              </view>
+              <view class="image-edit-empty-title">上传待编辑图</view>
+              <view class="image-edit-empty-desc">支持 JPG/PNG/WEBP，最多 {{ maxUploads }} 张，上传后可替换或删除</view>
+            </block>
           </view>
         </view>
-        <view class="image-edit-upload-area" :class="{ filled: hasEditImage }" @tap="hasEditImage ? replaceEditImage() : pickEditImage()">
-          <block v-if="editImagePreviewPath">
-            <image class="image-edit-upload-preview" :src="editImagePreviewPath" mode="aspectFill" />
-          </block>
-          <block v-else>
-            <view class="upload-line-icon image-edit-empty-icon">
-              <image class="line-icon-img" src="/static/icons/icon_upload_image_line.svg" mode="aspectFit" />
-              <text class="upload-line-plus">+</text>
-            </view>
-            <view class="image-edit-empty-title">上传待编辑图</view>
-            <view class="image-edit-empty-desc">支持 JPG/PNG/WEBP，上传后可替换或删除</view>
-          </block>
-        </view>
+        <LegacyAssetStrip
+          :assets="assets"
+          :max="maxUploads"
+          tip="预览图区域可继续添加、替换或删除"
+          @replace="replaceAsset"
+          @remove="removeAsset"
+          @hint="pickEditImage"
+        />
       </view>
 
       <LegacyPromptComposer
@@ -373,6 +384,7 @@ const currentPromptGuide = computed(() => getPromptGuide(configStore.publicConfi
 const promptPlaceholder = computed(() => currentPromptGuide.value.placeholder);
 const showPromptGuide = computed(() => hasPromptGuideDialog(currentPromptGuide.value));
 const hasEditImage = computed(() => Boolean(editImagePreviewPath.value || editImageState.value.uploadKeys[0]));
+const canAddEditImage = computed(() => uploadedAssetCount.value < maxUploads.value);
 const editTool = computed({
   get: () => currentState.value.editTool,
   set: (value: string) => { currentState.value.editTool = value; }
@@ -1004,7 +1016,7 @@ function pickEditImage() {
 }
 
 function replaceEditImage() {
-  chooseAndSetEditImage();
+  chooseAndSetEditImage(0);
 }
 
 function chooseAndSetAsset(type: string, replaceIndex?: number) {
@@ -1047,7 +1059,7 @@ function nextAvailableAssetSlot(state: ModeState, type: string) {
   return -1;
 }
 
-function chooseAndSetEditImage() {
+function chooseAndSetEditImage(replaceIndex?: number) {
   uni.chooseImage({
     count: 1,
     success: async (res) => {
@@ -1055,11 +1067,16 @@ function chooseAndSetEditImage() {
       if (!path) return;
       const asset: LegacyAsset = { path, type: 'edit', typeLabel: '编辑图', mediaType: 'image' };
       const state = imageStates['图片编辑'];
-      state.assets.splice(0, state.assets.length, asset);
-      state.uploadKeys.splice(0, state.uploadKeys.length);
+      const assetIndex = typeof replaceIndex === 'number' ? replaceIndex : nextAvailableAssetSlot(state, 'edit');
+      if (assetIndex < 0) {
+        uni.showToast({ title: `最多上传${maxUploads.value}张图片`, icon: 'none' });
+        return;
+      }
+      state.assets[assetIndex] = asset;
+      state.uploadKeys[assetIndex] = undefined;
       try {
         const uploaded = await uploadAsset<Record<string, unknown>>(path, 'ref_image', 'public');
-        state.uploadKeys[0] = uploaded.fileNo || uploaded.fileId || uploaded.url;
+        state.uploadKeys[assetIndex] = uploaded.fileNo || uploaded.fileId || uploaded.url;
       } catch {
         uni.showToast({ title: '素材上传失败，请重试', icon: 'none' });
       }
@@ -1078,9 +1095,7 @@ function removeAsset(slotIndex: number) {
 }
 
 function removeEditImage() {
-  const state = imageStates['图片编辑'];
-  state.assets.splice(0, state.assets.length);
-  state.uploadKeys.splice(0, state.uploadKeys.length);
+  removeAsset(0);
 }
 
 function showUploadHint() {
@@ -1241,12 +1256,12 @@ async function submit(billingSource: 'auto' | 'points' = 'auto') {
       uni.showToast({ title: '主图未上传成功，请重新上传', icon: 'none' });
       return;
     }
-    if (countUploadedKeys(state) < countFilledAssets(state)) {
-      uni.showToast({ title: '素材未上传成功，请重新上传', icon: 'none' });
-      return;
-    }
   } else if (imageType.value !== '文生图' && !countFilledAssets(state)) {
     uni.showToast({ title: '请先上传素材图片', icon: 'none' });
+    return;
+  }
+  if (countFilledAssets(state) > 0 && countUploadedKeys(state) < countFilledAssets(state)) {
+    uni.showToast({ title: '素材未上传成功，请重新上传', icon: 'none' });
     return;
   }
   const subType = imageType.value === '图生图' ? 'img2img' : imageType.value === '图片编辑' ? 'edit' : 'text2img';
@@ -1579,7 +1594,7 @@ function normalizeCapabilities(value: unknown): ModelCapabilities {
     nativeSizes: stringArray(caps.nativeSizes, fallbackCapabilities.nativeSizes),
     defaultRatio: String(caps.defaultRatio || fallbackCapabilities.defaultRatio || '1:1'),
     maxImages: Number(caps.maxImages || fallbackCapabilities.maxImages || 1),
-    maxReferenceImages: normalizeMaxReferenceImages(caps.maxReferenceImages)
+    maxReferenceImages: normalizeMaxReferenceImages(caps.maxReferenceImages),
   };
 }
 
@@ -1588,8 +1603,9 @@ function shortTierName(value: unknown) {
 }
 
 function normalizeMaxReferenceImages(value: unknown) {
-  const count = Math.floor(Number(value || DEFAULT_MAX_REFERENCE_IMAGES));
-  return Number.isFinite(count) && count > 0 ? count : DEFAULT_MAX_REFERENCE_IMAGES;
+  if (value === undefined || value === null || value === '') return DEFAULT_MAX_REFERENCE_IMAGES;
+  const count = Math.floor(Number(value));
+  return Number.isFinite(count) && count >= 0 ? count : DEFAULT_MAX_REFERENCE_IMAGES;
 }
 
 function stringArray(value: unknown, fallback: string[] = []) {

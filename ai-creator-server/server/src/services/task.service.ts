@@ -112,6 +112,9 @@ const ALLOWED_VIDEO_PARAM_KEYS = new Set([
   'preserveAudio',
   'inputAssets',
   'referenceMode',
+  'sceneType',
+  'genre',
+  'character',
 ]);
 
 interface PreparedTask {
@@ -193,7 +196,9 @@ export async function createImageTask(input: CreateImageTaskParams) {
     sizeKey: mergedParams.sizeKey,
     style: mergedParams.style,
     imageCount: mergedParams.imageCount,
-    referenceImageCount: input.subType === 'img2img' ? countImageReferences(input.uploadKeys, input.referenceKeys) : undefined,
+    referenceImageCount: ['img2img', 'edit'].includes(input.subType)
+      ? countImageReferences(input.uploadKeys, input.referenceKeys) || undefined
+      : undefined,
     sizeMode: input.sizeMode || mergedParams.sizeMode,
     targetWidth: input.customWidth ?? mergedParams.customWidth,
     targetHeight: input.customHeight ?? mergedParams.customHeight,
@@ -223,10 +228,15 @@ export async function createImageTask(input: CreateImageTaskParams) {
     primaryModel: tierResult.primaryModel,
   });
 
+  // sizeKey/sizeOption 是小程序已经选择的完整尺寸组合；一旦匹配成功，
+  // 这里必须使用它的比例，避免提示词像素或旧 ratio 字段把页面选择覆盖掉。
+  const selectedUiRatio = selectedSizeOption
+    ? (selectedSizeOption.ratio === 'auto' ? undefined : selectedSizeOption.ratio)
+    : input.ratio || mergedParams.ratio;
   const sizePlan = resolveImageSize({
     prompt: input.prompt,
     sizeMode: input.sizeMode || mergedParams.sizeMode,
-    ratio: input.ratio || mergedParams.ratio,
+    ratio: selectedUiRatio,
     customWidth: input.customWidth ?? mergedParams.customWidth,
     customHeight: input.customHeight ?? mergedParams.customHeight,
     postprocessMode: input.postprocessMode || mergedParams.postprocessMode,
@@ -237,10 +247,6 @@ export async function createImageTask(input: CreateImageTaskParams) {
 
   // 本地验证：resolveImageSize 可能改变了 ratio/sizeMode/尺寸，用已加载的 caps 做二次校验，不重新查库
   validateResolvedImageSize(tierResult.tierName, tierResult.capabilities, sizePlan);
-  if (input.subType === 'edit' && countImageReferences(input.uploadKeys) > 1) {
-    throw paramError('图片编辑只能上传一张待编辑图');
-  }
-
   mergedParams.ratio = selectedSizeOption?.ratio === 'auto' ? 'auto' : sizePlan.targetRatio;
   mergedParams.sizePlan = sizePlan;
   mergedParams.sizeWarnings = sizePlan.warnings;
@@ -438,10 +444,12 @@ export async function createVideoTask(input: {
   const videoAssetRefs = splitAssets.videoRefs.map(videoAssetToReferenceValue).filter(Boolean);
   const audioAssetRefs = splitAssets.audioRefs.map(videoAssetToReferenceValue).filter(Boolean);
   if (imageAssetRefs.length && videoMode === 'image_to_video') {
-    params.uploadKeys = imageAssetRefs.concat(Array.isArray(params.uploadKeys) ? params.uploadKeys : params.uploadKeys ? [params.uploadKeys] : []);
+    const legacyImageRefs = Array.isArray(params.uploadKeys) ? params.uploadKeys : params.uploadKeys ? [params.uploadKeys] : [];
+    params.uploadKeys = mergeVideoReferenceItems(splitAssets.imageRefs, legacyImageRefs);
   }
   if (videoAssetRefs.length && videoMode === 'video_edit' && !params.videoFileId && !params.videoId && !params.videoUrl && !params.video_url) {
-    params.uploadKeys = videoAssetRefs.concat(Array.isArray(params.uploadKeys) ? params.uploadKeys : params.uploadKeys ? [params.uploadKeys] : []);
+    const legacyVideoRefs = Array.isArray(params.uploadKeys) ? params.uploadKeys : params.uploadKeys ? [params.uploadKeys] : [];
+    params.uploadKeys = mergeVideoReferenceItems(splitAssets.videoRefs, legacyVideoRefs);
   }
   const requestedRatio = String(params.ratio || '').trim();
   const adaptiveRatio = requestedRatio.toLowerCase() === 'adaptive';
@@ -906,8 +914,11 @@ function buildProviderParams(taskType: string, input: any, tierResult: TierModel
       durationRaw: input.params?.durationRaw || input.params?.duration,
       fps: input.params?.fps,
       seed: input.params?.seed,
-      resolution: input.params?.resolution || input.params?.quality || '720p',
-      cameraMove: input.params?.cameraMove || 'static',
+      // Do not invent provider values here. The selected model's adapter may
+      // support these fields, but a model without the declaration must be
+      // allowed to apply its own upstream default instead.
+      resolution: input.params?.resolution || input.params?.quality,
+      cameraMove: input.params?.cameraMove,
       motionStrength: input.params?.motionStrength,
       style: input.params?.style,
       videoUrl: input.params?.videoUrl || input.params?.video_url,
@@ -952,7 +963,7 @@ function buildProviderParams(taskType: string, input: any, tierResult: TierModel
     sizePlan,
     sizeKey: input.params?.sizeKey,
     sizeOption,
-    nativeSize: sizePlan?.nativeSize,
+    nativeSize: sizeOption?.upstreamSize || sizePlan?.nativeSize,
   };
 }
 
@@ -2525,7 +2536,7 @@ async function resolveVideoReferenceImages(
   const referenceImage = typeof params.referenceImage === 'string' ? params.referenceImage.trim() : '';
   const videoFileId = positiveInt(params.videoFileId || params.videoId, 0);
   const referenceVideo = String(params.videoUrl || params.video_url || params.referenceVideo || params.referenceVideoUrl || '').trim();
-  const uploadItems = Array.isArray(params.uploadKeys) ? params.uploadKeys : params.uploadKeys ? [params.uploadKeys] : [];
+  const uploadItems = uniqueReferenceItems(Array.isArray(params.uploadKeys) ? params.uploadKeys : params.uploadKeys ? [params.uploadKeys] : []);
   const urls: string[] = [];
   const metadata: any[] = [];
   const warnings: string[] = [];
@@ -2541,17 +2552,19 @@ async function resolveVideoReferenceImages(
   if (videoMode === 'video_edit' && !videoFileId && !referenceVideo && uploadItems.length === 0) {
     throw paramError('视频编辑需要上传视频文件或提供视频 URL');
   }
-  if (videoMode === 'video_edit' && uploadItems.length > 1) {
-    throw paramError('视频编辑只能上传一个源视频');
-  }
-
   if (videoMode === 'video_edit') {
-    const videoRef = videoFileId || referenceVideo || uploadItems[0];
-    const resolved = await resolveSingleVideoReference(userId, videoRef);
-    if (!resolved?.url) throw paramError('视频文件缺少可访问地址');
-    params.videoUrl = resolved.url;
-    params.video_url = resolved.url;
-    metadata.push(resolved.metadata);
+    const videoRefs = uniqueReferenceItems([
+      videoFileId || referenceVideo,
+      ...uploadItems,
+    ].filter((item) => item !== 0 && item !== ''));
+    const resolvedVideos = await Promise.all(videoRefs.map((item) => resolveSingleVideoReference(userId, item)));
+    const videoUrls = uniqueStrings(resolvedVideos.map((item) => item?.url || '').filter(Boolean));
+    if (!videoUrls.length) throw paramError('视频文件缺少可访问地址');
+    params.videoUrls = videoUrls;
+    params.video_urls = videoUrls;
+    params.videoUrl = videoUrls[0];
+    params.video_url = videoUrls[0];
+    resolvedVideos.filter(Boolean).forEach((item) => metadata.push(item!.metadata));
   }
 
   const firstFramePromise = firstFrameFileId
@@ -2701,6 +2714,25 @@ function videoAssetToReferenceValue(asset: VideoInputAssetRef): any {
   if (asset.storageKey) return asset.storageKey;
   if (asset.uploadKey) return asset.uploadKey;
   return asset;
+}
+
+/**
+ * Merge structured inputAssets with the legacy uploadKeys field without
+ * counting the same file twice when one side uses fileId and the other uses
+ * fileNo, URL, or uploadKey.
+ */
+function mergeVideoReferenceItems(assets: VideoInputAssetRef[], legacyItems: any[]): any[] {
+  const result: any[] = [];
+  const seen = new Set<string>();
+  const append = (value: any, identitySource: any = value) => {
+    const aliases = referenceAliases(identitySource);
+    if (aliases.some((alias) => seen.has(alias))) return;
+    aliases.forEach((alias) => seen.add(alias));
+    result.push(value);
+  };
+  assets.forEach((asset) => append(videoAssetToReferenceValue(asset), asset));
+  legacyItems.forEach((item) => append(item));
+  return result;
 }
 
 function countVideoReferences(params: Record<string, any>, assetRefs: any[]): number {
@@ -2955,5 +2987,48 @@ function paramError(message: string) {
 function countImageReferences(uploadKeys: any, referenceKeys?: any): number {
   const uploadItems = Array.isArray(uploadKeys) ? uploadKeys : uploadKeys ? [uploadKeys] : [];
   const referenceItems = Array.isArray(referenceKeys) ? referenceKeys : referenceKeys ? [referenceKeys] : [];
-  return uploadItems.length + referenceItems.length;
+  return uniqueReferenceItems([...uploadItems, ...referenceItems]).length;
+}
+
+export function uniqueReferenceItems(items: any[]): any[] {
+  const result: any[] = [];
+  const seen = new Set<string>();
+  for (const item of items || []) {
+    const aliases = referenceAliases(item);
+    if (!aliases.length) {
+      result.push(item);
+      continue;
+    }
+    if (aliases.some((alias) => seen.has(alias))) continue;
+    aliases.forEach((alias) => seen.add(alias));
+    result.push(item);
+  }
+  return result;
+}
+
+function referenceAliases(value: unknown): string[] {
+  if (value === undefined || value === null || value === '') return [];
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    const text = String(value).trim();
+    return text ? [text] : [];
+  }
+  if (typeof value !== 'object') return [];
+  const item = value as Record<string, any>;
+  return uniqueStrings([
+    ...referenceAliases(item.url),
+    ...referenceAliases(item.cdnUrl),
+    ...referenceAliases(item.cdn_url),
+    ...referenceAliases(item.accessUrl),
+    ...referenceAliases(item.access_url),
+    ...referenceAliases(item.fileId),
+    ...referenceAliases(item.file_id),
+    ...referenceAliases(item.fileNo),
+    ...referenceAliases(item.file_no),
+    ...referenceAliases(item.storageKey),
+    ...referenceAliases(item.storage_key),
+    ...referenceAliases(item.uploadKey),
+    ...referenceAliases(item.upload_key),
+    ...referenceAliases(item.key),
+    ...referenceAliases(item.id),
+  ]);
 }

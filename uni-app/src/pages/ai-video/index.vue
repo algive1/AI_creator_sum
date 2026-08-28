@@ -33,28 +33,28 @@
           </block>
         </view>
       </view>
-      <view v-else-if="isReferenceVideoMode && mediaUploadCards.length" class="reference-video-upload-section">
+      <view v-else-if="showDynamicMediaUpload && visibleMediaUploadCards.length" class="reference-video-upload-section">
         <view class="card media-upload-card video-source-card" :class="mediaUploadLayoutClass">
           <view class="upload-head">
-            <view class="section-title">上传素材</view>
+            <view class="section-title">{{ isMultiSourceVideoMode ? '上传源视频' : '上传素材' }}</view>
             <view class="upload-count">{{ mediaUploadTotalText }}</view>
           </view>
           <view
-            v-if="mediaUploadCards.length === 1"
+            v-if="visibleMediaUploadCards.length === 1"
             class="video-source-area media-upload-source-area"
-            :class="{ full: mediaUploadCards[0].full }"
-            @tap="openMediaAction(mediaUploadCards[0].mediaType)"
+            :class="{ full: visibleMediaUploadCards[0].full }"
+            @tap="openMediaAction(visibleMediaUploadCards[0].mediaType)"
           >
             <view class="upload-line-icon video-empty-icon">
-              <image class="line-icon-img" :src="mediaUploadCards[0].icon" mode="aspectFit" />
+              <image class="line-icon-img" :src="visibleMediaUploadCards[0].icon" mode="aspectFit" />
               <text class="upload-line-plus">+</text>
             </view>
-            <view class="video-empty-title">{{ mediaUploadCards[0].title }}</view>
-            <view class="video-empty-desc">{{ mediaUploadCards[0].countText }}</view>
+            <view class="video-empty-title">{{ visibleMediaUploadCards[0].title }}</view>
+            <view class="video-empty-desc">{{ visibleMediaUploadCards[0].countText }}</view>
           </view>
           <view v-else class="frame-upload-grid media-upload-grid" :class="mediaUploadGridClass">
             <view
-              v-for="card in mediaUploadCards"
+              v-for="card in visibleMediaUploadCards"
               :key="card.mediaType"
               class="frame-upload-slot media-upload-frame-slot"
               :class="{ full: card.full }"
@@ -652,6 +652,8 @@ const minReferenceImages = computed(() => normalizeMinReferenceImages(selectedCa
 const referenceUploadMode = computed(() => selectedCapabilities.value.referenceUploadMode || inferReferenceUploadMode(videoMode.value));
 const isFirstFrameVideoMode = computed(() => videoMode.value === '图生视频');
 const isReferenceVideoMode = computed(() => videoMode.value === '参考生视频');
+const isMultiSourceVideoMode = computed(() => videoMode.value === '视频编辑' && maxVideoUrls.value > 1);
+const showDynamicMediaUpload = computed(() => isReferenceVideoMode.value || isMultiSourceVideoMode.value);
 const supportedInputMediaTypes = computed<InputMediaType[]>(() => normalizeInputMediaTypes(selectedCapabilities.value));
 const mediaUploadCards = computed<MediaUploadCard[]>(() => supportedInputMediaTypes.value.map((mediaType) => {
   const count = countAssetsByMediaType(mediaType);
@@ -664,14 +666,23 @@ const mediaUploadCards = computed<MediaUploadCard[]>(() => supportedInputMediaTy
     full: max > 0 && count >= max,
   };
 }).filter((card) => maxForMediaType(card.mediaType) > 0));
-const mediaUploadGridClass = computed(() => `cols-${Math.min(3, Math.max(1, mediaUploadCards.value.length))}`);
+const visibleMediaUploadCards = computed<MediaUploadCard[]>(() => (
+  isMultiSourceVideoMode.value
+    ? mediaUploadCards.value.filter((card) => card.mediaType === 'video')
+    : mediaUploadCards.value
+));
+const visibleUploadedAssetCount = computed(() => {
+  const mediaTypes = new Set(visibleMediaUploadCards.value.map((card) => card.mediaType));
+  return assets.value.filter((asset) => mediaTypes.has(normalizeAssetMediaType(asset) as InputMediaType)).length;
+});
+const mediaUploadGridClass = computed(() => `cols-${Math.min(3, Math.max(1, visibleMediaUploadCards.value.length))}`);
 const mediaUploadLayoutClass = computed(() => ({
-  single: mediaUploadCards.value.length === 1,
-  pair: mediaUploadCards.value.length === 2,
-  triple: mediaUploadCards.value.length >= 3,
+  single: visibleMediaUploadCards.value.length === 1,
+  pair: visibleMediaUploadCards.value.length === 2,
+  triple: visibleMediaUploadCards.value.length >= 3,
 }));
-const mediaAssetLimit = computed(() => mediaUploadCards.value.reduce((total, card) => total + maxForMediaType(card.mediaType), 0));
-const mediaUploadTotalText = computed(() => `已添加 ${uploadedAssetCount.value}/${mediaAssetLimit.value}`);
+const mediaAssetLimit = computed(() => visibleMediaUploadCards.value.reduce((total, card) => total + maxForMediaType(card.mediaType), 0));
+const mediaUploadTotalText = computed(() => `已添加 ${visibleUploadedAssetCount.value}/${mediaAssetLimit.value}`);
 const referenceUploadFull = computed(() => uploadedAssetCount.value >= maxUploads.value);
 const referenceUploadCountText = computed(() => `已上传 ${displayedUploadedAssetCount.value}/${maxUploads.value}`);
 const referenceUploadTitle = computed(() => {
@@ -1124,7 +1135,7 @@ function handleSourceVideoTap() {
 
 function replaceAsset(slotIndex: number) {
   const current = assets.value[slotIndex];
-  if (isReferenceVideoMode.value) {
+  if (isReferenceVideoMode.value || isMultiSourceVideoMode.value) {
     const mediaType = normalizeAssetMediaType(current) || 'image';
     openMediaAction(mediaType, slotIndex);
     return;
@@ -1270,6 +1281,10 @@ function chooseAndSetImage(type: string, replaceIndex?: number) {
 }
 
 function chooseAndSetVideo() {
+  if (isMultiSourceVideoMode.value) {
+    chooseAndSetReferenceVideo();
+    return;
+  }
   uni.chooseVideo({
     sourceType: ['album', 'camera'],
     compressed: false,
@@ -1327,6 +1342,12 @@ function applyUploadedMeta(assetIndex: number, uploaded: Record<string, unknown>
 
 function removeAsset(slotIndex: number) {
   const state = currentState.value;
+  if (isReferenceVideoMode.value || isMultiSourceVideoMode.value) {
+    state.assets.splice(slotIndex, 1);
+    state.uploadKeys.splice(slotIndex, 1);
+    state.fileIds.splice(slotIndex, 1);
+    return;
+  }
   if (videoMode.value === '图生视频' || videoMode.value === '首尾帧' || videoMode.value === '视频编辑') {
     state.assets[slotIndex] = null;
     state.uploadKeys[slotIndex] = undefined;
@@ -1467,7 +1488,9 @@ async function submit() {
     uni.showToast({ title: '首尾帧未拿到文件ID，请重新上传', icon: 'none' });
     return;
   }
-  if (videoMode.value === '视频编辑' && !videoFileId) {
+  const firstVideoAsset = state.assets.find((asset) => normalizeAssetMediaType(asset) === 'video');
+  const firstVideoHasReference = Boolean(videoFileId || firstVideoAsset?.url || state.uploadKeys[0]);
+  if (videoMode.value === '视频编辑' && (!isMultiSourceVideoMode.value ? !videoFileId : !firstVideoHasReference)) {
     uni.showToast({ title: '源视频未拿到文件ID，请重新上传', icon: 'none' });
     return;
   }
@@ -1509,7 +1532,9 @@ async function submit() {
     autoScript: true,
     formData: { ...state.form },
     params,
-    uploadKeys: buildLegacyImageUploadKeys(state)
+    // 图生/参考生视频以 inputAssets 作为唯一素材来源，避免与旧 uploadKeys
+    // 同时提交后被后端重复计数；首尾帧仍由专用 fileId 字段提交。
+    uploadKeys: subType === 'image_to_video' ? [] : buildLegacyImageUploadKeys(state)
   });
   const id = Number(result.id || result.taskId);
   if (!Number.isInteger(id) || id <= 0) {
@@ -1607,9 +1632,11 @@ function normalizeVideoParams() {
 }
 
 function trimCurrentAssetsToMaxUploads() {
-  if (videoMode.value !== '参考生视频' || !selectedModel.value) return 0;
+  if (!showDynamicMediaUpload.value || !selectedModel.value) return 0;
   const state = currentState.value;
-  const supportedMediaTypes = supportedInputMediaTypes.value;
+  const supportedMediaTypes = isMultiSourceVideoMode.value
+    ? (['video'] as InputMediaType[])
+    : supportedInputMediaTypes.value;
   const hasOnlyImageAssets = state.assets.every((asset) => !asset || normalizeAssetMediaType(asset) === 'image');
 
   if (supportedMediaTypes.length === 1 && supportedMediaTypes[0] === 'image' && hasOnlyImageAssets) {
@@ -1908,8 +1935,9 @@ function applyMemberDiscount(basePoints: number, discountPercent: number) {
 }
 
 function normalizeMaxReferenceImages(value: unknown) {
-  const count = Math.floor(Number(value || DEFAULT_MAX_REFERENCE_IMAGES));
-  return Number.isFinite(count) && count > 0 ? count : DEFAULT_MAX_REFERENCE_IMAGES;
+  if (value === undefined || value === null || value === '') return DEFAULT_MAX_REFERENCE_IMAGES;
+  const count = Math.floor(Number(value));
+  return Number.isFinite(count) && count >= 0 ? count : DEFAULT_MAX_REFERENCE_IMAGES;
 }
 
 function normalizeMinReferenceImages(value: unknown) {
@@ -1954,10 +1982,12 @@ function audioModeOptionDesc(value: string, locked = audioModeKeys.value.length 
 
 function modelMatchesVideoMode(caps: ModelCapabilities) {
   const uploadMode = normalizeReferenceUploadMode(caps.referenceUploadMode || caps.inputMode || inferReferenceUploadMode(videoMode.value));
-  if (videoMode.value === '图生视频') return uploadMode === 'first_frame';
-  if (videoMode.value === '参考生视频') return uploadMode === 'reference_images';
-  if (videoMode.value === '首尾帧') return uploadMode === 'first_last';
-  if (videoMode.value === '视频编辑') return uploadMode === 'source_video';
+  const maxReferenceImages = Number(caps.maxReferenceImages || 0);
+  const maxVideoUrls = Number(caps.maxVideoUrls || 0);
+  if (videoMode.value === '图生视频') return uploadMode === 'first_frame' && maxReferenceImages > 0;
+  if (videoMode.value === '参考生视频') return uploadMode === 'reference_images' && maxReferenceImages > 0;
+  if (videoMode.value === '首尾帧') return uploadMode === 'first_last' && maxReferenceImages >= 2;
+  if (videoMode.value === '视频编辑') return uploadMode === 'source_video' && maxVideoUrls > 0;
   return true;
 }
 

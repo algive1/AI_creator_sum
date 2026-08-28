@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { buildXiaomaTaskStatusUrl } from '../src/services/adapters/xiaoma.adapter';
-import { applyXiaomaVideoParams } from '../src/services/adapters/xiaoma-video-param-mapper';
+import { buildXiaomaMediaParams, XiaomaAdapter, buildXiaomaTaskStatusUrl } from '../src/services/adapters/xiaoma.adapter';
+import { applyXiaomaDeclaredValueFormats, applyXiaomaVideoParams } from '../src/services/adapters/xiaoma-video-param-mapper';
 import { buildVideoCapabilities } from '../src/services/video-capabilities.service';
 
 function main(): void {
@@ -89,6 +89,70 @@ function main(): void {
   assert.equal(advancedParams.audio_url, 'https://audio.example/bgm.mp3');
   assert.equal(advancedParams.audio_file_id, 88);
   assert.equal(advancedParams.audioUrl, undefined);
+
+  const originalQualityCase: any = { resolution: '720p', size: '720p' };
+  applyXiaomaDeclaredValueFormats(originalQualityCase, {
+    supported_qualities: ['720P', '1080P'],
+  });
+  assert.equal(originalQualityCase.resolution, '720P');
+  assert.equal(originalQualityCase.size, '720P');
+
+  const grokParams = buildXiaomaMediaParams({
+    upstreamCode: 'grok-video-3',
+    taskType: 'text_to_video',
+    prompt: 'landscape scene',
+    params: { ratio: '16:9', duration: '6s', resolution: '720p' },
+    modelConfig: { supported_qualities: ['720P', '1080P'] },
+    providerConfig: { baseUrl: 'https://xiaoma.example', apiKey: 'test', timeout: 1000, protocolType: 'rest', authType: 'bearer' },
+  });
+  assert.equal(grokParams.size, '720P', 'Xiaoma should receive the configured quality spelling');
+
+  const miniSizeParams = buildXiaomaMediaParams({
+    upstreamCode: 'kwvideo-v2-ref',
+    taskType: 'text_to_video',
+    prompt: 'mini-program size contract',
+    params: { ratio: '16:9', duration: '5s', width: 1920, height: 1080, nativeSize: '1920x1080' },
+    modelConfig: { param_names: ['prompt', 'aspect_ratio', 'duration'] },
+    providerConfig: { baseUrl: 'https://xiaoma.example', apiKey: 'test', timeout: 1000, protocolType: 'rest', authType: 'bearer' },
+  });
+  assert.equal(miniSizeParams.width, undefined, 'mini-program target pixels are not an Xiaoma API field');
+  assert.equal(miniSizeParams.height, undefined, 'mini-program target pixels are not an Xiaoma API field');
+
+  const defaultVideoParams = buildXiaomaMediaParams({
+    upstreamCode: 'kling-avatar-image2video',
+    taskType: 'image_to_video',
+    prompt: 'provider default mapping',
+    images: ['https://img.example/avatar.png'],
+    params: { ratio: '16:9' },
+    modelConfig: {
+      param_names: ['image', 'sound_file', 'prompt', 'mode'],
+      default_params: { mode: 'std', undeclared: 'must-not-send' },
+    },
+    providerConfig: { baseUrl: 'https://xiaoma.example', apiKey: 'test', timeout: 1000, protocolType: 'rest', authType: 'bearer' },
+  });
+  assert.equal(defaultVideoParams.mode, 'std', 'declared Xiaoma default params should be preserved');
+  assert.equal(defaultVideoParams.undeclared, undefined, 'undeclared Xiaoma defaults must not be sent');
+  assert.equal(defaultVideoParams.image, 'https://img.example/avatar.png', 'Xiaoma param_names should map the image alias');
+  assert.equal(defaultVideoParams.images, undefined, 'Xiaoma singular image fields should not receive the plural alias');
+
+  const referenceUrlParams = buildXiaomaMediaParams({
+    upstreamCode: 'kwvideo-v2-quannengcankao',
+    taskType: 'image_to_video',
+    prompt: 'reference URL mapping',
+    images: ['https://img.example/one.png', 'https://img.example/two.png'],
+    params: { ratio: '16:9', duration: '5s' },
+    modelConfig: {
+      param_names: ['_quan_neng_mode', 'duration', 'aspect_ratio', 'image_url'],
+      max_reference_images: 9,
+    },
+    providerConfig: { baseUrl: 'https://xiaoma.example', apiKey: 'test', timeout: 1000, protocolType: 'rest', authType: 'bearer' },
+  });
+  assert.deepEqual(referenceUrlParams.image_url, ['https://img.example/one.png', 'https://img.example/two.png']);
+
+  const parsed = new XiaomaAdapter().parseResult({
+    data: { task: { output: { video_url: 'https://cdn.example/result.mp4' } } },
+  }, '');
+  assert.deepEqual(parsed.urls, ['https://cdn.example/result.mp4']);
 
   console.log('check:xiaoma-video-params passed');
 }

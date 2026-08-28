@@ -26,6 +26,8 @@
     "hongniao:sync": "tsx scripts/sync-hongniao-models.ts",
     "hongniao:sync-apply": "tsx scripts/sync-hongniao-models.ts --mode=apply",
     "hongniao:sync-auto": "tsx scripts/sync-hongniao-models.ts --mode=auto",
+    "sync:provider-models": "tsx scripts/sync-provider-models.ts",
+    "check:provider-model-catalog": "tsx scripts/check-provider-model-catalog.ts",
     "check:provider-model-rollout": "tsx scripts/check-provider-model-rollout.ts",
     "check:local-test-workflow": "tsx scripts/check-local-test-workflow.ts",
     "check:xiaoma-config-refresh": "tsx scripts/check-xiaoma-config-refresh.ts",

@@ -29,15 +29,24 @@ test('reference image uploads use mixed slots so video or audio assets do not co
 
 test('reference video upload cards reuse first-frame and first-last visual systems', () => {
   assert.match(videoSource, /mediaUploadLayoutClass/);
-  assert.match(videoSource, /single: mediaUploadCards\.value\.length === 1/);
+  assert.match(videoSource, /single: visibleMediaUploadCards\.value\.length === 1/);
   assert.match(videoSource, /class="video-source-area media-upload-source-area"/);
   assert.match(videoSource, /class="frame-upload-grid media-upload-grid"/);
   assert.match(videoSource, /class="frame-upload-slot media-upload-frame-slot"/);
   assert.match(videoSource, /\.media-upload-grid\.cols-3/);
 });
 
-test('asset strip keeps at least four preview slots and supports disabled gray slots', () => {
+test('video edit can switch to model-driven multi-video upload when the model allows it', () => {
+  assert.match(videoSource, /isMultiSourceVideoMode/);
+  assert.match(videoSource, /showDynamicMediaUpload/);
+  assert.match(videoSource, /mediaUploadCards\.value\.filter\(\(card\) => card\.mediaType === 'video'\)/);
+  assert.match(videoSource, /视频编辑.*maxVideoUrls\.value > 1/);
+  assert.doesNotMatch(videoSource, /视频编辑只能上传一个源视频/);
+});
+
+test('asset strip keeps four default preview slots and disables slots above the selected limit', () => {
   assert.match(stripSource, /const MIN_VISIBLE_SLOTS = 4/);
+  assert.match(stripSource, /Math\.max\(MIN_VISIBLE_SLOTS, props\.max, props\.assets\.length\)/);
   assert.match(stripSource, /visibleSlotCount/);
   assert.match(stripSource, /disabled: index >= props\.max/);
   assert.match(stripSource, /asset-empty-slot/);

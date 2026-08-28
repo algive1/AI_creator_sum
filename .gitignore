@@ -8,11 +8,15 @@
 !.gitignore
 !README.md
 !PRODUCT.md
-!小程序自动编译说明.md
 !uni-app/
 !uni-app/**
 !ai-creator-server/
 !ai-creator-server/**
+
+# Local archive area. Keep its index, ignore all archived materials.
+!other/
+other/*
+!other/README.md
 
 # Non-runtime drafts inside allowed project folders
 ai-creator-server/admin-web/prototypes/

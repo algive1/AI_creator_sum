@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 
 const source = readFileSync(new URL('../src/services/tools.service.ts', import.meta.url), 'utf8');
 const start = source.indexOf('async function processPhoneFrame');
-const end = source.indexOf('\nfunction buildPromptReverseText', start);
+const end = source.indexOf('\nasync function reversePromptWithModel', start);
 const body = source.slice(start, end);
 
 test('phone frame renders an iPhone 17 Pro Max front screen mockup', () => {

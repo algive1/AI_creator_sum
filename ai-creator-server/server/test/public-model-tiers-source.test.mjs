@@ -14,6 +14,11 @@ test('public model tier list exposes bound real model names for user-facing mode
   assert.match(modelTierListService, /upstreamModelCode:\s*model\?\.upstream_model_code/);
 });
 
+test('public image capabilities expose the model-derived reference-image limit', () => {
+  assert.match(modelTierListService, /maxReferenceImages:\s*sizeCaps\.maxReferenceImages/);
+  assert.match(modelTierListService, /maxReferenceImages:\s*baseCapabilities\.maxReferenceImages/);
+});
+
 test('public model tier list supports web-only visibility and display names', () => {
   assert.match(modelTierListService, /clientType\??:/);
   assert.match(modelTierListService, /web_visible/);

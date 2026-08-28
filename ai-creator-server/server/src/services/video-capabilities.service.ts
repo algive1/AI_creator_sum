@@ -1,3 +1,5 @@
+import { getModelMediaInputMax, inspectModelMediaInputParameters } from './media-input-limits.service';
+
 export interface VideoCapabilityInput {
   featureKey?: string;
   modelName?: string;
@@ -84,38 +86,32 @@ export function buildVideoCapabilities(input: VideoCapabilityInput): VideoCapabi
   );
   const inputModeOverride = cleanString(input.inputMode);
   const referenceUploadModeOverride = cleanString(input.referenceUploadMode);
-  const mediaParamNames = readConfigStringList(config, [
-    'param_names',
-    'paramNames',
-    'input_keys',
-    'inputKeys',
-  ]).values;
-  const remoteParameters = Array.isArray(config.remote_parameters || config.remoteParameters)
-    ? config.remote_parameters || config.remoteParameters
-    : [];
+  const mediaInputParameters = inspectModelMediaInputParameters(config);
   const inputMode = normalizeInputMode(
     input.featureKey,
-    inputModeOverride || config.input_mode || config.inputMode || config.reference_upload_mode || config.referenceUploadMode,
+    config.input_mode || config.inputMode || config.reference_upload_mode || config.referenceUploadMode || inputModeOverride,
     modelName,
   );
   let referenceUploadMode = normalizeReferenceUploadMode(
     input.featureKey,
-    referenceUploadModeOverride || config.reference_upload_mode || config.referenceUploadMode,
+    config.reference_upload_mode || config.referenceUploadMode || referenceUploadModeOverride,
     inputMode,
   );
-  let minReferenceImages = normalizeNullableNonNegativeInt(input.minReferenceImages)
-    ?? normalizeNonNegativeInt(config.min_reference_images ?? config.minReferenceImages, defaultMinReferenceImages(inputMode));
-  let maxReferenceImages = normalizePositiveInt(input.maxReferenceImages ?? config.max_reference_images ?? config.maxReferenceImages, defaultMaxReferenceImages(inputMode));
-  const requiredReferenceOverride = normalizeNullableBoolean(input.requiredReference);
-  const hasImageParam = hasMediaInputParam(mediaParamNames, remoteParameters, [
-    'image', 'images', 'imageurl', 'imageurls', 'imgurl', 'referenceurl', 'referenceurls', 'referenceimageurls', 'inputreference',
-  ]);
-  const hasVideoParam = hasMediaInputParam(mediaParamNames, remoteParameters, [
-    'video', 'videos', 'videourl', 'videourls', 'referencevideo', 'referencevideos', 'referencevideourl', 'referencevideourls',
-  ]);
-  const hasAudioParam = hasMediaInputParam(mediaParamNames, remoteParameters, [
-    'audio', 'audios', 'audiourl', 'audiourls', 'audiofile', 'audiofiles', 'soundfile', 'soundfiles',
-  ]);
+  let minReferenceImages = normalizeNullableNonNegativeInt(config.min_reference_images ?? config.minReferenceImages)
+    ?? normalizeNullableNonNegativeInt(input.minReferenceImages)
+    ?? defaultMinReferenceImages(inputMode);
+  const modelMaxReferenceImages = getModelMediaInputMax(config, 'image');
+  let maxReferenceImages = resolveModelMediaLimit(
+    input.maxReferenceImages,
+    modelMaxReferenceImages,
+    defaultMaxReferenceImages(inputMode),
+  );
+  const requiredReferenceOverride = normalizeNullableBoolean(
+    config.required_reference ?? config.requiredReference,
+  ) ?? normalizeNullableBoolean(input.requiredReference);
+  const hasImageParam = mediaInputParameters.hasImageParam;
+  const hasVideoParam = mediaInputParameters.hasVideoParam;
+  const hasAudioParam = mediaInputParameters.hasAudioParam;
   if (
     feature === 'image_to_video'
     && referenceUploadMode === 'first_frame'
@@ -139,17 +135,20 @@ export function buildVideoCapabilities(input: VideoCapabilityInput): VideoCapabi
     maxReferenceImages = 1;
   }
   const defaultAudioMode = normalizeAudioMode(config.default_audio_mode || config.defaultAudioMode || input.defaultAudioMode || audioModes[0]) || 'silent';
-  const maxVideoUrls = normalizeNonNegativeInt(
-    input.maxVideoUrls ?? config.max_video_urls ?? config.maxVideoUrls,
+  const maxVideoUrls = resolveModelMediaLimit(
+    input.maxVideoUrls,
+    getModelMediaInputMax(config, 'video'),
     referenceUploadMode === 'source_video' || hasVideoParam ? 1 : 0,
   );
-  const maxAudioUrls = normalizeNonNegativeInt(
-    input.maxAudioUrls ?? config.max_audio_urls ?? config.maxAudioUrls,
+  const maxAudioUrls = resolveModelMediaLimit(
+    input.maxAudioUrls,
+    getModelMediaInputMax(config, 'audio'),
     hasAudioParam ? 1 : 0,
   );
-  const imageMediaSupported = (feature !== 'video_create' && referenceUploadMode !== 'none' && maxReferenceImages > 0) || hasImageParam;
-  const videoMediaSupported = maxVideoUrls > 0 || hasVideoParam;
-  const audioMediaSupported = maxAudioUrls > 0 || hasAudioParam;
+  const imageMediaSupported = (feature !== 'video_create' && referenceUploadMode !== 'none' && maxReferenceImages > 0)
+    || (hasImageParam && maxReferenceImages > 0);
+  const videoMediaSupported = maxVideoUrls > 0;
+  const audioMediaSupported = maxAudioUrls > 0;
   const inputMediaTypes: Array<'image' | 'video' | 'audio'> = [];
   if (imageMediaSupported) inputMediaTypes.push('image');
   if (videoMediaSupported) inputMediaTypes.push('video');
@@ -215,11 +214,20 @@ function normalizeVideoRatio(value: string): string {
   if (!text) return '';
   if (['auto', 'adaptive'].includes(text.toLowerCase())) return text.toLowerCase();
   const match = text.match(/^(\d{1,4})\s*:\s*(\d{1,4})$/);
-  if (!match) return '';
-  const width = Number(match[1]);
-  const height = Number(match[2]);
+  const sizeMatch = text.match(/^(\d{1,5})\s*[xX×]\s*(\d{1,5})$/);
+  if (match) return `${Number(match[1])}:${Number(match[2])}`;
+  const width = Number(sizeMatch?.[1]);
+  const height = Number(sizeMatch?.[2]);
   if (!width || !height) return '';
-  return `${width}:${height}`;
+  const divisor = greatestCommonDivisor(width, height);
+  return `${width / divisor}:${height / divisor}`;
+}
+
+function greatestCommonDivisor(a: number, b: number): number {
+  let left = Math.abs(a);
+  let right = Math.abs(b);
+  while (right) [left, right] = [right, left % right];
+  return left || 1;
 }
 
 function normalizeAdvancedParams(config: Record<string, any>, fallback?: string[] | null): string[] {
@@ -253,26 +261,6 @@ function normalizeAdvancedParamKey(value: unknown): string {
   if (compact === 'fps' || compact === 'framerate') return 'fps';
   if (compact === 'audiourl' || compact === 'audiourls') return 'audioUrl';
   return '';
-}
-
-function hasMediaParam(values: string[], compactKeys: string[]): boolean {
-  const allowed = new Set(compactKeys);
-  return values.some((item) => allowed.has(String(item || '').replace(/[-_\s]/g, '').toLowerCase()));
-}
-
-function hasMediaInputParam(values: string[], remoteParameters: any[], compactKeys: string[]): boolean {
-  if (!remoteParameters.length) return hasMediaParam(values, compactKeys);
-  const allowed = new Set(compactKeys);
-  return remoteParameters.some((item) => {
-    if (!item || typeof item !== 'object') return false;
-    const name = [item.name, item.key, item.field, item.mapsTo]
-      .map((value) => String(value || '').replace(/[-_\s]/g, '').toLowerCase())
-      .find((value) => allowed.has(value));
-    if (!name) return false;
-    const type = String(item.type || item.valueType || item.value_type || '').trim().toLowerCase();
-    if (type === 'switch' || type === 'boolean' || type === 'checkbox') return false;
-    return true;
-  });
 }
 
 function normalizeDurationLabel(value: string): string {
@@ -321,7 +309,6 @@ function normalizeInputMode(featureKey: unknown, value: unknown, modelName: stri
 function normalizeReferenceUploadMode(featureKey: unknown, value: unknown, inputMode: string): VideoCapabilityResult['referenceUploadMode'] {
   const feature = String(featureKey || '').trim().toLowerCase();
   if (feature === 'video_create') return 'none';
-  if (feature === 'image_to_video') return inputMode === 'reference_images' ? 'reference_images' : 'first_frame';
   if (feature === 'first_last_frame_video') return 'first_last';
   if (feature === 'video_edit') return 'source_video';
 
@@ -335,6 +322,7 @@ function normalizeReferenceUploadMode(featureKey: unknown, value: unknown, input
   if (inputMode === 'first_last') return 'first_last';
   if (inputMode === 'reference_images') return 'reference_images';
   if (inputMode === 'source_video') return 'source_video';
+  if (feature === 'image_to_video') return inputMode === 'reference_images' ? 'reference_images' : 'first_frame';
   return 'none';
 }
 
@@ -350,14 +338,17 @@ function defaultMaxReferenceImages(inputMode: string): number {
   return 4;
 }
 
-function normalizePositiveInt(value: unknown, fallback: number): number {
-  const numberValue = Math.floor(Number(value));
-  return Number.isFinite(numberValue) && numberValue > 0 ? numberValue : fallback;
-}
-
 function normalizeNonNegativeInt(value: unknown, fallback: number): number {
   const numberValue = Math.floor(Number(value));
   return Number.isFinite(numberValue) && numberValue >= 0 ? numberValue : fallback;
+}
+
+function resolveModelMediaLimit(inputValue: unknown, modelValue: number | undefined, fallback: number): number {
+  // An explicit zero from the caller is a deliberate disable override. For
+  // normal tier values, the bound model's declared limit is authoritative.
+  if (inputValue !== undefined && inputValue !== null && Number(inputValue) === 0) return 0;
+  if (modelValue !== undefined) return normalizeNonNegativeInt(modelValue, fallback);
+  return normalizeNonNegativeInt(inputValue, fallback);
 }
 
 function normalizeNullableNonNegativeInt(value: unknown): number | null {

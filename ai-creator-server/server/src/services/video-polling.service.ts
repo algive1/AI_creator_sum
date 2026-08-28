@@ -260,6 +260,7 @@ async function queryProviderTask(task: any): Promise<{ adapter: any; providerRes
     timeout: 30000,
     authType: 'bearer',
     queryTaskUrl: task.query_task_url || undefined,
+    model: task.api_model_name || task.model_name || undefined,
   });
   return { adapter, providerResult };
 }
@@ -407,7 +408,7 @@ async function failStaleVideoTasks(): Promise<void> {
 async function loadVideoPollingTask(taskId: number): Promise<any | null> {
   return queryOne<any>(
     `SELECT t.*, i.prompt, i.params,
-            m.id AS model_id, m.provider_id, m.name AS model_name, m.query_task_url, m.status_mapping,
+            m.id AS model_id, m.provider_id, m.name AS model_name, m.api_model_name, m.query_task_url, m.status_mapping,
             m.config AS model_config,
             p.provider_type, p.api_base_url AS provider_api_base_url, p.api_key AS provider_api_key
        FROM ai_tasks t

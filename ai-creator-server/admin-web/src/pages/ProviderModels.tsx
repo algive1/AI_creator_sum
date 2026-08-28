@@ -171,6 +171,8 @@ interface ModelSyncRemoval {
 
 interface ModelSyncPreviewData {
   totalRemote: number;
+  catalogComplete?: boolean;
+  removalBlocked?: boolean;
   additions: ModelSyncAddition[];
   updates: ModelSyncUpdate[];
   removals: ModelSyncRemoval[];
@@ -663,7 +665,9 @@ const SyncPreviewContent = ({ data }: { data: ModelSyncPreviewData }) => {
         showIcon
         type={data.updates.length ? 'warning' : 'info'}
         message="同步预览"
-        description="确认后才会写入数据库。已有模型只覆盖模型类型、轮询接口和能力参数；价格、启停状态、档位绑定和显示名不会被覆盖。"
+        description={data.removalBlocked
+          ? '本次远端目录未完整获取，已禁止确认同步，避免误删或保留失效模型。'
+          : '确认后才会写入数据库。已有模型只覆盖模型类型、轮询接口和能力参数；价格、启停状态、档位绑定和显示名不会被覆盖。远端删除的模型会先归档，再硬删除 live model。'}
       />
       <Space wrap>
         <Tag>远端 {data.totalRemote}</Tag>
@@ -676,8 +680,8 @@ const SyncPreviewContent = ({ data }: { data: ModelSyncPreviewData }) => {
       {data.failures.length ? (
         <Alert
           showIcon
-          type="warning"
-          message="部分模型类型拉取失败"
+          type={data.removalBlocked ? 'error' : 'warning'}
+          message={data.removalBlocked ? '目录不完整，已禁止删除' : '部分模型能力详情拉取失败'}
           description={data.failures.map((item) => `${item.scope}: ${item.message}`).join('；')}
         />
       ) : null}
@@ -713,7 +717,7 @@ const SyncPreviewContent = ({ data }: { data: ModelSyncPreviewData }) => {
             showIcon
             type="warning"
             style={{ marginBottom: 8 }}
-            message="这些模型已不在红鸟远端列表中，确认同步后会软停用并解除套餐绑定和 fallback。历史任务和模型记录会保留。"
+            message="这些模型已不在远端列表中，确认同步后会先归档快照，再硬删除 live model，并解除套餐绑定和 fallback。历史任务和成本日志仍可通过归档快照显示原模型。"
           />
           <Table
             size="small"
@@ -1202,6 +1206,8 @@ const ProviderModels = () => {
       const payload = res?.data || {};
       const preview: ModelSyncPreviewData = {
         totalRemote: Number(payload.totalRemote || 0),
+        catalogComplete: payload.catalogComplete !== false,
+        removalBlocked: payload.removalBlocked === true,
         additions: Array.isArray(payload.additions) ? payload.additions : [],
         updates: Array.isArray(payload.updates) ? payload.updates : [],
         removals: Array.isArray(payload.removals) ? payload.removals : [],
@@ -1210,7 +1216,14 @@ const ProviderModels = () => {
         message: payload.message,
       };
       if (!preview.additions.length && !preview.updates.length && !preview.removals.length) {
-        message.info(preview.message || '同步预览完成，没有需要写入的变动');
+        if (preview.failures.length) {
+          Modal.warning({
+            title: `模型同步预览存在问题：${provider.name}`,
+            content: preview.failures.map((item) => `${item.scope}: ${item.message}`).join('；'),
+          });
+        } else {
+          message.info(preview.message || '同步预览完成，没有需要写入的变动');
+        }
         return;
       }
       Modal.confirm({
@@ -1218,7 +1231,8 @@ const ProviderModels = () => {
         width: 920,
         icon: <SyncOutlined />,
         content: <SyncPreviewContent data={preview} />,
-        okText: preview.removals.length ? '确认同步并软停用' : preview.updates.length ? '确认覆盖并同步' : '确认同步新增模型',
+        okText: preview.removals.length ? '确认同步并硬删除过期模型' : preview.updates.length ? '确认覆盖并同步' : '确认同步新增模型',
+        okButtonProps: { disabled: preview.removalBlocked },
         cancelText: '取消',
         onOk: async () => {
           setSyncingProviderId(provider.id);

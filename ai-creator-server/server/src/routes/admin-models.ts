@@ -440,7 +440,7 @@ router.get('/cost-summary', adminAuthMiddleware, async (req: Request, res: Respo
     else if (range === 'all') since = '2020-01-01';
 
     const rows = await query<any>(
-      `SELECT m.name AS modelName, p.name AS providerName,
+      `SELECT COALESCE(m.name, ma.name) AS modelName, p.name AS providerName,
               cl.model_id, cl.provider_id,
               COUNT(*) AS callCount,
               SUM(cl.api_cost_cents) AS totalCostCents,
@@ -448,7 +448,8 @@ router.get('/cost-summary', adminAuthMiddleware, async (req: Request, res: Respo
               COALESCE(SUM(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END), 0) AS failCount,
               COALESCE(SUM(t.points_cost), 0) AS totalPoints
          FROM ai_task_cost_logs cl
-         JOIN ai_models m ON m.id = cl.model_id
+         LEFT JOIN ai_models m ON m.id = cl.model_id
+         LEFT JOIN ai_model_catalog_archive ma ON ma.original_model_id = cl.model_id
          JOIN ai_model_providers p ON p.id = cl.provider_id
          JOIN ai_tasks t ON t.id = cl.task_id
         WHERE cl.created_at >= ?

@@ -195,7 +195,7 @@
           <view class="form-title">比例</view>
           <view class="segmented">
             <view
-              v-for="item in ratios"
+              v-for="item in comicRatios"
               :key="item"
               class="segment"
               :class="{ active: selectedRatio === item }"
@@ -209,7 +209,7 @@
           <view class="form-title">时长</view>
           <view class="segmented">
             <view
-              v-for="item in durations"
+              v-for="item in comicDurations"
               :key="item"
               class="segment"
               :class="{ active: selectedDuration === item }"
@@ -232,7 +232,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { onShareAppMessage, onShareTimeline, onShow } from '@dcloudio/uni-app';
 import AppTabBar from '@/components/common/AppTabBar.vue';
 import AppTopbar from '@/components/common/AppTopbar.vue';
@@ -254,8 +254,8 @@ import { getPromptGuide, hasPromptGuideDialog } from '@/utils/prompt-guide';
 
 const genres = ['都市逆袭', '古风权谋', '奇幻冒险', '甜宠治愈'];
 const styles = ['国漫精致', '赛博霓虹', '水彩电影', '厚涂幻想'];
-const ratios = ['9:16', '16:9', '1:1'];
-const durations = ['15秒', '30秒', '60秒'];
+const FALLBACK_COMIC_RATIOS = ['9:16', '16:9', '1:1'];
+const FALLBACK_COMIC_DURATIONS = ['15秒', '30秒', '60秒'];
 type CreationMode = {
   key: 'text' | 'image' | 'script';
   title: string;
@@ -367,8 +367,8 @@ const scriptPresets: ScriptPreset[] = [
 ];
 const selectedGenre = ref(genres[0]);
 const selectedStyle = ref(styles[0]);
-const selectedRatio = ref(ratios[0]);
-const selectedDuration = ref(durations[1]);
+const selectedRatio = ref(FALLBACK_COMIC_RATIOS[0]);
+const selectedDuration = ref(FALLBACK_COMIC_DURATIONS[1]);
 const story = ref('');
 const character = ref('');
 const promptExpanded = ref(false);
@@ -391,6 +391,10 @@ type ModelTier = {
   pointsCost: number;
   memberDiscountPercent: number;
   memberDiscountApplied: boolean;
+  capabilities?: {
+    ratios?: string[];
+    durations?: string[];
+  };
 };
 const models = ref<Record<string, unknown>[]>([]);
 const selectedModelIndex = ref(1);
@@ -407,13 +411,20 @@ const modelOptions = computed<ModelTier[]>(() => {
     basePointsCost: Number(item.basePointsCost || item.pointsCost || 5),
     pointsCost: Number(item.pointsCost || 5),
     memberDiscountPercent: Number(item.memberDiscountPercent || 100),
-    memberDiscountApplied: Boolean(item.memberDiscountApplied)
+    memberDiscountApplied: Boolean(item.memberDiscountApplied),
+    capabilities: normalizeComicCapabilities(item.capabilities)
   }));
   if (source.length) return source.slice(0, 3);
   return isDevFallbackEnabled ? fallbackModels : [];
 });
 const selectedModel = computed(() => modelOptions.value[selectedModelIndex.value] || modelOptions.value[0]);
 const selectedModelCost = computed(() => Number(selectedModel.value?.pointsCost || 0));
+const comicRatios = computed(() => selectedModel.value?.capabilities?.ratios?.length
+  ? selectedModel.value.capabilities.ratios
+  : FALLBACK_COMIC_RATIOS);
+const comicDurations = computed(() => selectedModel.value?.capabilities?.durations?.length
+  ? selectedModel.value.capabilities.durations
+  : FALLBACK_COMIC_DURATIONS);
 const visualAssets = computed(() => {
   const value = configStore.publicConfig?.visualAssets;
   return value && typeof value === 'object' ? value as Record<string, unknown> : {};
@@ -440,12 +451,16 @@ onShow(async () => {
     if (!list.length && isDevFallbackEnabled) warnDevFallback('comic-tiers', 'GET /public/model-tiers returned empty list');
     models.value = list;
     selectedModelIndex.value = middleModelIndex();
+    normalizeComicParams();
   }).catch(() => {
     if (isDevFallbackEnabled) warnDevFallback('comic-tiers', 'GET /public/model-tiers failed');
     models.value = [];
     selectedModelIndex.value = middleModelIndex();
+    normalizeComicParams();
   });
 });
+
+watch(() => selectedModel.value?.tierKey, normalizeComicParams);
 
 onShareAppMessage(() => createShareMessage({
   title: '用 AI 创作漫画短剧',
@@ -601,6 +616,11 @@ async function submitManga() {
     uni.showToast({ title: '请先在后台配置模型档位', icon: 'none' });
     return;
   }
+  const loggedIn = await ensureLoggedIn({
+    title: '登录后生成漫剧',
+    subtitle: '登录并授权手机号后，才能提交漫剧生成任务。'
+  });
+  if (!loggedIn) return;
   try {
     const result = await createComicTask<Record<string, unknown>>({
       prompt: story.value,
@@ -626,6 +646,54 @@ async function submitManga() {
 
 function selectModel(index: number) {
   selectedModelIndex.value = index;
+  normalizeComicParams();
+}
+
+function normalizeComicParams() {
+  if (!comicRatios.value.includes(selectedRatio.value)) {
+    selectedRatio.value = comicRatios.value[0] || FALLBACK_COMIC_RATIOS[0];
+  }
+  if (!comicDurations.value.includes(selectedDuration.value)) {
+    selectedDuration.value = comicDurations.value[0] || FALLBACK_COMIC_DURATIONS[0];
+  }
+}
+
+function normalizeComicCapabilities(value: unknown): ModelTier['capabilities'] {
+  const source = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  return {
+    ratios: normalizeComicRatios(source.ratios || source.supportedRatios || source.supported_ratios),
+    durations: normalizeComicDurations(source.durations || source.supportedDurations || source.supported_durations),
+  };
+}
+
+function normalizeComicRatios(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => {
+    const text = String(item || '').trim();
+    const match = text.match(/^(\d+)\s*[xX×]\s*(\d+)$/);
+    if (!match) return text;
+    const width = Number(match[1]);
+    const height = Number(match[2]);
+    const divisor = greatestCommonDivisor(width, height);
+    return `${width / divisor}:${height / divisor}`;
+  }).filter((item, index, list) => item && item !== 'auto' && list.indexOf(item) === index);
+}
+
+function normalizeComicDurations(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => {
+    const text = String(item || '').trim();
+    if (text.toLowerCase() === 'auto') return '自动';
+    const match = text.match(/\d+/);
+    return match ? `${match[0]}秒` : text;
+  }).filter((item, index, list) => item && list.indexOf(item) === index);
+}
+
+function greatestCommonDivisor(a: number, b: number): number {
+  let left = Math.abs(a);
+  let right = Math.abs(b);
+  while (right) [left, right] = [right, left % right];
+  return left || 1;
 }
 
 function showComicMaintenanceMessage() {

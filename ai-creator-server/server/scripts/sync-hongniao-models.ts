@@ -217,7 +217,7 @@ async function main() {
     existingRows,
     remoteModels: remote.models,
     failures: remote.failures,
-    removalPolicy: 'soft',
+    removalPolicy: 'delete',
   });
 
   console.log(`\n📊 Sync Preview:`);
@@ -234,7 +234,7 @@ async function main() {
   }
 
   if (preview.removals.length) {
-    console.log(`\n   Models missing upstream, to soft-disable:`);
+    console.log(`\n   Models missing upstream, to hard-delete after archive:`);
     console.log(formatRemovals(preview.removals));
   }
 
@@ -254,7 +254,7 @@ async function main() {
 
   console.log(`\n📝 Applying changes...`);
   const applied = await applyModelSyncPreview(provider.id, preview);
-  console.log(`   Soft-disabled: ${applied.removed} models`);
+  console.log(`   Hard-deleted after archive: ${applied.removed} models`);
   console.log(`   Removed bindings: ${applied.bindingDeleted}`);
   console.log(`   Removed fallback rules: ${applied.fallbackDeleted}`);
   console.log(`   ✅ Added: ${applied.added} models`);
