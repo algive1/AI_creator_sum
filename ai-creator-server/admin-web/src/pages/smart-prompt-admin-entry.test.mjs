@@ -8,7 +8,9 @@ const contentSource = readFileSync(new URL('./ContentManagement.tsx', import.met
 test('settings page links AI text settings to the prompt optimize system prompt editor', () => {
   assert.match(settingsSource, /openPromptOptimizePrompt/);
   assert.match(settingsSource, /\/content\?tab=prompt&targetFeature=prompt_optimize/);
-  assert.match(settingsSource, /编辑智能补全提示词/);
+  assert.match(settingsSource, /\/ai-models\/features\?feature=prompt_optimize/);
+  assert.match(settingsSource, /配置提示词优化模型/);
+  assert.match(settingsSource, /编辑提示词优化系统提示词/);
 });
 
 test('content management can focus prompt optimize system prompts from query params', () => {
@@ -17,5 +19,7 @@ test('content management can focus prompt optimize system prompts from query par
   assert.match(contentSource, /const visiblePrompts = targetFeatureFilter/);
   assert.match(contentSource, /item\.targetFeature === targetFeatureFilter/);
   assert.match(contentSource, /dataSource=\{visiblePrompts\}/);
-  assert.match(contentSource, /targetFeature:\s*targetFeatureFilter \|\| undefined/);
+  assert.match(contentSource, /targetFeature:\s*targetFeature \|\| undefined/);
+  assert.match(contentSource, /新增优化规则/);
+  assert.match(contentSource, /系统内置补全规则仍会自动保留/);
 });

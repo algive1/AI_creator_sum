@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 const {
   buildDefaultPromptOptimizeSystemPrompt,
   buildPromptOptimizeModelInput,
+  normalizeTextFeatureModelSelection,
   normalizePromptOptimizeContext,
 } = await import('../src/services/ai-feature.service.ts');
 
@@ -46,6 +47,14 @@ test('prompt optimize model input preserves original prompt and frontend context
   assert.equal(parsed.usage, 'deep_completion');
   assert.equal(parsed.context.mode, 'text_to_image');
   assert.equal(parsed.context.tierName, 'fast tier');
+});
+
+test('prompt optimize model selection accepts tier key and positive tier id only', () => {
+  assert.deepEqual(
+    normalizeTextFeatureModelSelection({ tierKey: '  prompt_optimize_standard  ', tierId: '12' }),
+    { tierKey: 'prompt_optimize_standard', tierId: 12 },
+  );
+  assert.deepEqual(normalizeTextFeatureModelSelection({ tierKey: ' ', tierId: 0 }), {});
 });
 
 test('prompt optimize model input keeps useful context and removes asset identifiers', () => {

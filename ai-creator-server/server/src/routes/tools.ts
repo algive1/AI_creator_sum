@@ -66,11 +66,18 @@ router.post('/process', authMiddleware, async (req: Request, res: Response) => {
     }
     const rawFileIds = Array.isArray(req.body?.fileIds) ? req.body.fileIds : [req.body?.fileId].filter(Boolean);
     const fileIds = rawFileIds.map((item: unknown) => Number(item)).filter((item: number) => Number.isFinite(item) && item > 0);
+    const parsedTierId = Number(req.body?.tierId ?? req.body?.tier_id);
+    if ((req.body?.tierId !== undefined || req.body?.tier_id !== undefined) && (!Number.isInteger(parsedTierId) || parsedTierId <= 0)) {
+      error(res, ErrorCodes.PARAM_ERROR, 'tierId 必须是正整数');
+      return;
+    }
     success(res, await processTool({
       userId: req.user!.userId,
       toolKey,
       fileIds,
       params: req.body?.params && typeof req.body.params === 'object' ? req.body.params : {},
+      tierKey: String(req.body?.tierKey ?? req.body?.tier_key ?? '').trim() || undefined,
+      tierId: parsedTierId > 0 ? parsedTierId : undefined,
       requestBaseUrl: requestBaseUrlFrom(req),
     }));
   } catch (err: any) {

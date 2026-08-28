@@ -15,6 +15,7 @@ import { genFileNo } from './storage/adapter.interface';
 import { publicRequestBaseUrl } from '../utils/public-base-url';
 import { decryptApiKey } from './openai-adapter.service';
 import { createTextWatermarkSvg, DEFAULT_WATERMARK_TEXT } from './image-postprocess.service';
+import { getModelCapabilitySet, hasAnyCapability } from './model-capability.service';
 
 export type ToolKey =
   | 'prompt_reverse'
@@ -62,11 +63,18 @@ interface ToolModelBinding {
   providerApiKey: string;
 }
 
+export interface ToolModelSelection {
+  tierKey?: string;
+  tierId?: number;
+}
+
 export interface ToolProcessInput {
   userId: number;
   toolKey: ToolKey;
   fileIds?: number[];
   params?: Record<string, any>;
+  tierKey?: string;
+  tierId?: number;
   requestBaseUrl: string;
 }
 
@@ -331,7 +339,10 @@ export async function processTool(input: ToolProcessInput): Promise<{ toolKey: T
     if (input.toolKey === 'prompt_reverse') {
       const file = await loadUserImage(input.userId, Number(input.fileIds?.[0] || 0), input.requestBaseUrl);
       const metadata = await sharp(file.buffer).metadata();
-      prompt = await reversePromptWithModel(file, metadata, params).catch(() => buildPromptReverseText(metadata, params));
+      prompt = await reversePromptWithModel(file, metadata, params, {
+        tierKey: input.tierKey,
+        tierId: input.tierId,
+      });
     } else if (input.toolKey === 'grid_cut') {
       outputs = await processGridCut(input);
     } else if (input.toolKey === 'image_compress') {
@@ -400,7 +411,18 @@ function toolFeatureKey(key: ToolKey): string {
   return '';
 }
 
-async function resolveToolModel(featureKey: string): Promise<ToolModelBinding | null> {
+async function resolveToolModel(featureKey: string, requestedSelection: ToolModelSelection = {}): Promise<ToolModelBinding | null> {
+  const tierKey = String(requestedSelection.tierKey || '').trim();
+  const tierId = Number(requestedSelection.tierId);
+  const normalizedTierId = Number.isInteger(tierId) && tierId > 0 ? tierId : undefined;
+  const tierSelectionSql = normalizedTierId
+    ? 'AND t.id = ?'
+    : tierKey
+      ? 'AND t.tier_key = ?'
+      : '';
+  const params: Array<string | number> = [featureKey];
+  if (normalizedTierId) params.push(normalizedTierId);
+  else if (tierKey) params.push(tierKey);
   const row = await queryOne<any>(
     `SELECT t.id AS tier_id, t.tier_key,
             m.id, m.name, m.display_name, m.model_type, m.api_model_name, m.upstream_model_code, m.timeout_seconds,
@@ -411,13 +433,17 @@ async function resolveToolModel(featureKey: string): Promise<ToolModelBinding | 
        JOIN ai_models m ON m.id = b.model_id AND m.status = 'active' AND m.deleted_at IS NULL
        JOIN ai_model_providers p ON p.id = m.provider_id AND p.status = 'active' AND p.deleted_at IS NULL
       WHERE f.feature_key = ? AND f.status = 'active'
+        ${tierSelectionSql}
         AND COALESCE(p.api_base_url, '') <> ''
         AND COALESCE(p.api_key, '') <> ''
       ORDER BY t.is_default DESC, t.sort_order, CASE b.binding_type WHEN 'primary' THEN 0 ELSE 1 END, b.fallback_order
       LIMIT 1`,
-    [featureKey],
+    params,
   );
   if (!row) return null;
+  if (!['text', 'multimodal'].includes(String(row.model_type || ''))) return null;
+  const capabilitySet = await getModelCapabilitySet(Number(row.id));
+  if (!hasAnyCapability(capabilitySet.capabilities, ['vision_chat', 'image_understanding', 'text_chat', 'text_generation'])) return null;
   return {
     id: Number(row.id),
     tierId: Number(row.tier_id),
@@ -726,21 +752,23 @@ async function processPhoneFrame(input: ToolProcessInput): Promise<ToolOutputFil
   return storeOutput(input.userId, buffer, 'iphone-17-pro-max-front-frame.png', 'image/png', input.requestBaseUrl, source.fileId);
 }
 
-function buildPromptReverseText(metadata: sharp.Metadata, params: Record<string, any>): string {
-  const scene = String(params.scene || '图片主体').slice(0, 40);
-  const ratio = metadata.width && metadata.height ? `${metadata.width}:${metadata.height}` : '原图比例';
-  return `${scene}，清晰主体，细节完整，构图稳定，柔和自然光，高质量商业视觉，适合 AI 生图复刻，画面比例 ${ratio}`;
-}
-
 async function reversePromptWithModel(
   file: { buffer: Buffer; mimeType: string },
   metadata: sharp.Metadata,
   params: Record<string, any>,
+  requestedSelection: ToolModelSelection = {},
 ): Promise<string> {
-  const model = await resolveToolModel('tool_prompt_reverse');
-  if (!model) return buildPromptReverseText(metadata, params);
+  const model = await resolveToolModel('tool_prompt_reverse', requestedSelection);
+  const hasSelection = Boolean(String(requestedSelection.tierKey || '').trim() || requestedSelection.tierId);
+  if (!model) {
+    throw toolError(hasSelection
+      ? '所选反推提示词功能档位未绑定可用模型，请检查主模型、备用模型和供应商配置。'
+      : '反推提示词尚未绑定可用模型，请在“微信配置 → 工具页配置 → 工具模型绑定”中配置。');
+  }
   const modelCode = model.upstreamModelCode || model.apiModelName || model.name;
-  if (!modelCode || !model.providerApiBaseUrl || !model.providerApiKey) return buildPromptReverseText(metadata, params);
+  if (!modelCode || !model.providerApiBaseUrl || !model.providerApiKey) {
+    throw toolError('反推提示词绑定的模型配置不完整，请检查模型 code、Base URL 和 API Key。');
+  }
   const scene = String(params.scene || '图片主体').slice(0, 40);
   const ratio = metadata.width && metadata.height ? `${metadata.width}:${metadata.height}` : '原图比例';
   const response = await axios.post(resolveChatCompletionUrl(model.providerApiBaseUrl, model.providerType), {
@@ -768,7 +796,8 @@ async function reversePromptWithModel(
     timeout: Math.max(30000, model.timeoutSeconds * 1000),
   });
   const content = extractTextContent(response.data);
-  return content || buildPromptReverseText(metadata, params);
+  if (!content) throw new Error('反推提示词模型未返回内容。');
+  return content.trim();
 }
 
 function imageDataUrl(buffer: Buffer, mimeType: string): string {

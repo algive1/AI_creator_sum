@@ -16,6 +16,11 @@ export interface TextFeatureConfig {
   pointsCost: number;
 }
 
+export interface TextFeatureModelSelection {
+  tierKey?: string;
+  tierId?: number;
+}
+
 interface TextModelBinding {
   id: number;
   name: string;
@@ -42,6 +47,8 @@ export interface PromptOptimizeInput {
   usage?: string;
   negativePrompt?: string;
   context?: Record<string, any>;
+  tierKey?: string;
+  tierId?: number;
 }
 
 export interface PromptOptimizeResult {
@@ -60,7 +67,7 @@ const TEXT_FEATURE_CAPABILITIES: Record<TextFeatureKey, string[]> = {
 };
 
 const TEXT_FEATURE_MODEL_CACHE_TTL_MS = 60_000;
-const textFeatureModelCache = new Map<TextFeatureKey, {
+const textFeatureModelCache = new Map<string, {
   value: { config: TextFeatureConfig; model: TextModelBinding };
   expiresAt: number;
 }>();
@@ -112,21 +119,110 @@ export function featureConfigKey(featureKey: TextFeatureKey, field: 'enabled' | 
 
 export function clearTextFeatureModelCache(featureKey?: TextFeatureKey): void {
   if (featureKey) {
-    textFeatureModelCache.delete(featureKey);
+    for (const cacheKey of textFeatureModelCache.keys()) {
+      if (cacheKey === featureKey || cacheKey.startsWith(`${featureKey}:`)) {
+        textFeatureModelCache.delete(cacheKey);
+      }
+    }
     return;
   }
   textFeatureModelCache.clear();
 }
 
-export async function resolveTextFeatureModel(featureKey: TextFeatureKey): Promise<{ config: TextFeatureConfig; model: TextModelBinding }> {
-  const cached = textFeatureModelCache.get(featureKey);
+export function normalizeTextFeatureModelSelection(selection?: { tierKey?: unknown; tierId?: unknown }): TextFeatureModelSelection {
+  const tierKey = String(selection?.tierKey || '').trim();
+  const tierIdValue = Number(selection?.tierId);
+  return {
+    ...(tierKey ? { tierKey } : {}),
+    ...(Number.isInteger(tierIdValue) && tierIdValue > 0 ? { tierId: tierIdValue } : {}),
+  };
+}
+
+function textFeatureModelCacheKey(featureKey: TextFeatureKey, selection: TextFeatureModelSelection): string {
+  if (selection.tierId) return `${featureKey}:tier-id:${selection.tierId}`;
+  if (selection.tierKey) return `${featureKey}:tier-key:${selection.tierKey}`;
+  return featureKey;
+}
+
+function hasTextFeatureModelSelection(selection: TextFeatureModelSelection): boolean {
+  return Boolean(selection.tierId || selection.tierKey);
+}
+
+export async function resolveTextFeatureModel(
+  featureKey: TextFeatureKey,
+  requestedSelection?: TextFeatureModelSelection,
+): Promise<{ config: TextFeatureConfig; model: TextModelBinding }> {
+  const selection = normalizeTextFeatureModelSelection(requestedSelection);
+  const cacheKey = textFeatureModelCacheKey(featureKey, selection);
+  const cached = textFeatureModelCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.value;
 
   const config = await getTextFeatureConfig(featureKey);
   if (!config.enabled) throw featureError(`${featureLabel(featureKey)}未启用，请先在后台开启。`);
-  if (!config.modelId) throw featureError(`${featureLabel(featureKey)}未绑定默认文本模型，请先在后台配置。`);
 
-  const model = await queryOne<any>(
+  let model = await resolveBoundTextFeatureModel(featureKey, selection);
+  if (!model && !hasTextFeatureModelSelection(selection)) {
+    model = await resolveLegacyTextFeatureModel(featureKey, config.modelId);
+  }
+  if (!model) {
+    if (hasTextFeatureModelSelection(selection)) {
+      throw featureError(`${featureLabel(featureKey)}指定的功能档位未绑定可用文本模型，请检查主模型、备用模型和供应商配置。`);
+    }
+    throw featureError(`${featureLabel(featureKey)}未绑定可用文本模型，请先在功能页配置中绑定模型。`);
+  }
+
+  const resolved = { config, model };
+  textFeatureModelCache.set(cacheKey, { value: resolved, expiresAt: Date.now() + TEXT_FEATURE_MODEL_CACHE_TTL_MS });
+  return resolved;
+}
+
+async function resolveBoundTextFeatureModel(
+  featureKey: TextFeatureKey,
+  selection: TextFeatureModelSelection,
+): Promise<TextModelBinding | null> {
+  const params: Array<string | number> = [featureKey];
+  let selectionSql = '';
+  if (selection.tierId) {
+    selectionSql = 'AND t.id = ?';
+    params.push(selection.tierId);
+  } else if (selection.tierKey) {
+    selectionSql = 'AND t.tier_key = ?';
+    params.push(selection.tierKey);
+  }
+  const rows = await query<any>(
+    `SELECT m.id, m.name, m.display_name, m.model_type, m.api_model_name, m.upstream_model_code,
+            m.config, m.timeout_seconds, p.id AS provider_id, p.name AS provider_name, p.provider_key, p.provider_type,
+            p.api_base_url AS provider_api_base_url, p.api_key AS provider_api_key,
+            b.binding_type, b.fallback_order
+       FROM model_features f
+       JOIN model_tiers t ON t.feature_id = f.id AND t.status = 'active'
+       JOIN tier_model_bindings b ON b.tier_id = t.id
+       JOIN ai_models m ON m.id = b.model_id AND m.status = 'active' AND m.deleted_at IS NULL
+       JOIN ai_model_providers p ON p.id = m.provider_id AND p.status = 'active' AND p.deleted_at IS NULL
+      WHERE f.feature_key = ? AND f.status = 'active'
+        ${selectionSql}
+        AND COALESCE(p.api_base_url, '') <> ''
+        AND COALESCE(p.api_key, '') <> ''
+      ORDER BY t.is_default DESC, t.sort_order, t.id,
+               CASE b.binding_type WHEN 'primary' THEN 0 ELSE 1 END, b.fallback_order`,
+    params,
+  );
+
+  for (const row of rows) {
+    const binding = mapTextModelBinding(row);
+    if (!['text', 'multimodal'].includes(binding.modelType)) continue;
+    const capabilitySet = await getModelCapabilitySet(binding.id);
+    if (!hasAnyCapability(capabilitySet.capabilities, TEXT_FEATURE_CAPABILITIES[featureKey])) continue;
+    if (!binding.providerApiBaseUrl || !binding.providerApiKey) continue;
+    if (!binding.apiModelName && !binding.upstreamModelCode) continue;
+    return binding;
+  }
+  return null;
+}
+
+async function resolveLegacyTextFeatureModel(featureKey: TextFeatureKey, modelId: number | null): Promise<TextModelBinding | null> {
+  if (!modelId) return null;
+  const row = await queryOne<any>(
     `SELECT m.id, m.name, m.display_name, m.model_type, m.api_model_name, m.upstream_model_code,
             m.config, m.timeout_seconds, p.id AS provider_id, p.name AS provider_name, p.provider_key, p.provider_type,
             p.api_base_url AS provider_api_base_url, p.api_key AS provider_api_key
@@ -134,29 +230,13 @@ export async function resolveTextFeatureModel(featureKey: TextFeatureKey): Promi
        JOIN ai_model_providers p ON p.id = m.provider_id
       WHERE m.id = ? AND m.status = 'active' AND p.status = 'active'
       LIMIT 1`,
-    [config.modelId],
+    [modelId],
   );
-  if (!model) throw featureError(`${featureLabel(featureKey)}绑定的模型不存在、已停用，或供应商已停用。`);
+  if (!row) return null;
 
-  const binding: TextModelBinding = {
-    id: model.id,
-    name: model.name,
-    displayName: model.display_name || model.name,
-    modelType: model.model_type,
-    apiModelName: model.api_model_name,
-    upstreamModelCode: model.upstream_model_code || '',
-    config: parseJsonObjectOrEmpty(model.config),
-    timeoutSeconds: model.timeout_seconds || 120,
-    providerId: model.provider_id,
-    providerName: model.provider_name,
-    providerKey: model.provider_key || '',
-    providerType: model.provider_type,
-    providerApiBaseUrl: model.provider_api_base_url,
-    providerApiKey: decryptApiKey(model.provider_api_key || ''),
-  };
-
-  if (binding.modelType !== 'text') {
-    throw featureError(`${featureLabel(featureKey)}绑定的不是文本模型，请在后台选择 text 类型模型。`);
+  const binding = mapTextModelBinding(row);
+  if (!['text', 'multimodal'].includes(binding.modelType)) {
+    throw featureError(`${featureLabel(featureKey)}绑定的不是文本模型，请在后台选择 text 或 multimodal 类型模型。`);
   }
   const capabilitySet = await getModelCapabilitySet(binding.id);
   if (!hasAnyCapability(capabilitySet.capabilities, TEXT_FEATURE_CAPABILITIES[featureKey])) {
@@ -167,10 +247,26 @@ export async function resolveTextFeatureModel(featureKey: TextFeatureKey): Promi
   if (!binding.apiModelName && !binding.upstreamModelCode) {
     throw featureError(`${binding.displayName} 缺少真实模型名，请先填写模型调用 code。`);
   }
+  return binding;
+}
 
-  const resolved = { config, model: binding };
-  textFeatureModelCache.set(featureKey, { value: resolved, expiresAt: Date.now() + TEXT_FEATURE_MODEL_CACHE_TTL_MS });
-  return resolved;
+function mapTextModelBinding(model: any): TextModelBinding {
+  return {
+    id: Number(model.id),
+    name: model.name || '',
+    displayName: model.display_name || model.name || '',
+    modelType: model.model_type || '',
+    apiModelName: model.api_model_name || '',
+    upstreamModelCode: model.upstream_model_code || '',
+    config: parseJsonObjectOrEmpty(model.config),
+    timeoutSeconds: Number(model.timeout_seconds || 120),
+    providerId: Number(model.provider_id),
+    providerName: model.provider_name || '',
+    providerKey: model.provider_key || '',
+    providerType: model.provider_type || '',
+    providerApiBaseUrl: model.provider_api_base_url || '',
+    providerApiKey: decryptApiKey(model.provider_api_key || ''),
+  };
 }
 
 export async function optimizePrompt(input: PromptOptimizeInput): Promise<PromptOptimizeResult> {
@@ -183,7 +279,10 @@ export async function optimizePrompt(input: PromptOptimizeInput): Promise<Prompt
   if (memberOnly && !isMember) {
     throw Object.assign(new Error('智能优化为会员专属功能，请开通会员后使用。'), { code: ErrorCodes.MEMBERSHIP_REQUIRED });
   }
-  const { config, model } = await resolveTextFeatureModel('prompt_optimize');
+  const { config, model } = await resolveTextFeatureModel('prompt_optimize', {
+    tierKey: input.tierKey,
+    tierId: input.tierId,
+  });
   const shouldCharge = !isMember && config.pointsCost > 0;
   const refId = createRefId('PROMPT_OPT');
   let charged = false;

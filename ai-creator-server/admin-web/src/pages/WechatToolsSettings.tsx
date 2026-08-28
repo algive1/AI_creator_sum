@@ -413,6 +413,13 @@ export default function WechatToolsSettings() {
       </Row>
 
       <Card title="工具模型绑定" style={{ borderRadius: 8, marginTop: 16 }} bodyStyle={{ padding: 18 }}>
+        <Alert
+          type="info"
+          showIcon
+          message="反推提示词模型切换入口"
+          description="下方切换到“工具-反推提示词”功能，在每个入口的“配置绑定”中选择主模型和备用模型。保存后，新请求会按该功能档位的主模型调用；需要切换模型时，重新配置主模型并保存。"
+          style={{ marginBottom: 16 }}
+        />
         <FeatureConfig scope="tools" embedded />
       </Card>
 

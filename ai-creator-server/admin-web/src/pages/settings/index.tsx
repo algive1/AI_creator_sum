@@ -253,8 +253,8 @@ const CONFIG_META: Record<string, ConfigMeta> = {
     description: '控制小程序生图/生视频输入框下方的“智能优化”按钮，对应接口 /tasks/optimize-prompt。',
   },
   'ai.prompt_optimize.model_id': {
-    label: '智能优化文本模型 ID',
-    description: '填写后台“供应商与模型”里已启用的文本模型 ID，用来改写用户输入的提示词。',
+    label: '智能优化兼容模型 ID',
+    description: '旧配置兼容项：只有在“功能页配置”没有可用模型绑定时才会兜底使用。新配置请在功能页绑定主模型和备用模型。',
     placeholder: '0',
   },
   'ai.prompt_optimize.points_cost': {
@@ -590,8 +590,9 @@ export default function Settings() {
   const renderAiTextSettings = (group: string) => (
     <>
       <Space style={{ marginBottom: 12 }} wrap>
-        <Button size="small" onClick={openPromptOptimizePrompt}>编辑智能补全提示词</Button>
-        <Text type="secondary">调整智能补全系统提示词；模型 ID、开关和积分仍在当前表格配置。</Text>
+        <Button size="small" type="primary" onClick={() => { window.location.href = '/ai-models/features?feature=prompt_optimize'; }}>配置提示词优化模型</Button>
+        <Button size="small" onClick={openPromptOptimizePrompt}>编辑提示词优化系统提示词</Button>
+        <Text type="secondary">模型绑定与主/备用切换在“功能页配置”；系统提示词在“内容合规 → 系统提示词”。</Text>
       </Space>
       {renderConfigTable(group)}
     </>

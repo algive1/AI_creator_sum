@@ -146,13 +146,13 @@
 
 **参数：** `?feature=image_create`。PC 网页端可额外传 `clientType=web` 使用网页端展示过滤；小程序不要传该参数。
 
-**返回：** `{ list: [{ id, tierId, tierName, tierKey, modelName, apiModelName, upstreamModelCode, providerType, webVisible, webDisplayName, webSortOrder, basePointsCost, pointsCost, memberDiscountPercent, memberDiscountApplied, isDefault, pricing, capabilities: { ratios, qualities, resolutionPresets, sizeOptions, defaultSizeKey, styles, durations, audioModes, defaultAudioMode, supportedSizeModes, maxImages, maxReferenceImages, maxDurationSeconds, inputMode, referenceUploadMode, minReferenceImages, requiredReference } }] }`
+**返回：** `{ list: [{ id, tierId, tierName, tierKey, modelName, apiModelName, upstreamModelCode, providerType, webVisible, webDisplayName, webSortOrder, basePointsCost, pointsCost, memberDiscountPercent, memberDiscountApplied, isDefault, pricing, capabilities: { ratios, qualities, resolutionPresets, sizeOptions, defaultSizeKey, styles, durations, audioModes, defaultAudioMode, supportedSizeModes, maxImages, maxReferenceImages, inputMediaTypes, maxVideoUrls, maxAudioUrls, maxDurationSeconds, inputMode, referenceUploadMode, minReferenceImages, requiredReference } }] }`. 图片/视频媒体数量优先来自绑定模型配置中的真实参数上限（包括远端参数 `maxItems`），未明示时才回退到档位兼容配置；公共展示与任务创建使用同一有效能力。
 
 `modelName/apiModelName/upstreamModelCode/providerType` 来自该入口绑定的主模型。`webVisible/webDisplayName/webSortOrder` 是 PC 网页端专用运营字段；仅当请求 `clientType=web` 时后端会按 `webVisible` 过滤、按 `webSortOrder` 排序。小程序继续使用 `tierName` 展示业务入口名，创建任务仍提交 `tierKey`，不要直接提交真实 `modelId`。
 
 图片档位的 `sizeOptions` 是可提交的合法尺寸组合，格式示例：`{ key:"16:9_2K", ratio:"16:9", resolutionPreset:"2K", label:"2K 16:9" }`。小程序应按 `ratio` 分组展示比例，再只展示该比例下存在的 `resolutionPreset`；`defaultSizeKey` 是默认选中项。GPT Image 2 的自动尺寸是 `{ key:"auto", ratio:"auto", resolutionPreset:"auto" }`，非自动尺寸按上游 `size` 枚举下发：`1K/2K/4K` 均支持 `1:1/2:3/3:2/3:4/4:3/9:16/16:9`，其中 `16:9_4K` 会提交 `size:"3840x2160"`。小马 Nano Banana Pro 返回 11 个比例与 `1K/2K/4K`；小马 Nano Banana 2 返回 15 个比例与 `0.5K/1K/2K/4K`，后端固定提交 `thinkingLevel:"high"`，小程序不展示该参数。Seedream 5.0 这类模型应按模型配置展示 `aspect_ratio` 与 `size=2K/3K`，不要前端自行追加 1K/4K。`qualities` 仅作为旧版清晰度字段兼容，新的清晰度字段用 `resolutionPresets`。
 
-视频档位能力以后台档位和绑定主模型配置为准：小程序只展示返回的 `ratios/qualities/durations/audioModes`，不要自行追加默认比例或声音模式。单一能力项也要展示，但以锁定态呈现，例如固定 `8秒`、固定 `1080p`、固定 `有声/无声`。`audioModes` 为空时不显示声音模式；返回单项时显示锁定态。小程序支持可选高级参数 `seed/fps/audioUrl`，后端会归一化为小马常用字段透传；这些参数只在用户填写时提交，不保证所有模型都生效。仍有供应商专属必填字段时，必须在后台 `request_template/default_params` 中补齐默认值后再绑定到小程序档位。视频档位可能返回 `pricing`：`mode=fixed/matrix/per_second_matrix/token_preauth`，小程序可按当前时长、清晰度、声音等参数展示预计创作点；`token_preauth` 只展示并冻结后台配置的预扣点数，任务完成后不按 token 自动补扣或退款。
+视频档位能力以后台档位和绑定主模型配置为准：小程序只展示返回的 `ratios/qualities/durations/audioModes`，不要自行追加默认比例或声音模式。单一能力项也要展示，但以锁定态呈现，例如固定 `8秒`、固定 `1080p`、固定 `有声/无声`。`audioModes` 为空时不显示声音模式；返回单项时显示锁定态。素材入口和数量必须按 `inputMediaTypes/maxReferenceImages/maxVideoUrls/maxAudioUrls` 渲染；参考生视频可按模型能力上传参考视频，视频编辑在 `maxVideoUrls > 1` 时允许上传多个源视频。小程序支持可选高级参数 `seed/fps/audioUrl`，后端会归一化为小马常用字段透传；这些参数只在用户填写时提交，不保证所有模型都生效。仍有供应商专属必填字段时，必须在后台 `request_template/default_params` 中补齐默认值后再绑定到小程序档位。视频档位可能返回 `pricing`：`mode=fixed/matrix/per_second_matrix/token_preauth`，小程序可按当前时长、清晰度、声音等参数展示预计创作点；`token_preauth` 只展示并冻结后台配置的预扣点数，任务完成后不按 token 自动补扣或退款。
 
 小马首批视频档位由迁移 `20260609_005_bind_xiaoma_video_launch_tiers.sql` 写入，覆盖 Sora/Grok/即梦/可灵/Veo 3.1/Omni Flash/SD 2.0 首尾帧/SD 2.0 参考生。SD 2.0 参考生和全能参考使用 `referenceUploadMode=reference_images`，小程序应按 `maxReferenceImages` 允许多图上传；其中全能参考最多 9 张。固定 8 秒、固定有声/无声、固定清晰度这类单项也要展示为锁定态。
 
@@ -224,7 +224,7 @@
 
 **图片编辑 edit：** `{ prompt, subType:"edit", tierKey:"image_edit_standard", uploadKeys:["待编辑图fileNo"], editTool:"eraser", maskFileId?, maskUrl?, backgroundFileId?, backgroundUrl?, platformWatermarkEnabled? }`
 
-图生图和图生视频的普通参考图数量由所选档位 `capabilities.maxReferenceImages` 控制；未返回该字段时小程序按最多 4 张处理。视频档位额外返回 `capabilities.referenceUploadMode`、`capabilities.minReferenceImages`、`capabilities.inputMediaTypes`、`capabilities.maxVideoUrls` 与 `capabilities.maxAudioUrls`：`first_frame` 表示单首图图生视频，`reference_images` 表示多素材参考生视频，`first_last` 表示首尾帧，`source_video` 表示视频编辑。小程序提交前应按 `min/maxReferenceImages`、`maxVideoUrls`、`maxAudioUrls` 校验，后端创建任务时也会二次校验。首尾帧视频固定首图/尾图 2 张；图片编辑固定 1 张待编辑图；视频编辑固定 1 个源视频。
+文生图始终只输入文字，不显示参考图入口。图生图和图片编辑的参考图数量由所选档位 `capabilities.maxReferenceImages` 控制；未返回该字段时小程序按最多 4 张处理。图片编辑始终使用大上传卡片，模型上限大于 1 时通过“继续上传”和预览槽位追加图片。预览区默认显示 4 个槽位，上限小于 4 时超出上限的槽位置灰并禁止操作，上限大于 4 时显示真实数量。视频档位额外返回 `capabilities.referenceUploadMode`、`capabilities.minReferenceImages`、`capabilities.inputMediaTypes`、`capabilities.maxVideoUrls` 与 `capabilities.maxAudioUrls`：`first_frame` 表示单首图图生视频，`reference_images` 表示多素材参考生视频，`first_last` 表示首尾帧，`source_video` 表示视频编辑。小程序提交前应按 `min/maxReferenceImages`、`maxVideoUrls`、`maxAudioUrls` 校验，后端创建任务时也会二次校验。首尾帧视频固定首图/尾图 2 张；视频编辑默认单源视频，模型返回 `maxVideoUrls > 1` 时允许多个源视频。
 
 图生图、图片编辑、图生视频的参考素材不要直接传 `base64/data:`、本地路径、`localhost` 或内网地址。小程序应先通过 `/files/upload` 上传，并把生成用素材按 `visibility=public` 上传，再把返回的 `fileNo` 放入 `uploadKeys/referenceKeys`；后端提交给第三方模型前也会把对应素材兜底转为 `public`。生产环境必须确保后端返回的文件地址是第三方模型可访问的公网 HTTPS URL。
 
@@ -252,11 +252,11 @@
 
 ### POST /tasks/optimize-prompt 🔒
 
-`{ prompt, scene?, style?, ratio? }` → `{ optimizedPrompt, styleSuggestions, charged, pointsCost }`
+`{ prompt, scene?, style?, ratio?, usage?, negativePrompt?, context?, tierKey?, tierId? }` → `{ optimizedPrompt, styleSuggestions, charged, pointsCost }`
 
 后台开启 `membership.prompt_optimize_member_only` 时，非会员返回 `code=4603`，且不会扣除积分。
 
-该接口对应小程序提示词输入框下方的“智能优化”按钮。按钮是否展示由 `/public/app.features.promptOptimize` 控制；系统提示词在后台「内容管理 → 系统提示词 → 智能优化」维护，默认文本模型和积分在「系统设置 → AI 文本能力」配置。
+该接口对应小程序提示词输入框下方的“智能优化”按钮。按钮是否展示由 `/public/app.features.promptOptimize` 控制。系统提示词在后台「内容合规 → 系统提示词」中，将目标功能设为「智能优化」（`targetFeature=prompt_optimize`）后新增或编辑；系统内置补全规则会和启用的自定义提示词合并注入。模型绑定和主/备用切换在「AI 模型管理 → 功能页配置 → 提示词优化」完成；旧的「系统设置 → AI 文本能力 → 智能优化兼容模型 ID」仅作为无档位绑定时的兼容兜底。请求传 `tierKey` 或 `tierId` 时，可在已绑定的提示词优化档位之间切换模型，不能传真实 `modelId`。
 
 ### POST /tasks/script 🔒
 
@@ -326,7 +326,7 @@
 请求：
 
 ```json
-{ "toolKey": "prompt_reverse", "fileIds": [123], "params": { "scene": "产品海报" } }
+{ "toolKey": "prompt_reverse", "fileIds": [123], "params": { "scene": "产品海报" }, "tierKey": "tool_prompt_reverse_standard" }
 ```
 
 成功返回 `{ toolKey, outputs, prompt, usageSource }`。图片输出是私有文件地址，需要携带当前用户 token 下载或预览。
@@ -341,7 +341,7 @@
 
 请求 `{ toolKey, sessionId, completed }`。完整观看后返回 `{ unlocked:true }`，下一次 `/tools/process` 会消耗一次解锁。
 
-反推提示词会优先尝试后台绑定的 `tool_prompt_reverse` 模型；供应商需要兼容 OpenAI `chat/completions` 图片输入。失败时后端返回本地兜底提示词，避免用户卡死。智能抠图当前是本地轻量算法，`tool_cutout` 绑定入口用于后续替换为供应商抠图/图片编辑能力。
+反推提示词会调用后台绑定的 `tool_prompt_reverse` 模型；供应商需要兼容 OpenAI `chat/completions` 图片输入。请求可传 `tierKey` 或 `tierId` 切换已绑定档位。未绑定可用模型或调用失败时后端返回明确错误并退款，不返回伪造的本地提示词。智能抠图当前是本地轻量算法，`tool_cutout` 绑定入口用于后续替换为供应商抠图/图片编辑能力。
 
 ---
 

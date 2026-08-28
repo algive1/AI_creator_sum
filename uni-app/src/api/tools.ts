@@ -23,6 +23,8 @@ export interface ToolItem {
   pointsEnabled: boolean;
   pointsCost: number;
   message?: string;
+  featureKey?: string;
+  modelBound?: boolean;
 }
 
 export interface ToolsConfig {
@@ -63,6 +65,6 @@ export function claimToolAdUnlock(toolKey: ToolKey, sessionId: string, completed
   return post<{ unlocked: boolean; status: string; message: string }>('/tools/ad-unlock', { toolKey, sessionId, completed });
 }
 
-export function processTool(payload: { toolKey: ToolKey; fileIds: number[]; params?: Record<string, unknown> }) {
+export function processTool(payload: { toolKey: ToolKey; fileIds: number[]; params?: Record<string, unknown>; tierKey?: string; tierId?: number }) {
   return post<ToolProcessResult>('/tools/process', payload, { loading: '处理中', dedupe: false, timeout: 180_000 });
 }

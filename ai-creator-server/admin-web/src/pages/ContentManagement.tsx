@@ -123,7 +123,7 @@ export default function ContentManagement() {
 
   useEffect(() => { loadAll(); }, []);
 
-  const openModal = (type: 'legal' | 'announcement' | 'prompt', row?: any) => {
+  const openModal = (type: 'legal' | 'announcement' | 'prompt', row?: any, presetTargetFeature?: string) => {
     setModalType(type);
     setEditing(row || null);
     form.resetFields();
@@ -144,13 +144,14 @@ export default function ContentManagement() {
     } else if (type === 'announcement') {
       form.setFieldsValue({ enabled: true, type: 'popup', showFrequency: 'once_per_day', targetType: 'all', priority: 0, sortOrder: 0 });
     } else {
+      const targetFeature = presetTargetFeature || targetFeatureFilter;
       form.setFieldsValue({
         enabled: true,
         promptType: 'system',
         version: 'v1',
-        promptKey: targetFeatureFilter === 'prompt_optimize' ? 'prompt_optimize_system' : `prompt_${Date.now()}`,
-        promptName: targetFeatureFilter === 'prompt_optimize' ? '智能补全系统提示词' : undefined,
-        targetFeature: targetFeatureFilter || undefined,
+        promptKey: targetFeature === 'prompt_optimize' ? 'prompt_optimize_system' : `prompt_${Date.now()}`,
+        promptName: targetFeature === 'prompt_optimize' ? '提示词优化系统提示词' : undefined,
+        targetFeature: targetFeature || undefined,
       });
     }
     setModalOpen(true);
@@ -250,6 +251,19 @@ export default function ContentManagement() {
             label: '系统提示词',
             children: (
               <>
+                <Alert
+                  type="info"
+                  showIcon
+                  style={{ marginBottom: 12 }}
+                  message="提示词优化系统提示词"
+                  description="要调整提示词优化时注入模型的业务规则，请筛选“智能优化”，新增或编辑 targetFeature 为 prompt_optimize 的提示词；系统内置补全规则仍会自动保留。"
+                  action={(
+                    <Space size={6}>
+                      <Button size="small" onClick={() => setTargetFeatureFilter('prompt_optimize')}>只看提示词优化</Button>
+                      <Button size="small" type="primary" onClick={() => openModal('prompt', undefined, 'prompt_optimize')}>新增优化规则</Button>
+                    </Space>
+                  )}
+                />
                 {targetFeatureFilter && (
                   <Alert
                     type="info"
@@ -309,7 +323,7 @@ export default function ContentManagement() {
       />
 
       <Modal
-        title={editing ? '编辑' : '新增'}
+        title={modalType === 'prompt' ? (editing ? '编辑系统提示词' : '新增系统提示词') : (editing ? '编辑' : '新增')}
         open={modalOpen}
         onCancel={() => setModalOpen(false)}
         onOk={saveModal}
@@ -322,7 +336,14 @@ export default function ContentManagement() {
               <Form.Item name="docType" label="协议类型" rules={[{ required: true }]}><Select options={legalDocTypes} /></Form.Item>
               <Form.Item name="title" label="标题" rules={[{ required: true }]}><Input /></Form.Item>
               <Form.Item name="version" label="版本" rules={[{ required: true }]}><Input /></Form.Item>
-              <Form.Item name="content" label="内容" rules={[{ required: true }]}><Input.TextArea rows={8} /></Form.Item>
+              <Form.Item
+                name="content"
+                label="内容"
+                rules={[{ required: true }]}
+                extra="如果功能选择“智能优化”，这里的内容会与系统内置的深度补全规则合并后注入文本模型。"
+              >
+                <Input.TextArea rows={8} />
+              </Form.Item>
               <Form.Item name="effectiveAt" label="生效时间"><Input placeholder="2026-05-22 12:00:00" /></Form.Item>
               <Form.Item name="enabled" label="启用" valuePropName="checked"><Switch /></Form.Item>
             </>

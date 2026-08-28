@@ -11,6 +11,7 @@ import { AdapterRegistry } from '../services/adapters/adapter.registry';
 import { getModelFeaturesList, modelSupportsFeature, normalizeCapabilityKey } from '../services/model-capability.service';
 import { buildImageSizeCapabilities, findImageSizeOption, normalizeRatioPreset, normalizeResolutionPreset } from '../services/image-size-options.service';
 import { repairTierCapabilitiesFromPrimaryModels, syncTierCapabilitiesFromPrimaryModel } from '../services/tier-capability-sync.service';
+import { clearTextFeatureModelCache, type TextFeatureKey } from '../services/ai-feature.service';
 
 const router = Router();
 const MAX_PAGE_SIZE = 100;
@@ -26,6 +27,12 @@ const realModelTestLimiter = rateLimit({
 function positiveInt(value: any, fallback: number): number {
   const parsed = parseInt(String(value || ''), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function clearTextFeatureCacheIfNeeded(featureKey?: string): void {
+  if (featureKey && ['prompt_optimize', 'script_generate', 'prompt_generate', 'storyboard_generate'].includes(featureKey)) {
+    clearTextFeatureModelCache(featureKey as TextFeatureKey);
+  }
 }
 
 function normalizeTierPricingMode(value: any): string {
@@ -409,6 +416,14 @@ router.put('/model-tiers/:id(\\d+)', adminAuthMiddleware, async (req: Request, r
     if (sets.length === 0) { error(res, ErrorCodes.PARAM_ERROR, 'No fields to update'); return; }
     vals.push(id);
     await query('UPDATE model_tiers SET ' + sets.join(', ') + ' WHERE id = ?', vals);
+    const tier = await queryOne<any>(
+      `SELECT mf.feature_key
+         FROM model_tiers t
+         JOIN model_features mf ON mf.id = t.feature_id
+        WHERE t.id = ?`,
+      [id],
+    );
+    clearTextFeatureCacheIfNeeded(tier?.feature_key);
     success(res, { updated: true });
   } catch { error(res, ErrorCodes.SERVER_ERROR, '更新档位失败'); }
 });
@@ -418,7 +433,13 @@ router.delete('/model-tiers/:id(\\d+)', adminAuthMiddleware, async (req: Request
   const conn = await getConnection();
   try {
     await conn.beginTransaction();
-    const [rows] = await conn.execute('SELECT id, tier_name, tier_key FROM model_tiers WHERE id = ? FOR UPDATE', [id]) as any;
+    const [rows] = await conn.execute(
+      `SELECT t.id, t.tier_name, t.tier_key, mf.feature_key
+         FROM model_tiers t
+         JOIN model_features mf ON mf.id = t.feature_id
+        WHERE t.id = ? FOR UPDATE`,
+      [id],
+    ) as any;
     const tier = rows?.[0];
     if (!tier) {
       await conn.rollback();
@@ -433,6 +454,7 @@ router.delete('/model-tiers/:id(\\d+)', adminAuthMiddleware, async (req: Request
       [req.user!.userId, 'model_tier.delete', 'model_tier', String(id), JSON.stringify({ tierName: tier.tier_name, tierKey: tier.tier_key })],
     );
     await conn.commit();
+    clearTextFeatureCacheIfNeeded(tier.feature_key);
     success(res, { deleted: true, id });
   } catch (e: any) {
     try { await conn.rollback(); } catch {}
@@ -489,6 +511,7 @@ router.put('/model-tiers/:id(\\d+)/bindings', adminAuthMiddleware, async (req: R
         WHERE t.id = ?`,
       [tierId],
     );
+    clearTextFeatureCacheIfNeeded(tier?.feature_key);
     success(res, { updated: true, capabilitiesSynced: Boolean(normalizedBindings.find((binding) => binding.bindingType === 'primary')), bindings: tier ? await getTierBindings(tier.id, tier.feature_key) : [] });
   } catch {
     await conn.rollback();
@@ -974,6 +997,7 @@ async function runRealModelGenerationTest(model: any, body: any) {
     prompt,
     images,
     params,
+    modelConfig,
     providerConfig: {
       baseUrl: model.api_base_url,
       apiKey: decryptApiKey(model.api_key),
@@ -1001,6 +1025,7 @@ async function runRealModelGenerationTest(model: any, body: any) {
         timeout,
         authType: model.auth_type || 'bearer',
         queryTaskUrl: model.query_task_url || undefined,
+        model: modelCode,
       });
       providerStatus = polled.status || providerStatus;
       mappedStatus = adapter.mapStatus(providerStatus, parseJson(model.status_mapping, {}));

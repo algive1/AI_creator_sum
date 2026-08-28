@@ -1783,6 +1783,17 @@ export default function FeatureConfig({ scope = 'creative', embedded = false }: 
               style={{ marginBottom: 16, borderRadius: 8 }}
             />
 
+            {activeFeature === 'prompt_optimize' && (
+              <Alert
+                type="success"
+                showIcon
+                message="提示词优化的系统提示词设置"
+                description="系统默认补全规则会和你配置的提示词合并注入模型。请到“内容合规 → 系统提示词”，新增或编辑 targetFeature 为“prompt_optimize”的内容。"
+                action={<Button size="small" onClick={() => { window.location.href = '/content?tab=prompt&targetFeature=prompt_optimize'; }}>编辑系统提示词</Button>}
+                style={{ marginBottom: 16, borderRadius: 8 }}
+              />
+            )}
+
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 14 }}>
               <Space wrap>
                 <Button type="primary" icon={<PlusOutlined />} disabled={!activeFeatureItem} onClick={openCreate}>新增入口</Button>

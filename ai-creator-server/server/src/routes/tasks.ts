@@ -93,9 +93,15 @@ router.post('/quote', authMiddleware, async (req: Request, res: Response) => {
 
 router.post('/optimize-prompt', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const { prompt, scene, featureKey, style, ratio, usage, negativePrompt, negative_prompt, context } = req.body;
+    const { prompt, scene, featureKey, style, ratio, usage, negativePrompt, negative_prompt, context, tierKey, tier_key, tierId, tier_id } = req.body;
     if (!prompt) {
       error(res, ErrorCodes.PARAM_ERROR, '请输入提示词');
+      return;
+    }
+
+    const parsedTierId = Number(tierId ?? tier_id);
+    if ((tierId !== undefined || tier_id !== undefined) && (!Number.isInteger(parsedTierId) || parsedTierId <= 0)) {
+      error(res, ErrorCodes.PARAM_ERROR, 'tierId 必须是正整数');
       return;
     }
 
@@ -108,6 +114,8 @@ router.post('/optimize-prompt', authMiddleware, async (req: Request, res: Respon
       usage,
       negativePrompt: negativePrompt || negative_prompt,
       context: context || {},
+      tierKey: String(tierKey ?? tier_key ?? '').trim() || undefined,
+      tierId: parsedTierId > 0 ? parsedTierId : undefined,
     });
     success(res, {
       optimizedPrompt: result.optimizedPrompt,
