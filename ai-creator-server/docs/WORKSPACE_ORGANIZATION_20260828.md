@@ -67,3 +67,14 @@ git push -u origin <当前分支>
 - 3 个工具档位当前没有绑定主模型，`check:tiers` 会输出 warning；这不是目录整理造成的。
 - lint 中的 warning 是现有代码问题，本次没有扩大范围重构。
 - 真实第三方 API、生产数据库和线上部署没有在本次本机整理中重新联调。
+
+## 推送状态
+
+- 本地提交已创建：`ed58570 feat: update provider capabilities and organize workspace`。
+- 当前工作区已经干净。
+- 推送尚未完成，原因是本机没有 GitHub HTTPS 登录凭据，也没有可用的 SSH key 或 `gh` 登录状态。
+- 完成 GitHub 登录后，在项目根目录执行：
+
+```bash
+git push -u origin codex/wechat-tools-config
+```
