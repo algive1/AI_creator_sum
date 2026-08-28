@@ -10,6 +10,8 @@ const {
 
 const {
   clearSystemPromptCache,
+  isPromptOptimizeSystemPromptTarget,
+  resolveTaskSystemPrompt,
   resolveSystemPromptByFeatureWithCache,
 } = await import('../src/services/system-prompt.service.ts');
 
@@ -135,4 +137,20 @@ test('system prompt cache reuses loader within ttl and can be cleared', async ()
 
   assert.equal(third, 'system-2\n\nsafety-2');
   assert.equal(calls, 2);
+});
+
+test('system prompt configuration is fail-closed outside prompt optimization', async () => {
+  assert.equal(isPromptOptimizeSystemPromptTarget('prompt_optimize'), true);
+  assert.equal(isPromptOptimizeSystemPromptTarget('script_generate'), false);
+
+  let loaderCalled = false;
+  const value = await resolveSystemPromptByFeatureWithCache('script_generate', async () => {
+    loaderCalled = true;
+    return [{ prompt_type: 'system', content: 'must not be injected' }];
+  }, 2000);
+
+  assert.equal(value, '');
+  assert.equal(loaderCalled, false);
+  assert.equal(await resolveTaskSystemPrompt('image', 'text2img'), '');
+  assert.equal(await resolveTaskSystemPrompt('video', 'text_to_video'), '');
 });

@@ -5,7 +5,11 @@ import { success, error } from '../utils/response';
 import { parseJson } from '../utils/content-helpers';
 import { ErrorCodes } from '../types';
 import { createTemplateReviewNotification } from '../services/template-notification.service';
-import { clearSystemPromptCache } from '../services/system-prompt.service';
+import {
+  clearSystemPromptCache,
+  isPromptOptimizeSystemPromptTarget,
+  PROMPT_OPTIMIZE_SYSTEM_PROMPT_FEATURE,
+} from '../services/system-prompt.service';
 
 const router = Router();
 
@@ -156,7 +160,12 @@ router.delete('/announcements/:id(\\d+)', adminAuthMiddleware, async (req: Reque
 
 router.get('/system-prompts', adminAuthMiddleware, async (_req: Request, res: Response) => {
   try {
-    const rows = await query<any>('SELECT * FROM system_prompts ORDER BY target_feature, prompt_type, enabled DESC, version DESC, id DESC');
+    const rows = await query<any>(
+      `SELECT * FROM system_prompts
+        WHERE target_feature = ?
+        ORDER BY prompt_type, enabled DESC, version DESC, id DESC`,
+      [PROMPT_OPTIMIZE_SYSTEM_PROMPT_FEATURE],
+    );
     success(res, { list: rows.map(toSystemPrompt) });
   } catch {
     error(res, ErrorCodes.SERVER_ERROR, '获取提示词列表失败');
@@ -171,13 +180,17 @@ router.post('/system-prompts', adminAuthMiddleware, async (req: Request, res: Re
       error(res, ErrorCodes.PARAM_ERROR, '缺少提示词必填参数');
       return;
     }
+    if (!isPromptOptimizeSystemPromptTarget(targetFeature)) {
+      error(res, ErrorCodes.PARAM_ERROR, '系统提示词仅支持提示词优化功能');
+      return;
+    }
     await query(
       `INSERT INTO system_prompts
        (prompt_key, prompt_name, prompt_type, target_feature, content, enabled, version, remark, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(3), NOW(3))`,
-      [promptKey, promptName, promptType || 'system', targetFeature, content, enabled === false ? 0 : 1, version || 'v1', remark || ''],
+      [promptKey, promptName, promptType || 'system', PROMPT_OPTIMIZE_SYSTEM_PROMPT_FEATURE, content, enabled === false ? 0 : 1, version || 'v1', remark || ''],
     );
-    clearSystemPromptCache(targetFeature);
+    clearSystemPromptCache(PROMPT_OPTIMIZE_SYSTEM_PROMPT_FEATURE);
     success(res, { created: true });
   } catch (err: any) {
     error(res, ErrorCodes.SERVER_ERROR, `创建提示词失败: ${err.message || ''}`.trim());
@@ -188,13 +201,21 @@ router.put('/system-prompts/:id(\\d+)', adminAuthMiddleware, async (req: Request
   try {
     if (!requireSuperAdmin(req, res)) return;
     const { promptKey, promptName, promptType, targetFeature, content, enabled, version, remark } = req.body;
-    await query(
+    if (!isPromptOptimizeSystemPromptTarget(targetFeature)) {
+      error(res, ErrorCodes.PARAM_ERROR, '系统提示词仅支持提示词优化功能');
+      return;
+    }
+    const result = await query<any>(
       `UPDATE system_prompts
           SET prompt_key = ?, prompt_name = ?, prompt_type = ?, target_feature = ?, content = ?, enabled = ?, version = ?, remark = ?, updated_at = NOW(3)
-        WHERE id = ?`,
-      [promptKey, promptName, promptType || 'system', targetFeature, content, enabled === false ? 0 : 1, version || 'v1', remark || '', Number(req.params.id)],
+        WHERE id = ? AND target_feature = ?`,
+      [promptKey, promptName, promptType || 'system', PROMPT_OPTIMIZE_SYSTEM_PROMPT_FEATURE, content, enabled === false ? 0 : 1, version || 'v1', remark || '', Number(req.params.id), PROMPT_OPTIMIZE_SYSTEM_PROMPT_FEATURE],
     );
-    clearSystemPromptCache(targetFeature);
+    if ((result as any).affectedRows === 0) {
+      error(res, ErrorCodes.NOT_FOUND, '提示词不存在或不属于提示词优化功能', 404);
+      return;
+    }
+    clearSystemPromptCache(PROMPT_OPTIMIZE_SYSTEM_PROMPT_FEATURE);
     success(res, { updated: true });
   } catch {
     error(res, ErrorCodes.SERVER_ERROR, '更新提示词失败');

@@ -256,25 +256,25 @@
 
 后台开启 `membership.prompt_optimize_member_only` 时，非会员返回 `code=4603`，且不会扣除积分。
 
-该接口对应小程序提示词输入框下方的“智能优化”按钮。按钮是否展示由 `/public/app.features.promptOptimize` 控制。系统提示词在后台「内容合规 → 系统提示词」中，将目标功能设为「智能优化」（`targetFeature=prompt_optimize`）后新增或编辑；系统内置补全规则会和启用的自定义提示词合并注入。模型绑定和主/备用切换在「AI 模型管理 → 功能页配置 → 提示词优化」完成；旧的「系统设置 → AI 文本能力 → 智能优化兼容模型 ID」仅作为无档位绑定时的兼容兜底。请求传 `tierKey` 或 `tierId` 时，可在已绑定的提示词优化档位之间切换模型，不能传真实 `modelId`。
+该接口对应小程序提示词输入框下方的“智能优化”按钮。按钮是否展示由 `/public/app.features.promptOptimize` 控制。系统提示词仅服务于此接口，在后台「内容合规 → 系统提示词」中直接新增或编辑“提示词优化系统提示词”（固定 `targetFeature=prompt_optimize`）；系统内置补全规则会和启用的自定义提示词合并注入。该配置不会注入生图、生视频、脚本生成、提示词生成、分镜或工具等其他功能。模型绑定和主/备用切换在「AI 模型管理 → 功能页配置 → 提示词优化」完成；旧的「系统设置 → AI 文本能力 → 智能优化兼容模型 ID」仅作为无档位绑定时的兼容兜底。请求传 `tierKey` 或 `tierId` 时，可在已绑定的提示词优化档位之间切换模型，不能传真实 `modelId`。
 
 ### POST /tasks/script 🔒
 
 `{ topic, style?, duration?, characters? }` → 分镜脚本
 
-该接口用于后续“剧本/脚本生成”入口，开关为 `/public/app.features.scriptGenerate`。后台系统提示词目标功能选择「脚本生成」。
+该接口用于后续“剧本/脚本生成”入口，开关为 `/public/app.features.scriptGenerate`。脚本生成使用自身的内置指令，不读取「内容合规 → 系统提示词」中的提示词优化配置。
 
 ### POST /tasks/prompt 🔒
 
 `{ idea, scene?, style?, count? }` → 提示词变体
 
-该接口用于后续提示词框的智能补全或多版本提示词生成，开关为 `/public/app.features.promptGenerate`。后台系统提示词目标功能选择「提示词生成」。
+该接口用于后续提示词框的智能补全或多版本提示词生成，开关为 `/public/app.features.promptGenerate`。提示词生成使用自身的内置指令，不读取「内容合规 → 系统提示词」中的提示词优化配置。
 
 ### POST /tasks/storyboard 🔒
 
 `{ script, style?, ratio? }` → 分镜描述
 
-该接口用于后续 AI 漫剧分镜生成，开关为 `/public/app.features.storyboardGenerate`。后台系统提示词目标功能选择「AI 漫剧分镜」。
+该接口用于后续 AI 漫剧分镜生成，开关为 `/public/app.features.storyboardGenerate`。分镜生成使用自身的内置指令，不读取「内容合规 → 系统提示词」中的提示词优化配置。
 
 ### GET /tasks 🔒
 

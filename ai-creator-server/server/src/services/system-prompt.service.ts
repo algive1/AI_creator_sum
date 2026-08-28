@@ -1,6 +1,7 @@
 import { query } from '../utils/db';
 
 const SYSTEM_PROMPT_CACHE_TTL_MS = 60_000;
+export const PROMPT_OPTIMIZE_SYSTEM_PROMPT_FEATURE = 'prompt_optimize';
 
 type SystemPromptRow = {
   prompt_type: string;
@@ -12,15 +13,24 @@ type SystemPromptLoader = (targetFeature: string) => Promise<SystemPromptRow[]>;
 const systemPromptCache = new Map<string, { value: string; expiresAt: number }>();
 
 export async function resolveTaskSystemPrompt(taskType: 'image' | 'video', subType?: string): Promise<string> {
-  const targetFeature = resolveTargetFeature(taskType, subType);
-  return resolveSystemPromptByFeature(targetFeature);
+  // system_prompts is intentionally dedicated to prompt optimization. Keep this
+  // compatibility function for the task service, but never inject admin-managed
+  // prompt content into image/video generation.
+  void taskType;
+  void subType;
+  return '';
 }
 
 export async function resolveSystemPromptByFeature(targetFeature: string): Promise<string> {
   return resolveSystemPromptByFeatureWithCache(targetFeature);
 }
 
+export function isPromptOptimizeSystemPromptTarget(value: unknown): boolean {
+  return String(value || '').trim() === PROMPT_OPTIMIZE_SYSTEM_PROMPT_FEATURE;
+}
+
 export function clearSystemPromptCache(targetFeature?: string): void {
+  if (targetFeature && !isPromptOptimizeSystemPromptTarget(targetFeature)) return;
   if (targetFeature) {
     systemPromptCache.delete(targetFeature);
     return;
@@ -33,6 +43,10 @@ export async function resolveSystemPromptByFeatureWithCache(
   loader: SystemPromptLoader = loadSystemPromptRows,
   now = Date.now(),
 ): Promise<string> {
+  // Fail closed so a future caller cannot accidentally make the generic
+  // system_prompts table affect another feature.
+  if (!isPromptOptimizeSystemPromptTarget(targetFeature)) return '';
+
   const cached = systemPromptCache.get(targetFeature);
   if (cached && cached.expiresAt > now) return cached.value;
 
@@ -64,15 +78,4 @@ function buildSystemPromptContent(rows: SystemPromptRow[]): string {
 function pickContent(rows: SystemPromptRow[], type: string): string {
   const row = rows.find(item => item.prompt_type === type);
   return row?.content ? String(row.content).trim() : '';
-}
-
-function resolveTargetFeature(taskType: 'image' | 'video', subType?: string): string {
-  if (taskType === 'image') {
-    if (subType === 'img2img') return 'image_to_image';
-    if (subType === 'edit') return 'image_edit';
-    return 'text_to_image';
-  }
-  if (subType === 'image_to_video') return 'image_to_video';
-  if (subType === 'first_last_frame_video') return 'first_last_frame_video';
-  return 'text_to_video';
 }

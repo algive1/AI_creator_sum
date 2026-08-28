@@ -4,7 +4,7 @@
 
 提示词优化和反推提示词都统一使用现有的功能档位模型体系，支持后台绑定模型、切换主模型，并允许请求通过 `tierKey` 或 `tierId` 指定已绑定的功能档位。
 
-提示词优化的系统提示词继续使用 `system_prompts` 表，不新增配置表。内置深度补全规则会和启用的自定义提示词合并后注入文本模型。
+提示词优化的系统提示词继续使用 `system_prompts` 表，不新增配置表。该配置是提示词优化的专用配置，内置深度补全规则会和启用的自定义提示词合并后注入提示词优化模型；其他功能不会读取或注入这张表。
 
 ## 后台操作路径
 
@@ -39,9 +39,8 @@
 
 `内容合规 → 系统提示词`
 
-进入后点击「新增优化规则」，或编辑已有记录。需要确认：
+进入后点击「新增优化规则」，或编辑已有记录。页面中的功能已固定为“提示词优化”，服务端也只接受：
 
-- 功能选择「智能优化」
 - 数据库存储的目标功能为 `prompt_optimize`
 - 状态为启用
 - 内容填写业务规则、输出格式、风格约束或禁止事项
@@ -55,6 +54,12 @@
 ```
 
 保存后会清理对应系统提示词缓存。
+
+系统提示词的作用域边界：
+
+- 管理端列表只返回 `target_feature=prompt_optimize` 的记录。
+- 创建和编辑接口拒绝其他 `targetFeature`，编辑接口也不能借用提示词优化请求修改其他功能的旧记录。
+- 运行时对非 `prompt_optimize` 目标 fail-closed；生图、生视频、脚本生成、提示词生成、分镜和工具不会读取或注入 `system_prompts`。
 
 ### 3. 配置反推提示词模型
 
@@ -106,7 +111,8 @@
 - `server/src/routes/admin-tiers.ts`：切换档位主模型或修改档位状态后清理文本模型缓存。
 - `admin-web/src/pages/settings/index.tsx`：增加提示词优化模型配置和系统提示词编辑入口。
 - `admin-web/src/pages/FeatureConfig.tsx`：提示词优化功能页增加系统提示词直达入口。
-- `admin-web/src/pages/ContentManagement.tsx`：系统提示词页面增加提示词优化说明、筛选和快速新增入口。
+- `admin-web/src/pages/ContentManagement.tsx`：系统提示词页面固定为提示词优化作用域，明确展示不会扩散到其他功能，并提供快速新增入口。
+- `server/src/services/system-prompt.service.ts`、`server/src/routes/admin-content.ts`：运行时和管理接口增加提示词优化作用域约束，阻止系统提示词扩散到其他功能。
 - `admin-web/src/pages/WechatToolsSettings.tsx`：明确反推提示词模型绑定和切换位置。
 - `uni-app/src/api/tools.ts`：补充工具接口返回的模型绑定字段和请求级档位字段类型。
 - `docs/API.md`、`docs/MINI_PROGRAM_API.md`：同步后台路径、接口字段和失败行为。

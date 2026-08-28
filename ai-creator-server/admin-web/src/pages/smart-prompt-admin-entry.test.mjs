@@ -15,11 +15,12 @@ test('settings page links AI text settings to the prompt optimize system prompt 
 
 test('content management can focus prompt optimize system prompts from query params', () => {
   assert.match(contentSource, /new URLSearchParams\(window\.location\.search\)/);
-  assert.match(contentSource, /targetFeatureFilter/);
-  assert.match(contentSource, /const visiblePrompts = targetFeatureFilter/);
-  assert.match(contentSource, /item\.targetFeature === targetFeatureFilter/);
-  assert.match(contentSource, /dataSource=\{visiblePrompts\}/);
-  assert.match(contentSource, /targetFeature:\s*targetFeature \|\| undefined/);
+  assert.match(contentSource, /const PROMPT_OPTIMIZE_TARGET_FEATURE = 'prompt_optimize'/);
+  assert.match(contentSource, /targetFeature: PROMPT_OPTIMIZE_TARGET_FEATURE/);
+  assert.match(contentSource, /dataSource=\{prompts\}/);
+  assert.doesNotMatch(contentSource, /const features = \[/);
+  assert.doesNotMatch(contentSource, /targetFeatureFilter/);
   assert.match(contentSource, /新增优化规则/);
+  assert.match(contentSource, /系统提示词只注入“提示词优化”功能/);
   assert.match(contentSource, /系统内置补全规则仍会自动保留/);
 });

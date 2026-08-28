@@ -47,25 +47,12 @@ const promptTypes = [
   { label: '负面', value: 'negative' },
 ];
 
-const features = [
-  { label: '文生图', value: 'text_to_image' },
-  { label: '图生图', value: 'image_to_image' },
-  { label: '图片编辑', value: 'image_edit' },
-  { label: '文生视频', value: 'text_to_video' },
-  { label: '图生视频', value: 'image_to_video' },
-  { label: '首尾帧视频', value: 'first_last_frame_video' },
-  { label: '智能优化', value: 'prompt_optimize' },
-  { label: '脚本生成', value: 'script_generate' },
-  { label: '提示词生成', value: 'prompt_generate' },
-  { label: 'AI 漫剧分镜', value: 'storyboard_generate' },
-];
+const PROMPT_OPTIMIZE_TARGET_FEATURE = 'prompt_optimize';
 
 export default function ContentManagement() {
   const searchParams = new URLSearchParams(window.location.search);
   const initialTab = searchParams.get('tab') === 'prompt' ? 'prompt' : 'legal';
-  const initialTargetFeature = searchParams.get('targetFeature') || '';
   const [tab, setTab] = useState(initialTab);
-  const [targetFeatureFilter, setTargetFeatureFilter] = useState(initialTargetFeature);
 
   const [legalDocs, setLegalDocs] = useState<any[]>([]);
   const [announcements, setAnnouncements] = useState<any[]>([]);
@@ -123,7 +110,7 @@ export default function ContentManagement() {
 
   useEffect(() => { loadAll(); }, []);
 
-  const openModal = (type: 'legal' | 'announcement' | 'prompt', row?: any, presetTargetFeature?: string) => {
+  const openModal = (type: 'legal' | 'announcement' | 'prompt', row?: any) => {
     setModalType(type);
     setEditing(row || null);
     form.resetFields();
@@ -144,14 +131,13 @@ export default function ContentManagement() {
     } else if (type === 'announcement') {
       form.setFieldsValue({ enabled: true, type: 'popup', showFrequency: 'once_per_day', targetType: 'all', priority: 0, sortOrder: 0 });
     } else {
-      const targetFeature = presetTargetFeature || targetFeatureFilter;
       form.setFieldsValue({
         enabled: true,
         promptType: 'system',
         version: 'v1',
-        promptKey: targetFeature === 'prompt_optimize' ? 'prompt_optimize_system' : `prompt_${Date.now()}`,
-        promptName: targetFeature === 'prompt_optimize' ? '提示词优化系统提示词' : undefined,
-        targetFeature: targetFeature || undefined,
+        promptKey: 'prompt_optimize_system',
+        promptName: '提示词优化系统提示词',
+        targetFeature: PROMPT_OPTIMIZE_TARGET_FEATURE,
       });
     }
     setModalOpen(true);
@@ -169,7 +155,7 @@ export default function ContentManagement() {
         if (editing) await api.put(`/content/announcements/${editing.id}`, body);
         else await api.post('/content/announcements', body);
       } else {
-        const body = { promptKey: values.promptKey, promptName: values.promptName, promptType: values.promptType, targetFeature: values.targetFeature, content: values.content, enabled: values.enabled !== false, version: values.version || 'v1', remark: values.remark || '' };
+        const body = { promptKey: values.promptKey, promptName: values.promptName, promptType: values.promptType, targetFeature: PROMPT_OPTIMIZE_TARGET_FEATURE, content: values.content, enabled: values.enabled !== false, version: values.version || 'v1', remark: values.remark || '' };
         if (editing) await api.put(`/content/system-prompts/${editing.id}`, body);
         else await api.post('/content/system-prompts', body);
       }
@@ -216,16 +202,11 @@ export default function ContentManagement() {
     { title: 'Key', dataIndex: 'promptKey', width: 200, render: (v: string) => <EllipsisText value={v} maxWidth={178} code /> },
     { title: '名称', dataIndex: 'promptName', width: 180, render: (v: string) => <EllipsisText value={v} maxWidth={158} strong /> },
     { title: '类型', dataIndex: 'promptType', width: 100 },
-    { title: '功能', dataIndex: 'targetFeature', width: 170, render: (v: string) => <EllipsisText value={v} maxWidth={148} /> },
+    { title: '功能', dataIndex: 'targetFeature', width: 170, render: () => <Tag color="blue">提示词优化</Tag> },
     { title: '版本', dataIndex: 'version', width: 90 },
     { title: '状态', dataIndex: 'enabled', width: 90, render: (v: boolean) => <Tag color={v ? 'green' : 'default'}>{v ? '启用' : '停用'}</Tag> },
     { title: '操作', width: 120, render: (_: any, row: any) => <Button size="small" icon={<EditOutlined />} onClick={() => openModal('prompt', row)}>编辑</Button> },
   ];
-
-  const visiblePrompts = targetFeatureFilter
-    ? prompts.filter((item: any) => item.targetFeature === targetFeatureFilter)
-    : prompts;
-  const targetFeatureLabel = features.find(item => item.value === targetFeatureFilter)?.label || targetFeatureFilter;
 
   return (
     <div>
@@ -240,7 +221,6 @@ export default function ContentManagement() {
         activeKey={tab}
         onChange={(key) => {
           setTab(key);
-          if (key !== 'prompt') setTargetFeatureFilter('');
           if (key === 'sensitive') fetchWords();
         }}
         items={[
@@ -256,24 +236,12 @@ export default function ContentManagement() {
                   showIcon
                   style={{ marginBottom: 12 }}
                   message="提示词优化系统提示词"
-                  description="要调整提示词优化时注入模型的业务规则，请筛选“智能优化”，新增或编辑 targetFeature 为 prompt_optimize 的提示词；系统内置补全规则仍会自动保留。"
+                  description="这里的系统提示词只注入“提示词优化”功能，不会扩散到生图、生视频、脚本生成、提示词生成、分镜或工具等其他功能；系统内置补全规则仍会自动保留。"
                   action={(
-                    <Space size={6}>
-                      <Button size="small" onClick={() => setTargetFeatureFilter('prompt_optimize')}>只看提示词优化</Button>
-                      <Button size="small" type="primary" onClick={() => openModal('prompt', undefined, 'prompt_optimize')}>新增优化规则</Button>
-                    </Space>
+                    <Button size="small" type="primary" onClick={() => openModal('prompt')}>新增优化规则</Button>
                   )}
                 />
-                {targetFeatureFilter && (
-                  <Alert
-                    type="info"
-                    showIcon
-                    style={{ marginBottom: 12 }}
-                    message={`当前仅显示 ${targetFeatureLabel} 提示词`}
-                    action={<Button size="small" onClick={() => setTargetFeatureFilter('')}>查看全部</Button>}
-                  />
-                )}
-                <Table rowKey="id" columns={promptColumns} dataSource={visiblePrompts} loading={loading} size="middle" pagination={false} tableLayout="fixed" scroll={{ x: 1020 }} />
+                <Table rowKey="id" columns={promptColumns} dataSource={prompts} loading={loading} size="middle" pagination={false} tableLayout="fixed" scroll={{ x: 1020 }} />
               </>
             ),
           },
@@ -422,7 +390,8 @@ export default function ContentManagement() {
                 />
               </Form.Item>
               <Form.Item name="promptType" label="类型"><Select options={promptTypes} /></Form.Item>
-              <Form.Item name="targetFeature" label="功能" rules={[{ required: true }]}><Select options={features} /></Form.Item>
+              <Form.Item name="targetFeature" hidden><Input /></Form.Item>
+              <Form.Item label="功能"><Input value="提示词优化" readOnly /></Form.Item>
               <Form.Item name="content" label="内容" rules={[{ required: true }]}><Input.TextArea rows={8} /></Form.Item>
               <Space style={{ display: 'flex' }}>
                 <Form.Item name="version" label="版本"><Input /></Form.Item>

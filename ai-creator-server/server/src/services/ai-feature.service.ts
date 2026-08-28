@@ -609,7 +609,7 @@ export async function generateScript(input: ScriptGenerateInput): Promise<Script
       charged = true;
     }
 
-    const systemPrompt = await buildFeatureSystemPrompt('script_generate', [
+    const systemPrompt = buildFeatureSystemPrompt([
       '你是一个视频脚本创作引擎。',
       '根据用户提供的主题和信息，生成完整的视频脚本。',
       '每个场景包含：镜头编号、画面描述、台词、时长（秒）、运镜方式。',
@@ -690,7 +690,7 @@ export async function generatePrompt(input: PromptGenerateInput): Promise<Prompt
       charged = true;
     }
 
-    const systemPrompt = await buildFeatureSystemPrompt('prompt_generate', [
+    const systemPrompt = buildFeatureSystemPrompt([
       '你是一个创意提示词生成引擎。',
       '根据用户的想法发散出高质量的 AI 生图/生视频提示词。',
       '提示词应包含主体描述、风格、光影、构图、氛围等要素，每条不超过 200 字。',
@@ -769,7 +769,7 @@ export async function generateStoryboard(input: StoryboardInput): Promise<Storyb
       charged = true;
     }
 
-    const systemPrompt = await buildFeatureSystemPrompt('storyboard_generate', [
+    const systemPrompt = buildFeatureSystemPrompt([
       '你是一个分镜生成引擎。',
       '根据视频脚本为每个场景生成详细的分镜描述。',
       '每个分镜包含：编号、画面描述、镜头类型（特写/中景/远景等）、运镜方式、光影描述、色彩基调。',
@@ -817,9 +817,11 @@ function parseStoryboardResponse(content: string): Pick<StoryboardResult, 'story
   return { storyboards };
 }
 
-async function buildFeatureSystemPrompt(featureKey: TextFeatureKey, lines: string[]): Promise<string> {
-  const configuredPrompt = await resolveSystemPromptByFeature(featureKey);
-  return [...lines, configuredPrompt].filter(Boolean).join('\n\n');
+function buildFeatureSystemPrompt(lines: string[]): string {
+  // Custom system prompts are deliberately scoped to prompt optimization.
+  // Other text features keep their built-in instructions and do not read the
+  // admin-managed system_prompts table.
+  return lines.filter(Boolean).join('\n\n');
 }
 
 /**
