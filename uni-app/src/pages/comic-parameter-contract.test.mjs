@@ -25,3 +25,14 @@ test('comic API preserves comic semantics in the provider prompt and task params
 test('image-to-video mini-program submission uses inputAssets as the single image source', () => {
   assert.match(videoSource, /uploadKeys: subType === 'image_to_video' \? \[\] : buildLegacyImageUploadKeys\(state\)/);
 });
+
+test('comic studio uses a staged script-storyboard-production workflow', () => {
+  assert.match(comicSource, /pipelineStep/);
+  assert.match(comicSource, /generateComicScript/);
+  assert.match(comicSource, /generateComicStoryboard/);
+  assert.match(comicSource, /storyboardShots/);
+  assert.match(comicSource, /COMIC_DRAFT_CACHE_KEY/);
+  assert.match(comicSource, /writePersistentCache/);
+  assert.match(comicApiSource, /\/tasks\/script/);
+  assert.match(comicApiSource, /\/tasks\/storyboard/);
+});
