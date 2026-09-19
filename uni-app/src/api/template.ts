@@ -5,15 +5,15 @@ export function getTemplates<T = Record<string, unknown>>(params?: Record<string
 }
 
 export function getInspirations<T = Record<string, unknown>>(params?: Record<string, unknown>) {
-  return get<T>('/templates/inspirations', params, { silent: true });
+  return get<T>('/templates/inspirations', params, { silent: true, cacheTtl: params?.random ? undefined : 5 * 60_000 });
 }
 
 export function getHomeInspirations<T = Record<string, unknown>>(params?: Record<string, unknown>) {
-  return get<T>('/templates/home-inspirations', params, { silent: true });
+  return get<T>('/templates/home-inspirations', params, { silent: true, cacheTtl: 5 * 60_000 });
 }
 
 export function getTopInspirations<T = Record<string, unknown>>(params?: Record<string, unknown>) {
-  return get<T>('/templates/inspirations/top', params, { silent: true });
+  return get<T>('/templates/inspirations/top', params, { silent: true, cacheTtl: params?.random ? undefined : 5 * 60_000 });
 }
 
 export function getFavoriteTemplates<T = Record<string, unknown>>(params?: Record<string, unknown>) {
