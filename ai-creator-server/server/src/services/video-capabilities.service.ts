@@ -332,10 +332,12 @@ function defaultMinReferenceImages(inputMode: string): number {
 }
 
 function defaultMaxReferenceImages(inputMode: string): number {
-  if (inputMode === 'reference_images') return 4;
+  // Conservative fallback only. A missing upstream declaration must never
+  // advertise an arbitrary multi-reference capacity to the client.
+  if (inputMode === 'reference_images') return 1;
   if (inputMode === 'first_last') return 2;
   if (inputMode === 'first_frame') return 1;
-  return 4;
+  return 0;
 }
 
 function normalizeNonNegativeInt(value: unknown, fallback: number): number {

@@ -118,7 +118,7 @@ export async function getModelTierList(featureKey: string, userId?: number, opti
       allowPostprocess: !!cap.allow_postprocess,
       postprocessModes: parseJson(cap.postprocess_modes, []),
       maxImages: cap.max_images,
-      maxReferenceImages: cap.max_reference_images ?? 4,
+      maxReferenceImages: cap.max_reference_images === null || cap.max_reference_images === undefined ? undefined : Number(cap.max_reference_images),
       maxVideoUrls: cap.max_video_urls === null || cap.max_video_urls === undefined ? undefined : Number(cap.max_video_urls),
       maxAudioUrls: cap.max_audio_urls === null || cap.max_audio_urls === undefined ? undefined : Number(cap.max_audio_urls),
       inputMode: cap.input_mode || null,
