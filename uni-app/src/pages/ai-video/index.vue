@@ -349,6 +349,7 @@
 
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue';
+import { readPersistentCache, writePersistentCache } from '@/utils/persistent-cache';
 import { onLoad, onShareAppMessage, onShareTimeline, onShow } from '@dcloudio/uni-app';
 import LegacyTopTabs from '@/components/legacy/LegacyTopTabs.vue';
 import LegacyPromptComposer from '@/components/legacy/LegacyPromptComposer.vue';
@@ -540,7 +541,8 @@ const selectedModelIndex = ref(1);
 const modelTiersLoading = ref(false);
 const modelTiersLoaded = ref(false);
 let videoModelRequestToken = 0;
-const MODEL_CACHE_TTL_MS = 60_000;
+const MODEL_CACHE_TTL_MS = 5 * 60_000;
+const MODEL_PERSISTENT_CACHE_TTL_MS = 24 * 60 * 60_000;
 const TEMPLATE_CACHE_TTL_MS = 60_000;
 const videoModelCache = new Map<string, { list: Record<string, unknown>[]; loadedAt: number }>();
 const videoTemplateCache = new Map<string, { list: CreativeTemplate[]; loadedAt: number }>();
@@ -860,6 +862,7 @@ function loadVideoModelsForMode() {
     const list = Array.isArray(res.list) ? res.list as Record<string, unknown>[] : [];
     if (!list.length && isDevFallbackEnabled) warnDevFallback('video-tiers', `GET /public/model-tiers?feature=${featureKey} returned empty list`);
     videoModelCache.set(featureKey, { list, loadedAt: Date.now() });
+    writePersistentCache('ai_creator_video_models_' + featureKey, list);
     models.value = list;
     selectedModelIndex.value = defaultModelIndex();
     normalizeVideoParams();
