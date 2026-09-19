@@ -320,6 +320,8 @@ const COVER_MAX_HEIGHT_RPX = 720;
 const COVER_RATIO_PRELOAD_LIMIT = 12;
 const COVER_RATIO_PRELOAD_TIMEOUT_MS = 500;
 const WORK_PAGE_SIZE = 24;
+const INSPIRATION_REVALIDATE_MS = 5 * 60_000;
+let inspirationLoadedAt = 0;
 
 const activeTab = ref('推荐');
 const mediaFilter = ref<'all' | 'image' | 'video'>('all');
@@ -390,6 +392,18 @@ onShow(() => {
   enableShareMenu();
   configStore.hydrate();
   configStore.loadPublicConfig().catch(() => undefined);
+
+  // Keep the existing page/media nodes warm when navigating back. Replacing
+  // the feed on every onShow makes WeChat recreate remote image/video nodes,
+  // which looks like every asset is downloaded again even when HTTP caching
+  // is available. Explicit "换一换" and filters still refresh immediately.
+  const hasWarmContent = works.value.length > 0 || topTemplates.value.length > 0;
+  const isFresh = hasWarmContent && Date.now() - inspirationLoadedAt < INSPIRATION_REVALIDATE_MS;
+  if (isFresh) {
+    consumePendingFavorite();
+    return;
+  }
+
   loadCategories();
   loadTopTemplates();
   loadWorks({ reset: true });
@@ -451,6 +465,7 @@ async function loadWorks(options: { reset?: boolean; random?: boolean } = {}) {
       worksHasMore.value = typeof res.hasMore === 'boolean' ? res.hasMore : list.length >= WORK_PAGE_SIZE;
       ensureSelectedTagExists();
       consumePendingFavorite();
+      inspirationLoadedAt = Date.now();
       return;
     }
     if (isDevFallbackEnabled) {
@@ -486,6 +501,7 @@ async function loadTopTemplates(random = false) {
     const res = await getTopInspirations<{ list?: Record<string, unknown>[] }>({ pageSize: 12, random: random });
     const list = Array.isArray(res.list) ? res.list : [];
     topTemplates.value = await primeCoverRatios(list.map((item, index) => inspirationToWork(item, index)));
+    inspirationLoadedAt = Date.now();
   } catch {
     if (isDevFallbackEnabled) {
       warnDevFallback('inspiration-top', 'GET /templates/inspirations/top failed');
