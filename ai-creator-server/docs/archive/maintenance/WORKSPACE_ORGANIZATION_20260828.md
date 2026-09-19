@@ -75,11 +75,13 @@ git push -u origin <当前分支>
 
 ## 推送补记（2026-08-30）
 
-本机 GitHub 凭据已可用，上述阻塞已解除。`codex/wechat-tools-config` 已成功推送到 `https://github.com/algive1/AI_creator_sum.git`，本次批次包含 4 个提交：
+本机 GitHub 凭据已可用，上述阻塞已解除。`codex/wechat-tools-config` 已成功推送到 `https://github.com/algive1/AI_creator_sum.git`，本批次主要提交：
 
 - `1a8e3a9 fix: require explicit local test admin password`
 - `49eba3a docs: reorganize and reconcile project documentation`
 - `49e32e1 feat: make phone binding optional during login`
 - `a51e35a perf: paginate inspiration feed and cut redundant template loads`
 
-推送后远程 `refs/heads/codex/wechat-tools-config` 与 `refs/pull/1/head` 均为 `a51e35a`，本地与远程一致，工作区干净。`main` 仍停留在 `34cd7e26`，落后该分支 23 个提交；按 `README.md` 的工作方式，稳定版本再通过 Pull Request 或合并进入 `main`。
+推送后远程 `refs/heads/codex/wechat-tools-config` 与 `refs/pull/1/head` 均为 `490844e`，本地与远程一致，工作区干净。
+
+随后按确认结果将 `main` 以 fast-forward 方式从 `34cd7e26` 推进到 `490844e` 并推送。仓库内没有 GitHub Actions 或其它 CI 配置，因此该推送不触发自动部署。最终 `codex/wechat-tools-config`、`main` 和 `refs/pull/1/head` 都指向 `490844e`。
