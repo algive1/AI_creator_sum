@@ -1,6 +1,8 @@
 # AI 创作工坊 · 小程序接口文档
 
 > 基础地址：`https://你的域名/api/v1`
+
+最后核对：2026-08-29。本文只描述小程序实际调用的请求契约；PC 用户网页端、安装向导和完整管理后台接口见 [API.md](API.md)。
 > 全部 JSON 格式，文件上传用 multipart/form-data
 > 标注 🔓 无需登录，🔒 需 `Authorization: Bearer <token>`
 
@@ -665,11 +667,7 @@
 
 `{ scene, taskId?, fileId?, templateId?, confirmationText }`
 
-`scene` 支持 `export_save/share/public_template/platform_watermark_off`。关闭平台显式水印时传 `{ scene:"platform_watermark_off", confirmationText:"checked" }`，用于保存账号级合规确认记录。`export_save` 只做合规确认，不受模板保存/使用会员开关或旧保存会员开关限制。
-
-### POST /compliance/confirm 🔒 `{ scene, confirmationText, taskId?, fileId?, templateId? }`
-
-export_save / share 场景需输入 `我确认`；public_template 场景传 `checked`。
+`scene` 支持 `export_save/share/public_template/platform_watermark_off`。`export_save` / `share` 场景需输入 `我确认`，`public_template` 与关闭平台显式水印场景传 `checked`；后者会保存账号级合规确认记录。`export_save` 只做合规确认，不受模板保存/使用会员开关或旧保存会员开关限制。
 
 ### GET /compliance/confirmations 🔒
 

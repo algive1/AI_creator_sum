@@ -35,7 +35,7 @@
 在 WSL 里：
 
 ```bash
-cd /mnt/i/AI_creator_sum/ai-creator-server
+cd <仓库根目录>/ai-creator-server
 bash scripts/build-release.sh <版本号>
 ```
 
@@ -116,7 +116,7 @@ VITE_API_BASE_URL=https://你的域名/api/v1
 构建：
 
 ```bash
-cd /mnt/i/AI_creator_sum/uni-app
+cd <仓库根目录>/uni-app
 npm ci
 npm run build:mp-weixin
 ```

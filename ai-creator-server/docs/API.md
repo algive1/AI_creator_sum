@@ -1,5 +1,7 @@
 # API 索引
 
+最后核对：2026-08-29。本文是跨端接口索引；小程序的字段契约与页面接入分别见 `MINI_PROGRAM_API.md` 和 `AI_DEVELOPMENT_GUIDE.md`。
+
 基础地址：
 
 - 健康检查：`/health`
@@ -16,7 +18,7 @@
 `GET /health` 不使用统一响应格式，直接返回：
 
 ```json
-{ "status": "ok", "releaseVersion": "1.0.1", "timestamp": "2026-05-31T00:00:00.000Z" }
+{ "status": "ok", "releaseVersion": "<当前发布版本>", "timestamp": "<ISO 8601 时间>" }
 ```
 
 后台更新流程会用 `releaseVersion` 判断 PM2 是否已切到目标版本。
@@ -285,11 +287,15 @@ CORS_ALLOWED_ORIGINS=https://api.example.com,https://admin.example.com
   - 迁移 `20260614_005_refresh_xiaoma_media_model_configs.sql` 会按 2026-06-14 小马文档刷新后台视频/音频模型字段和轮询端点。SD 2.0 `version` 只作为上游支持字段记录，不作为公开档位默认参数；`21:9` 必须原样返回，不能归约成 `7:3`。
 - `GET /public/templates`：公开模板；`feature` 按后台 `displayConfig` 展示位置筛选，兼容旧功能值，置顶按 `pinned/pinOrder` 倒序，非置顶按 `createdAt DESC, id DESC` 最新优先。
 - `GET /app/home`：首页数据。`recommendedTemplates` 推荐/置顶优先，其余按 `createdAt DESC, id DESC`；`hotTemplates` 按使用和收藏热度排序，同分时最新优先。`popupAnnouncement` 按后台启用、有效期、投放目标和 `show_frequency` 频率规则返回；登录用户会记录 `last_popup_at/popup_count`，用于控制 `once/once_per_day/every_open/list_only`。`homeAnnouncements` 返回可展示的首页公告卡片数据，包含 `popup/home/profile/system/activity/maintenance` 类型，但排除 `show_frequency=list_only`，且不因用户已读、关闭或当天已弹出而隐藏公告条。
+- `GET /home`：与 `/app/home` 相同的兼容入口；新代码应使用 `/app/home`。
 
 ### 用户认证
 
+- `POST /auth/register`：PC 用户网页端邮箱注册，请求 `{ email, password, nickname?, inviteCode? }`，返回用户会话。
+- `POST /auth/login`：PC 用户网页端邮箱登录，请求 `{ email, password }`，返回用户会话。
 - `POST /auth/wechat-login`
 - `POST /auth/refresh-token`
+- `POST /auth/logout`：清理 cookie 形式的 refresh token；使用 localStorage 的客户端仍应自行清理本地 token。
 - `GET /users/me`
 - `PUT /users/me`
 - `GET /users/me/full`
@@ -301,6 +307,8 @@ CORS_ALLOWED_ORIGINS=https://api.example.com,https://admin.example.com
 - `GET /tasks`
 - `GET /tasks/:id`
 - `POST /tasks/:id/cancel`
+- `POST /tasks/:id/retry`：重新生成任务；PC 用户网页端请求必须携带 `Idempotency-Key`，避免重复创建任务。
+- `POST /tasks/quote`：根据当前 `tierKey/tierId` 和参数生成任务报价；报价只用于展示，创建任务时服务端仍会重新校验并冻结实际积分。
 - `POST /tasks/optimize-prompt`
 - `POST /tasks/script`
 - `POST /tasks/prompt`
@@ -429,6 +437,31 @@ CORS_ALLOWED_ORIGINS=https://api.example.com,https://admin.example.com
 
 直传流程：先调 `/files/credential` 获取 `storageKey/fileId/fileNo` 和云存储凭证；上传成功后调 `/files/notify`。七牛/又拍云服务端回调必须带 `UPLOAD_CALLBACK_SECRET`，且只确认已由凭证接口创建的占位文件。私有文件的 `url/cdnUrl` 会返回 `/files/:fileNo/content`，调用时必须携带当前用户 Bearer Token；公开文件继续返回对象存储或 CDN 地址。
 
+### 用户网页端项目与资产库
+
+以下接口均要求用户 Bearer Token；它们由 `user-web` 使用，不能因小程序暂未调用而删除。
+
+- `GET /projects`：支持 `status=active|archived` 查询参数。
+- `POST /projects`：请求 `{ name }`。
+- `GET /projects/:id`
+- `PUT /projects/:id`：请求 `{ name }`。
+- `POST /projects/:id/archive`
+- `POST /projects/:id/restore`
+- `GET /assets`：支持 `projectId/mediaType/keyword/favorite/status=active|trashed/page/pageSize` 查询参数。
+- `POST /assets`：将已上传文件加入资产库，请求 `{ fileId, projectId?, name? }`。
+- `GET /assets/:id`
+- `PATCH /assets/:id`：更新资产名称、项目或收藏状态。
+- `DELETE /assets/:id`：软删除到回收站。
+- `POST /assets/:id/restore`
+- `POST /assets/batch`：请求 `{ ids, action: 'delete'|'restore'|'move'|'favorite', projectId?, isFavorite? }`。
+
+### 消息通知
+
+- `GET /notifications/unread-count`
+- `GET /notifications?page=&pageSize=`
+- `POST /notifications/:id/read`
+- `POST /notifications/read-all`
+
 ### 公告、法律、合规
 
 - `GET /announcements/popup`：获取当前用户可弹出的第一条弹窗公告，按 `show_frequency` 控制：`once` 每个用户一次，`once_per_day` 每天一次，`every_open` 每次打开可弹，`list_only` 不弹窗。
@@ -466,6 +499,7 @@ CORS_ALLOWED_ORIGINS=https://api.example.com,https://admin.example.com
 - `GET /admin/files`：后台文件列表。返回 `url/displayUrl/previewUrl/copyUrl/deliveryUrl/accessUrl/cdnUrl/storageUrl/publicProxyUrl`；`deliveryUrl/copyUrl` 用于复制或保存到小程序配置，`previewUrl/accessUrl` 用于后台即时预览（COS 私有桶为下载签名 URL）作为兜底；用户生成内容（`refType=task_output`）额外返回 `generated=true`、`generatedPrompt`、`taskId`
 - `GET /admin/files/stats`
 - `POST /admin/files/upload`：后台上传图片/视频，multipart 字段 `file`，可选 `category/fileCategory/refType/refId`；支持 jpg/png/webp、mp4/mov/webm/avi，返回统一 `{ code, message, data: { url, deliveryUrl, publicUrl, publicProxyUrl, previewUrl, copyUrl, accessUrl, rawUrl, storageUrl, cdnUrl, fileId, fileNo, mimeType } }`。服务端使用临时文件 + 流式转存，避免大视频整块进入内存。`deliveryUrl/url/publicUrl/copyUrl/storageUrl/cdnUrl` 优先是长期可展示地址；`publicProxyUrl` 是后端公开代理兜底地址，且支持 `Range` 分段响应。后台即时预览优先使用最新 `accessUrl/previewUrl` 签名地址；长期保存到模板/配置时优先使用 `deliveryUrl/publicUrl/cdnUrl/storageUrl/url`，避免小程序拿到短期签名地址。`GET /templates*` 与 `GET /public/templates` 下发前会把可匹配到 `files` 表的历史代理地址或裸对象存储地址优先转换为 CDN 地址
+- `GET /admin/files/:fileNo/content`：后台受控预览或下载文件内容。
 - `DELETE /admin/files/:id`
 - `POST /admin/files/batch-delete`
 - `PUT /admin/files/:id/visibility`
@@ -532,6 +566,10 @@ CORS_ALLOWED_ORIGINS=https://api.example.com,https://admin.example.com
 - `GET /admin/membership/versions`
 - `POST /admin/membership/versions`
 - `PUT /admin/membership/versions/:id`
+- `GET /admin/membership/versions/:id/rights`
+- `GET /admin/membership/versions/:id/rights-with-plans`
+- `PUT /admin/membership/versions/:id/rights`
+- `PUT /admin/membership/plans/batch-rights`
 - `PUT /admin/membership/plans/:id/feature-discounts`
 - `GET /admin/point-tasks`
 - `POST /admin/point-tasks`
@@ -608,6 +646,7 @@ CORS_ALLOWED_ORIGINS=https://api.example.com,https://admin.example.com
 - `POST /admin/config-check/manual-unverify`
 - `GET /admin/system/version`
 - `GET /admin/system/check`
+- `GET /admin/system/metrics`
 - `GET /admin/system/update-packages`
 - `POST /admin/system/update-packages/upload`
 - `POST /admin/system/update-packages/precheck`

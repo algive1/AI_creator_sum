@@ -1,4 +1,6 @@
-# 部署指南
+# 部署、更新与本地验收指南
+
+最后核对：2026-08-29。本文是部署、更新、全新重装、小程序发布和本地联调的唯一主文档。
 
 ## ooa8.com 用户网页端
 
@@ -63,12 +65,13 @@ curl http://127.0.0.1:3000/health
 - `/api/v1/*` 不被前端 SPA 回退吞掉。
 - 小程序 API 和上传静态权限校验保持现状。
 
-本文是服务端和后台的唯一主部署文档。旧的 `DEPLOYMENT_GUIDE.md` 不再维护，小白快速顺序见 `BEGINNER_GUIDE.md`。
+小白快速顺序见 `BEGINNER_GUIDE.md`。旧的部署、运行结构、全新重装和本地端口文档只保留兼容入口，不再维护细节。
 
 适用范围：
 
 - 后端 `server`
 - 管理后台 `admin-web`
+- PC 用户网页端 `user-web`
 - 后台在线更新
 
 不包含：
@@ -173,7 +176,7 @@ proxy_read_timeout 300s;
 在 Windows 的 WSL 里执行：
 
 ```bash
-cd /mnt/i/AI_creator_sum/ai-creator-server
+cd <仓库根目录>/ai-creator-server
 bash scripts/build-release.sh <版本号>
 ```
 
@@ -402,7 +405,7 @@ VITE_API_BASE_URL=https://你的域名/api/v1
 构建：
 
 ```bash
-cd /mnt/i/AI_creator_sum/uni-app
+cd <仓库根目录>/uni-app
 npm ci
 npm run build:mp-weixin
 ```
@@ -434,7 +437,7 @@ uni-app/dist/build/mp-weixin
 打包新版本：
 
 ```bash
-cd /mnt/i/AI_creator_sum/ai-creator-server
+cd <仓库根目录>/ai-creator-server
 bash scripts/build-release.sh <新版本号>
 ```
 
@@ -640,3 +643,41 @@ mysql -u root -p ai_creator -e "UPDATE admin_users SET password_hash='刚才复�
 cd /www/wwwroot/ai-creator/current/server
 npm run db:migrate
 ```
+
+---
+
+## 11. 全新重装（代码和数据库均不保留）
+
+只有在已经确认不保留旧用户、订单、积分、会员、任务、上传文件和后台配置时，才执行全新重装；需要保留任一数据时，应先从备份恢复，而不是重装。
+
+按本文第 1～4 节完成基础环境、数据库、发布包、构建和安装向导。开始前确认以下运行态属于本次部署，避免旧状态误判为已安装：
+
+```text
+/www/wwwroot/ai-creator/current
+/www/wwwroot/ai-creator/shared/.env
+/www/wwwroot/ai-creator/shared/.env.installed
+/www/wwwroot/ai-creator/.pm2
+```
+
+重装完成后按第 6、7、9 节依次配置后台、单独构建小程序并完成上线检查。不要复制旧的 `current`、`shared/.env`、`.env.installed` 或 PM2 运行态；安装向导会为新 release 生成并绑定正确的运行结构。
+
+---
+
+## 12. 本地联调（服务端与管理后台）
+
+Windows PowerShell 在 `ai-creator-server` 目录执行：
+
+```powershell
+.\scripts\local-test.ps1 -AdminPassword '<仅本机使用的临时密码>'
+```
+
+脚本默认启动后端 `http://127.0.0.1:3137/health` 和管理后台 `http://127.0.0.1:5173/login`；默认端口被占用时会自动寻找下一个空闲端口，实际端口写入 `server/runtime/local-test/ports.json`。本地管理员用户名可通过 `-AdminUsername` 指定，密码必须在启动时显式提供，且不应写入文档、提交记录或生产配置。
+
+常用命令：
+
+```powershell
+.\scripts\local-test.ps1 status
+.\scripts\local-test.ps1 stop
+```
+
+首次使用前分别在 `server`、`admin-web` 运行 `npm ci`。脚本只使用指定的本地测试数据库并在 `server/runtime/local-test` 写入 PID 与日志，不会修改 `server/.env`。

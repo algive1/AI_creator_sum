@@ -468,11 +468,13 @@ Express 会把本地上传目录挂到 `LOCAL_BASE_URL`。开发环境可用 `/s
 
 ## 发布包脚本
 
-当前只维护两个根目录脚本：
+发布包相关的根目录脚本只有两个：
 
 - `scripts/build-release.sh`：构建验证并生成 `.tar.gz` 发布包。
 - `scripts/build-release.sh` 会执行后端架构主线检查、`check:payment`、`check:migrations-idempotent`、`check:video-pricing` 和 `check:xiaoma-video-params`；需要确认真实微信收款配置时，用 `REQUIRE_WECHAT_PAY_READY=1 bash scripts/build-release.sh <version>`。
 - `scripts/inspect-release.sh`：检查发布包结构和危险文件。
+
+本地服务端与管理后台联调使用 `scripts/local-test.ps1`，流程统一记录在 [DEPLOYMENT.md](DEPLOYMENT.md)；它不是发布包脚本。
 
 不要再新增重复的部署、诊断、更新脚本；优先把运行期检查放到 `server/scripts/check-*.ts` 或后台更新服务中。
 
@@ -481,4 +483,4 @@ Express 会把本地上传目录挂到 `LOCAL_BASE_URL`。开发环境可用 `/s
 - API 有变化时更新 [API.md](API.md)，同时同步后台的 `admin-web/src/pages/ApiReference.tsx`。
 - 部署、打包、更新流程变化时更新 [DEPLOYMENT.md](DEPLOYMENT.md)。
 - 代码结构、配置键、开发约定变化时更新本文档。
-- 不再新增按模块拆散的长文档，除非内容无法自然合并进这三个维护文档。
+- 完成型的修复、同步、诊断和发布记录移入 `docs/archive/`；不要将它们与当前规范混放。
