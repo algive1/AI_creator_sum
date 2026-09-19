@@ -12,6 +12,7 @@ const defaultPreferences = {
   systemPrompt: '',
   imagePlatformWatermarkEnabled: true,
   imagePlatformWatermarkOffConfirmed: false,
+  phoneAuthorizationPrompted: false,
   themeSource: 'system',
 };
 
@@ -53,6 +54,11 @@ function normalizeNickname(value: string | undefined, email: string): string {
   return email.split('@')[0].slice(0, 32) || 'AI Creator';
 }
 
+function maskPhone(phone: unknown): string | null {
+  const value = String(phone || '').trim();
+  return value ? value.replace(/(\d{3})\d{4}(\d{4})/, '$1****$2') : null;
+}
+
 async function buildUserAuthPayload(user: any, isNewUser: boolean) {
   const [points] = await query<any>(
     'SELECT balance, total_earned, total_spent, frozen_balance FROM point_accounts WHERE user_id = ?',
@@ -71,6 +77,8 @@ async function buildUserAuthPayload(user: any, isNewUser: boolean) {
       email: user.email || '',
       nickname: user.nickname,
       avatarUrl: user.avatar_url,
+      phone: maskPhone(user.phone),
+      phoneBound: Boolean(user.phone),
       accountType: user.account_type,
       status: user.status,
       isNewUser,
@@ -259,6 +267,8 @@ export async function findOrCreateUserByOpenid(openid: string, unionid?: string)
         displayId: formatUserDisplayId(user.id),
         nickname: user.nickname,
         avatarUrl: user.avatar_url,
+        phone: maskPhone(user.phone),
+        phoneBound: Boolean(user.phone),
         accountType: user.account_type,
         status: user.status,
         isNewUser,
@@ -317,6 +327,8 @@ async function loginExistingUserByOpenid(openid: string, unionid?: string) {
       displayId: formatUserDisplayId(user.id),
       nickname: user.nickname,
       avatarUrl: user.avatar_url,
+      phone: maskPhone(user.phone),
+      phoneBound: Boolean(user.phone),
       accountType: user.account_type,
       status: user.status,
       isNewUser: false,
@@ -515,7 +527,7 @@ export async function getUserFullData(userId: number) {
       displayId: formatUserDisplayId(user.id),
       nickname: user.nickname || '',
       avatarUrl: user.avatar_url || '',
-      phone: user.phone ? user.phone.replace(/(\d{3})\d{4}(\d{4})/, '$1****$2') : null,
+      phone: maskPhone(user.phone),
       phoneBound: !!user.phone,
       openidBound: !!user.openid,
       preferences: parsePreferences(profile?.preferences),

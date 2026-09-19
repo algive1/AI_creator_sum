@@ -181,7 +181,7 @@
         <image class="auth-avatar" :src="defaultAvatar" mode="aspectFit" />
         <view class="auth-title">登录后继续使用</view>
         <view class="auth-copy">同步积分、会员和作品库。</view>
-        <button class="auth-primary" :loading="loginLoading" @tap="confirmWechatLogin">微信登录</button>
+        <button class="auth-primary" :loading="loginLoading" @tap="confirmWechatLogin">手机号快捷登录</button>
         <button class="auth-secondary" @tap="closeLoginDialog">暂不登录</button>
       </view>
     </view>
@@ -599,7 +599,7 @@ async function requireLogin(action: () => void) {
   pendingAction.value = action;
   const loggedInNow = await ensureLoggedIn({
     title: '登录后继续使用',
-    subtitle: '登录并授权手机号后，可同步积分、会员和作品库。'
+    subtitle: '登录后可同步积分、会员和作品库。'
   });
   if (loggedInNow) {
     continuePendingAction();
@@ -621,7 +621,7 @@ async function confirmWechatLogin() {
   try {
     const loggedInNow = await ensureLoggedIn({
       title: '登录后继续使用',
-      subtitle: '登录并授权手机号后，可同步积分、会员和作品库。'
+      subtitle: '登录后可同步积分、会员和作品库。'
     });
     if (loggedInNow) {
       showLoginDialog.value = false;
@@ -683,7 +683,7 @@ async function handleGetPhoneNumber(event: any) {
 
 function loginErrorText(error: unknown) {
   const message = error instanceof Error ? error.message.trim() : '';
-  return message ? message.slice(0, 60) : '微信登录失败，请稍后重试';
+  return message ? message.slice(0, 60) : '登录失败，请稍后重试';
 }
 </script>
 

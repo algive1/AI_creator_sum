@@ -4,7 +4,7 @@
       <view class="login-logo">AI</view>
       <view class="login-title">登录 AI艺术生成工坊</view>
       <view class="login-desc">同步积分、会员、历史作品和生成任务</view>
-      <button class="primary-btn" @tap="wechatLogin">微信一键登录</button>
+      <button class="primary-btn" @tap="wechatLogin">手机号快捷登录</button>
       <button v-if="showDevLogin" class="ghost-btn dev-btn" @tap="devLoginAction">开发环境登录</button>
       <button class="link-btn" @tap="goAgreement">查看用户协议和隐私政策</button>
     </view>
@@ -58,7 +58,7 @@ function goAgreement() {
 function loginErrorText(error: unknown, fallback?: string) {
   const message = error instanceof Error ? error.message.trim() : '';
   if (message) return message.slice(0, 60);
-  return fallback || (showDevLogin ? '微信登录失败，可尝试开发环境登录' : '微信登录失败，请稍后重试');
+  return fallback || (showDevLogin ? '登录失败，可尝试开发环境登录' : '登录失败，请稍后重试');
 }
 
 function resolveInviteCode(query?: Record<string, unknown>) {

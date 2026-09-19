@@ -29,7 +29,7 @@ export function loginByUniCode(inviteCode?: string) {
       provider: 'weixin',
       success: (res) => {
         if (!res.code) {
-          reject(new Error('微信登录未返回 code'));
+          reject(new Error('登录凭证获取失败，请稍后重试'));
           return;
         }
         wechatLogin(res.code, inviteCode).then(resolve).catch(reject);

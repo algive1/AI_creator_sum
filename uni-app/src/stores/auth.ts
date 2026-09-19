@@ -66,6 +66,21 @@ export const useAuthStore = defineStore('auth', {
       this.user = nextUser;
       await setStorage(STORAGE_KEYS.user, nextUser);
     },
+    async markPhoneAuthorizationPrompted() {
+      const currentUser = this.user || {};
+      const currentPreferences = currentUser.preferences && typeof currentUser.preferences === 'object'
+        ? currentUser.preferences as Record<string, unknown>
+        : {};
+      const nextUser = {
+        ...currentUser,
+        preferences: {
+          ...currentPreferences,
+          phoneAuthorizationPrompted: true,
+        },
+      };
+      this.user = nextUser;
+      await setStorage(STORAGE_KEYS.user, nextUser);
+    },
     async loginWithWechat(inviteCode?: string) {
       const payload = await loginByUniCode(inviteCode);
       await this.applyLogin(payload);

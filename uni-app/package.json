@@ -9,6 +9,7 @@
     "build:mp-weixin": "uni build -p mp-weixin",
     "check:mp-size": "node scripts/check-mp-weixin-size.mjs",
     "test:login-guard": "node --test src/utils/login-guard.test.mjs",
+    "test:login-review-compliance": "node --test src/pages/login-review-compliance.test.mjs",
     "test:ai-image-ratio-conflict": "node --test src/pages/ai-image-ratio-conflict.test.mjs",
     "typecheck": "vue-tsc --noEmit"
   },

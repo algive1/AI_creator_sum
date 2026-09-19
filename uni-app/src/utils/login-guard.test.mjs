@@ -11,15 +11,23 @@ function read(relativePath) {
   return readFileSync(join(sourceRoot, relativePath), 'utf8');
 }
 
-test('login guard completes login only after phone binding succeeds', () => {
+test('new accounts may complete login without binding a phone', () => {
   const guardPath = join(sourceRoot, 'utils/login-guard.ts');
   assert.equal(existsSync(guardPath), true, 'login guard utility should exist');
   const guardSource = read('utils/login-guard.ts');
   assert.match(guardSource, /export async function ensureLoggedIn/);
   assert.match(guardSource, /loginWithWechatTemporary/);
-  assert.match(guardSource, /bindPhoneByCode\([^,\n]+,\s*pendingLogin\.token\)/);
-  assert.match(guardSource, /applyLogin\(pendingLogin\)/);
+  assert.match(guardSource, /bindPhoneByCode\([^,\n]+,\s*loginPayload\.token\)/);
+  assert.match(guardSource, /applyLogin\(loginPayload\)/);
   assert.match(guardSource, /markPhoneBoundFromProfile\(profile\)/);
+  assert.match(guardSource, /completeOptionalPhoneLogin/);
+  assert.match(guardSource, /recordPhoneAuthorizationPrompted\(\)/);
+});
+
+test('a previously phone-bound account skips the phone authorization dialog', () => {
+  const guardSource = read('utils/login-guard.ts');
+  assert.match(guardSource, /if \(isPhoneBound\(loginPayload\.user\)\) \{/);
+  assert.match(guardSource, /await authStore\.applyLogin\(loginPayload\);\s*\n\s*uni\.showToast\(\{ title: '登录成功'/);
 });
 
 test('login dialog advances to phone authorization after temporary login succeeds', () => {
@@ -30,11 +38,10 @@ test('login dialog advances to phone authorization after temporary login succeed
   assert.doesNotMatch(loginDialog, /closeOnMinor:\s*false/);
 });
 
-test('existing token sessions must bind phone before protected work continues', () => {
+test('existing token sessions may continue without a phone binding', () => {
   const guardSource = read('utils/login-guard.ts');
-  assert.match(guardSource, /if \(authStore\.isLoggedIn\) return ensurePhoneBound/);
-  assert.match(guardSource, /async function ensurePhoneBound/);
-  assert.match(guardSource, /phoneBound/);
+  assert.match(guardSource, /if \(authStore\.isLoggedIn\) return true/);
+  assert.doesNotMatch(guardSource, /ensurePhoneBound/);
 });
 
 test('phone binding persists the bound state for later authorization checks', () => {
@@ -68,7 +75,7 @@ test('phone authorization dialogs hide decorative visuals', () => {
   const guardSource = read('utils/login-guard.ts');
   const dialogs = [...guardSource.matchAll(/await showAppDialog\(\{([\s\S]*?)\n  \}\);/g)].map((match) => match[1]);
   const phoneDialogs = dialogs.filter((block) => /variant:\s*'phone'/.test(block));
-  assert.equal(phoneDialogs.length >= 2, true, 'expected both phone authorization dialogs to be present');
+  assert.equal(phoneDialogs.length >= 1, true, 'expected phone authorization dialog to be present');
   for (const block of phoneDialogs) {
     assert.match(block, /hideVisual:\s*true/);
     assert.doesNotMatch(block, /image:\s*['"]/);
@@ -79,6 +86,8 @@ test('phone authorization dialogs hide decorative visuals', () => {
   assert.match(homePhoneDialog, /variant:\s*'phone'/);
   assert.match(homePhoneDialog, /hideVisual:\s*true/);
   assert.doesNotMatch(homePhoneDialog, /image:\s*['"`]/);
+  assert.match(homeSource, /phoneAuthorizationPrompted\.value/);
+  assert.match(homeSource, /dismissPhonePrompt/);
 });
 
 test('prompt guide dialogs keep close behavior on primary and secondary actions', () => {

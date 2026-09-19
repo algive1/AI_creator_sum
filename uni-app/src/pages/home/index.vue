@@ -185,13 +185,14 @@ import { PAGE_ROUTES, STORAGE_KEYS } from '@/utils/constants';
 import { isDevFallbackEnabled, warnDevFallback } from '@/utils/dev-fallback';
 import { normalizeBackendMediaUrl } from '@/utils/media-url';
 import { acceptLegalDocuments, getLegalDocuments } from '@/api/config';
-import { closeCurrentAppDialog, showAppDialog, showMemberRequiredDialog } from '@/utils/app-dialog';
+import { showAppDialog, showMemberRequiredDialog } from '@/utils/app-dialog';
 import type { CreativeTemplate } from '@/utils/mock';
 import { markAnnouncementRead, closeAnnouncement } from '@/api/announcements';
 import { homeEntryDisabledMessage, isHomeEntryMaintenanceMode, type HomeEntryKey } from '@/utils/home-entry';
 import { isPurchaseEnabled, showPurchaseUnavailable } from '@/utils/purchase-guard';
 import { createShareMessage, createShareTimeline, enableShareMenu } from '@/utils/share';
 import { ensureLoggedIn } from '@/utils/login-guard';
+import { hasPhoneAuthorizationPrompted, recordPhoneAuthorizationPrompted } from '@/utils/phone-authorization';
 
 type EntryKey = HomeEntryKey;
 
@@ -309,6 +310,9 @@ const phoneBound = computed(() => Boolean(
   || userStore.user?.phone
   || authStore.user?.phoneBound
   || authStore.user?.phone
+));
+const phoneAuthorizationPrompted = computed(() => (
+  hasPhoneAuthorizationPrompted(authStore.user) || hasPhoneAuthorizationPrompted(userStore.user)
 ));
 const visualAssets = computed(() => {
   const value = configStore.publicConfig?.visualAssets;
@@ -536,27 +540,31 @@ function syncLegalConsentToServer(docs: LegalDocument[], scene: string) {
 }
 
 async function maybeShowPhoneDialog() {
-  if (!authStore.isLoggedIn || phoneBound.value || phonePromptDismissed.value) return;
+  if (!authStore.isLoggedIn || phoneBound.value || phoneAuthorizationPrompted.value || phonePromptDismissed.value) return;
   await showAppDialog({
     variant: 'phone',
     hideVisual: true,
-    title: '绑定手机号',
-    subtitle: '用于订单通知、生成结果提醒、售后联系和账号安全验证。',
-    primaryLabel: phoneBinding.value ? '绑定中' : '授权手机号',
+    title: '手机号快捷登录',
+    subtitle: '用于订单通知、生成结果提醒、售后联系和账号安全验证；暂不绑定也可继续使用。',
+    primaryLabel: phoneBinding.value ? '绑定中' : '手机号快捷登录',
     secondaryLabel: '暂不绑定',
     primaryOpenType: 'getPhoneNumber',
     onGetPhoneNumber: async (event) => {
       const ok = await handleGetPhoneNumber(event);
       if (ok) {
         phonePromptDismissed.value = true;
-        closeCurrentAppDialog('phone');
+        return true;
       }
-      return false;
+      await dismissPhonePrompt();
+      return true;
     },
-    onSecondary: () => {
-      phonePromptDismissed.value = true;
-    }
+    onSecondary: () => dismissPhonePrompt()
   });
+}
+
+async function dismissPhonePrompt() {
+  phonePromptDismissed.value = true;
+  await recordPhoneAuthorizationPrompted();
 }
 
 async function maybeShowAnnouncementDialog() {
@@ -880,7 +888,7 @@ async function toggleFavorite(item: InspirationItem) {
   if (!authStore.isLoggedIn) {
     const loggedIn = await ensureLoggedIn({
       title: '登录后收藏灵感',
-      subtitle: '登录并授权手机号后，可同步收藏到你的账号。'
+      subtitle: '登录后可同步收藏到你的账号。'
     });
     if (!loggedIn) return;
   }
