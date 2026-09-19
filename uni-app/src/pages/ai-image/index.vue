@@ -717,6 +717,16 @@ function loadImageModelsForMode() {
     normalizeImageParams();
     return;
   }
+  const persistent = readPersistentCache<Record<string, unknown>[]>('ai_creator_image_models_' + featureKey, MODEL_PERSISTENT_CACHE_TTL_MS);
+  if (persistent?.length) {
+    models.value = persistent;
+    modelTiersLoading.value = false;
+    modelTiersLoaded.value = true;
+    imageModelCache.set(featureKey, { list: persistent, loadedAt: Date.now() });
+    selectedModelIndex.value = defaultModelIndex();
+    normalizeImageParams();
+    return;
+  }
   const requestToken = ++imageModelRequestToken;
   models.value = [];
   modelTiersLoading.value = true;
