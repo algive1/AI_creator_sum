@@ -21,7 +21,8 @@ assert(script.includes("[ValidateSet('start', 'stop', 'status')]"), 'local test 
 assert(script.includes('$BackendPort = 3137'), 'local test script should default backend to port 3137');
 assert(script.includes('$AdminPort = 5173'), 'local test script should default admin web to port 5173');
 assert(script.includes("$AdminUsername = 'local_admin'"), 'local test script should publish a stable local admin username');
-assert(script.includes("$AdminPassword = 'LocalTest#2026'"), 'local test script should publish a stable local admin password');
+assert(script.includes('$AdminPassword = $env:LOCAL_TEST_ADMIN_PASSWORD'), 'local test script should read an explicitly supplied local admin password');
+assert(script.includes('AdminPassword is required'), 'local test script should reject a missing local admin password');
 assert(script.includes('VITE_API_PROXY_TARGET'), 'local test script should point admin dev proxy at the local backend port');
 assert(script.includes('ensure local admin'), 'local test script should ensure the documented local admin account exists');
 assert(script.includes('server/runtime/local-test'), 'local test script should keep pid/log files in ignored runtime state');
@@ -30,7 +31,8 @@ assert(script.includes('Resolve-LocalPort'), 'local test script should automatic
 assert(doc.includes('http://127.0.0.1:3137/health'), 'local test doc should document the backend health URL');
 assert(doc.includes('http://127.0.0.1:5173/login'), 'local test doc should document the admin login URL');
 assert(doc.includes('local_admin'), 'local test doc should document the local admin username');
-assert(doc.includes('LocalTest#2026'), 'local test doc should document the local admin password');
+assert(doc.includes('-AdminPassword'), 'local test doc should require an explicitly supplied local admin password');
+assert(!doc.includes('LocalTest#2026'), 'local test doc must not contain a plaintext password');
 assert(doc.includes('.\\scripts\\local-test.ps1'), 'local test doc should document the one-command script entry');
 assert(doc.includes('.\\scripts\\local-test.ps1 stop'), 'local test doc should document how to stop local ports');
 assert(doc.includes('自动寻找下一个空闲端口'), 'local test doc should explain automatic fallback ports');

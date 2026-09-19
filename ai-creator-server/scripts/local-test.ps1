@@ -9,7 +9,7 @@ param(
   [string]$DbUser = 'root',
   [string]$DbPassword = '',
   [string]$AdminUsername = 'local_admin',
-  [string]$AdminPassword = 'LocalTest#2026'
+  [string]$AdminPassword = $env:LOCAL_TEST_ADMIN_PASSWORD
 )
 
 $ErrorActionPreference = 'Stop'
@@ -133,7 +133,7 @@ function Show-LocalStatus {
   $adminStatus = if ($adminAlive) { 'running' } else { 'stopped' }
   Write-LocalInfo "backend port: http://127.0.0.1:$BackendPort/health ($backendStatus)"
   Write-LocalInfo "admin web:    http://127.0.0.1:$AdminPort/login ($adminStatus)"
-  Write-LocalInfo "admin login:  $AdminUsername / $AdminPassword"
+  Write-LocalInfo "admin login:  $AdminUsername (password supplied when started; not persisted)"
   Write-LocalInfo "logs:         $StateDir"
 }
 
@@ -307,6 +307,10 @@ function Assert-NodeDependencies {
 }
 
 function Start-LocalPorts {
+  if ([string]::IsNullOrWhiteSpace($AdminPassword)) {
+    throw 'AdminPassword is required. Pass -AdminPassword with a local-only temporary password.'
+  }
+
   Initialize-LocalState
   Assert-NodeDependencies
 

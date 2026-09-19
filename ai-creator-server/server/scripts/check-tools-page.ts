@@ -106,11 +106,11 @@ assertContains('mini program tool run route constant', constants, "toolRun: '/pa
 assertContains('mini program tools page', pages, 'pages/tools/index');
 assertContains('mini program tool run page', pages, 'pages/tools/run/index');
 assertContains('tabbar tools icon', tabbar, 'tab-tools.svg');
-assertContains('tabbar legacy history text normalization', tabbar, "text === '资产'");
+assertContains('tabbar legacy history text normalization', tabbar, "['资产', '记录'].includes(text)");
 assertContains('tools page back topbar', toolsPage, 'title="工具" back');
 assertContains('tools page empty state', toolsPage, 'empty-panel');
-assertContains('tools page svg icon renderer', toolsPage, 'toolIconUrl(tool.icon)');
-assertContains('tools page opens run page', toolsPage, 'openTool(tool)');
+assertContains('tools page svg icon renderer', toolsPage, 'toolIconUrl(item.tool.icon)');
+assertContains('tools page opens run page', toolsPage, 'openDisplayItem(item)');
 assertContains('tools run page back topbar', toolsRunPage, 'AppTopbar');
 assertContains('tools run page empty state', toolsRunPage, 'empty-panel');
 assertContains('tools run page points cost label', toolsRunPage, 'pointsCost');
