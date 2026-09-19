@@ -652,7 +652,11 @@ const referenceUploadMode = computed(() => selectedCapabilities.value.referenceU
 const isFirstFrameVideoMode = computed(() => videoMode.value === '图生视频');
 const isReferenceVideoMode = computed(() => videoMode.value === '参考生视频');
 const isMultiSourceVideoMode = computed(() => videoMode.value === '视频编辑' && maxVideoUrls.value > 1);
-const showDynamicMediaUpload = computed(() => isReferenceVideoMode.value || isMultiSourceVideoMode.value);
+// Capability-driven media input: reference-video and video-edit models render
+// exactly the media types declared by the bound upstream model. This avoids
+// falling back to the legacy single-video form when an edit model accepts
+// image/audio references in addition to source video.
+const showDynamicMediaUpload = computed(() => isReferenceVideoMode.value || (videoMode.value === '视频编辑' && maxVideoUrls.value > 0));
 const supportedInputMediaTypes = computed<InputMediaType[]>(() => normalizeInputMediaTypes(selectedCapabilities.value));
 const mediaUploadCards = computed<MediaUploadCard[]>(() => supportedInputMediaTypes.value.map((mediaType) => {
   const count = countAssetsByMediaType(mediaType);
@@ -665,11 +669,7 @@ const mediaUploadCards = computed<MediaUploadCard[]>(() => supportedInputMediaTy
     full: max > 0 && count >= max,
   };
 }).filter((card) => maxForMediaType(card.mediaType) > 0));
-const visibleMediaUploadCards = computed<MediaUploadCard[]>(() => (
-  isMultiSourceVideoMode.value
-    ? mediaUploadCards.value.filter((card) => card.mediaType === 'video')
-    : mediaUploadCards.value
-));
+const visibleMediaUploadCards = computed<MediaUploadCard[]>(() => mediaUploadCards.value);
 const visibleUploadedAssetCount = computed(() => {
   const mediaTypes = new Set(visibleMediaUploadCards.value.map((card) => card.mediaType));
   return assets.value.filter((asset) => mediaTypes.has(normalizeAssetMediaType(asset) as InputMediaType)).length;
