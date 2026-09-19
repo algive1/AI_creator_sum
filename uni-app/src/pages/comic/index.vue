@@ -105,6 +105,7 @@
     </view>
 
     <view id="creatorPanel" class="creator-panel">
+      <view class="pipeline-card"><view class="pipeline-title">漫剧工作流</view><view class="pipeline-steps"><view v-for="(label, key) in pipelineLabels" :key="key" class="pipeline-step" :class="{ active: pipelineStep === key, done: pipelineStepDone(key) }"><view class="pipeline-dot"></view><text>{{ label }}</text></view></view><view class="pipeline-hint">故事与角色 → 可编辑剧本 → 分镜预览 → 视频生成。角色、画风和比例贯穿整个项目。</view></view>
       <view class="creator-head">
         <view>
           <view class="creator-title">开始创作</view>
@@ -185,6 +186,9 @@
         @smart-fill="smartFillStoryPrompt"
       />
 
+      <view class="pipeline-actions"><button class="pipeline-secondary" :disabled="pipelineBusy" @tap="buildScript">{{ generatedScript ? '重新生成剧本' : '生成剧本' }}</button><button class="pipeline-secondary" :disabled="pipelineBusy || !generatedScript" @tap="buildStoryboard">{{ storyboardShots.length ? '重新拆分分镜' : '生成分镜' }}</button></view>
+      <view v-if="generatedScript" class="production-card"><view class="production-head"><text>剧本</text><text>{{ generatedScript.length }} 字</text></view><textarea v-model="generatedScript" class="script-editor" maxlength="8000" auto-height /></view>
+      <view v-if="storyboardShots.length" class="production-card"><view class="production-head"><text>分镜预览</text><text>{{ storyboardShots.length }} 镜</text></view><view v-for="(shot, index) in storyboardShots" :key="index" class="shot-row"><view class="shot-index">{{ index + 1 }}</view><view class="shot-copy"><view class="shot-title">{{ shot.title || ('镜头 ' + (index + 1)) }}</view><view class="shot-desc">{{ shot.description }}</view><view v-if="shot.dialogue" class="shot-dialogue">{{ shot.dialogue }}</view></view></view></view>
       <view class="form-section">
         <view class="form-title">角色设定</view>
         <input v-model="character" class="character-input" placeholder="主角身份、性格、服装或关键关系" placeholder-class="field-placeholder" />
@@ -238,11 +242,12 @@ import AppTabBar from '@/components/common/AppTabBar.vue';
 import AppTopbar from '@/components/common/AppTopbar.vue';
 import AppDialogHost from '@/components/common/AppDialogHost.vue';
 import LegacyPromptComposer from '@/components/legacy/LegacyPromptComposer.vue';
-import { createComicTask } from '@/api/comic';
+import { createComicTask, generateComicScript, generateComicStoryboard } from '@/api/comic';
 import { getVideoModels } from '@/api/ai-video';
 import { useAuthStore } from '@/stores/auth';
 import { useConfigStore } from '@/stores/config';
 import { PAGE_ROUTES } from '@/utils/constants';
+import { readPersistentCache, writePersistentCache } from '@/utils/persistent-cache';
 import { assertPrompt } from '@/utils/validator';
 import { isDevFallbackEnabled, warnDevFallback } from '@/utils/dev-fallback';
 import { discountLabel } from '@/utils/member';
@@ -365,6 +370,7 @@ const scriptPresets: ScriptPreset[] = [
     story: '少女进入一所只在雾中出现的学院，发现每间教室都对应一个学生的秘密。午夜图书管理员交给她一把钥匙，要求她在天亮前找到消失的第十三间教室。'
   }
 ];
+const pipelineLabels = { idea: '故事', script: '剧本', storyboard: '分镜', generate: '生成' } as const;
 const selectedGenre = ref(genres[0]);
 const selectedStyle = ref(styles[0]);
 const selectedRatio = ref(FALLBACK_COMIC_RATIOS[0]);
@@ -372,6 +378,12 @@ const selectedDuration = ref(FALLBACK_COMIC_DURATIONS[1]);
 const story = ref('');
 const character = ref('');
 const promptExpanded = ref(false);
+const pipelineStep = ref<'idea' | 'script' | 'storyboard' | 'generate'>('idea');
+const generatedScript = ref('');
+const storyboardShots = ref<Array<{ title: string; description: string; dialogue?: string }>>([]);
+const pipelineBusy = ref(false);
+const COMIC_DRAFT_CACHE_KEY = 'ai_creator_comic_studio_draft_v2';
+const COMIC_MODEL_CACHE_KEY = 'ai_creator_comic_models_v2';
 const activeMode = ref<CreationMode['key']>('text');
 const configStore = useConfigStore();
 const authStore = useAuthStore();
@@ -438,7 +450,8 @@ onShow(async () => {
   enableShareMenu();
   await authStore.hydrate();
   configStore.hydrate();
-  await configStore.loadPublicConfig({ force: true }).catch(() => undefined);
+  await configStore.loadPublicConfig().catch(() => undefined);
+  restoreComicDraft();
   if (comicMaintenanceMode.value) {
     showComicMaintenanceMessage();
   }
@@ -446,10 +459,13 @@ onShow(async () => {
     handleStoryboardDisabled();
     return;
   }
+  const cachedComicModels = readPersistentCache<Record<string, unknown>[]>(COMIC_MODEL_CACHE_KEY, 24 * 60 * 60_000);
+  if (cachedComicModels?.length) { models.value = cachedComicModels; selectedModelIndex.value = middleModelIndex(); normalizeComicParams(); }
   getVideoModels().then((res) => {
     const list = Array.isArray(res.list) ? res.list as Record<string, unknown>[] : [];
     if (!list.length && isDevFallbackEnabled) warnDevFallback('comic-tiers', 'GET /public/model-tiers returned empty list');
     models.value = list;
+    if (list.length) writePersistentCache(COMIC_MODEL_CACHE_KEY, list);
     selectedModelIndex.value = middleModelIndex();
     normalizeComicParams();
   }).catch(() => {
@@ -461,6 +477,7 @@ onShow(async () => {
 });
 
 watch(() => selectedModel.value?.tierKey, normalizeComicParams);
+watch([story, character, selectedGenre, selectedStyle, selectedRatio, selectedDuration, generatedScript, storyboardShots], saveComicDraft, { deep: true });
 
 onShareAppMessage(() => createShareMessage({
   title: '用 AI 创作漫画短剧',
@@ -622,8 +639,10 @@ async function submitManga() {
   });
   if (!loggedIn) return;
   try {
+    pipelineStep.value = 'generate';
+    const productionPrompt = storyboardShots.value.length ? storyboardShots.value.map((shot, index) => '镜头' + (index + 1) + '：' + shot.description + (shot.dialogue ? '；对白/旁白：' + shot.dialogue : '')).join('\n') : generatedScript.value.trim() || story.value;
     const result = await createComicTask<Record<string, unknown>>({
-      prompt: story.value,
+      prompt: productionPrompt,
       tierKey: selectedModel.value.tierKey,
       videoMode: 'text_to_video',
       ratio: selectedRatio.value,
@@ -632,7 +651,10 @@ async function submitManga() {
       autoScript: true,
       params: {
         genre: selectedGenre.value,
-        character: character.value
+        character: character.value,
+        sourceStory: story.value,
+        script: generatedScript.value,
+        storyboard: storyboardShots.value
       }
     });
     const id = Number(result.id || result.taskId);
@@ -642,6 +664,62 @@ async function submitManga() {
     }
     uni.navigateTo({ url: `${PAGE_ROUTES.result}?id=${id}&type=video` });
   } catch { /* 请求层会展示错误 */ }
+}
+
+
+function pipelineStepDone(key: string) {
+  const order = ['idea', 'script', 'storyboard', 'generate'];
+  return order.indexOf(key) < order.indexOf(pipelineStep.value);
+}
+async function buildScript() {
+  if (!story.value.trim()) { uni.showToast({ title: '请先填写剧情梗概', icon: 'none' }); return; }
+  const loggedIn = await ensureLoggedIn({ title: '登录后生成剧本', subtitle: '剧本与分镜会保存到当前漫剧创作流程。' });
+  if (!loggedIn) return;
+  pipelineBusy.value = true;
+  try {
+    const result = await generateComicScript<Record<string, unknown>>({ topic: story.value.trim(), style: selectedStyle.value, duration: selectedDuration.value, characters: character.value.trim() });
+    generatedScript.value = extractGeneratedText(result, ['script', 'content', 'text']);
+    if (!generatedScript.value) throw new Error('empty script');
+    storyboardShots.value = []; pipelineStep.value = 'script';
+  } catch { uni.showToast({ title: '剧本生成失败，请稍后重试', icon: 'none' }); }
+  finally { pipelineBusy.value = false; }
+}
+async function buildStoryboard() {
+  if (!generatedScript.value.trim()) return;
+  pipelineBusy.value = true;
+  try {
+    const result = await generateComicStoryboard<Record<string, unknown>>({ script: generatedScript.value.trim(), style: selectedStyle.value, ratio: selectedRatio.value });
+    storyboardShots.value = normalizeStoryboard(result);
+    if (!storyboardShots.value.length) throw new Error('empty storyboard');
+    pipelineStep.value = 'storyboard';
+  } catch { uni.showToast({ title: '分镜生成失败，请稍后重试', icon: 'none' }); }
+  finally { pipelineBusy.value = false; }
+}
+function extractGeneratedText(result: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) { const value = result?.[key]; if (typeof value === 'string' && value.trim()) return value.trim(); }
+  return '';
+}
+function normalizeStoryboard(result: Record<string, unknown>) {
+  const source = (result.storyboard || result.shots || result.scenes || result.list) as unknown;
+  if (Array.isArray(source)) return source.map((item, index) => {
+    const shot = item && typeof item === 'object' ? item as Record<string, unknown> : {};
+    return { title: String(shot.title || shot.shot || shot.scene || ('镜头 ' + (index + 1))), description: String(shot.description || shot.visual || shot.prompt || shot.content || ''), dialogue: String(shot.dialogue || shot.narration || '') };
+  }).filter((item) => item.description || item.dialogue);
+  const text = extractGeneratedText(result, ['storyboard', 'content', 'text']);
+  return text ? text.split(/\n+/).filter(Boolean).slice(0, 24).map((line, index) => ({ title: '镜头 ' + (index + 1), description: line })) : [];
+}
+function saveComicDraft() {
+  writePersistentCache(COMIC_DRAFT_CACHE_KEY, { story: story.value, character: character.value, genre: selectedGenre.value, style: selectedStyle.value, ratio: selectedRatio.value, duration: selectedDuration.value, script: generatedScript.value, storyboard: storyboardShots.value, step: pipelineStep.value });
+}
+function restoreComicDraft() {
+  const draft = readPersistentCache<Record<string, unknown>>(COMIC_DRAFT_CACHE_KEY, 7 * 24 * 60 * 60_000);
+  if (!draft) return;
+  if (!story.value) story.value = String(draft.story || '');
+  if (!character.value) character.value = String(draft.character || '');
+  selectedGenre.value = String(draft.genre || selectedGenre.value); selectedStyle.value = String(draft.style || selectedStyle.value);
+  selectedRatio.value = String(draft.ratio || selectedRatio.value); selectedDuration.value = String(draft.duration || selectedDuration.value);
+  generatedScript.value = String(draft.script || ''); storyboardShots.value = Array.isArray(draft.storyboard) ? draft.storyboard as Array<{ title: string; description: string; dialogue?: string }> : [];
+  const step = String(draft.step || 'idea'); if (['idea','script','storyboard','generate'].includes(step)) pipelineStep.value = step as 'idea'|'script'|'storyboard'|'generate';
 }
 
 function selectModel(index: number) {
@@ -1621,4 +1699,5 @@ function middleModelIndex() {
   color: #ffffff;
   box-shadow: none;
 }
+ .pipeline-card,.production-card{margin-bottom:24rpx;padding:24rpx;border-radius:22rpx;background:#fff;box-shadow:0 8rpx 24rpx rgba(83,65,160,.08)} .pipeline-title,.production-head{display:flex;justify-content:space-between;font-weight:900;font-size:28rpx}.pipeline-steps{display:flex;justify-content:space-between;margin-top:22rpx}.pipeline-step{display:flex;align-items:center;gap:7rpx;color:#9a96aa;font-size:22rpx}.pipeline-step.active,.pipeline-step.done{color:#6c4bff;font-weight:800}.pipeline-dot{width:14rpx;height:14rpx;border-radius:50%;background:#ddd8eb}.pipeline-step.active .pipeline-dot,.pipeline-step.done .pipeline-dot{background:#6c4bff}.pipeline-hint{margin-top:18rpx;color:#777184;font-size:22rpx;line-height:1.6}.pipeline-actions{display:grid;grid-template-columns:1fr 1fr;gap:16rpx;margin:20rpx 0}.pipeline-secondary{height:72rpx;border-radius:18rpx;background:#f1edff;color:#6847e8;font-size:24rpx;font-weight:800}.script-editor{width:100%;min-height:220rpx;margin-top:18rpx;padding:18rpx;box-sizing:border-box;border-radius:16rpx;background:#f8f7fb;font-size:24rpx;line-height:1.65}.shot-row{display:flex;gap:16rpx;padding:18rpx 0;border-bottom:1rpx solid #f0edf6}.shot-index{display:flex;align-items:center;justify-content:center;flex:0 0 46rpx;height:46rpx;border-radius:14rpx;background:#eee9ff;color:#6545dc;font-weight:900}.shot-title{font-size:24rpx;font-weight:900}.shot-desc,.shot-dialogue{margin-top:8rpx;color:#686372;font-size:22rpx;line-height:1.55}.shot-dialogue{color:#8a64c9}
 </style>
