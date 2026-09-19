@@ -60,5 +60,6 @@ jobs:
       - run: npm run test:login-review-compliance
       - run: npm run test:ai-image-ratio-conflict
       - run: npm run test:ai-video-capabilities
+      - run: npm run test:inspiration-media-cache
       - run: npm run build:mp-weixin
       - run: npm run check:mp-size
