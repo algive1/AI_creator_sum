@@ -262,6 +262,7 @@ import { getTemplates, useTemplate as useContentTemplate } from '@/api/template'
 import { updateMe } from '@/api/user';
 import { uploadAsset } from '@/api/upload';
 import { DEFAULT_RATIOS, FEATURE_KEYS, PAGE_ROUTES, STORAGE_KEYS } from '@/utils/constants';
+import { readPersistentCache, writePersistentCache } from '@/utils/persistent-cache';
 import { assertPrompt } from '@/utils/validator';
 import { isDevFallbackEnabled, warnDevFallback } from '@/utils/dev-fallback';
 import { discountLabel } from '@/utils/member';
@@ -484,7 +485,8 @@ const fallbackModels: ModelTier[] = [
     isDefault: false
   }
 ];
-const MODEL_CACHE_TTL_MS = 60_000;
+const MODEL_CACHE_TTL_MS = 5 * 60_000;
+const MODEL_PERSISTENT_CACHE_TTL_MS = 24 * 60 * 60_000;
 const TEMPLATE_CACHE_TTL_MS = 60_000;
 const imageModelCache = new Map<string, { list: Record<string, unknown>[]; loadedAt: number }>();
 const imageTemplateCache = new Map<string, { list: CreativeTemplate[]; loadedAt: number }>();
@@ -715,6 +717,16 @@ function loadImageModelsForMode() {
     normalizeImageParams();
     return;
   }
+  const persistent = readPersistentCache<Record<string, unknown>[]>('ai_creator_image_models_' + featureKey, MODEL_PERSISTENT_CACHE_TTL_MS);
+  if (persistent?.length) {
+    models.value = persistent;
+    modelTiersLoading.value = false;
+    modelTiersLoaded.value = true;
+    imageModelCache.set(featureKey, { list: persistent, loadedAt: Date.now() });
+    selectedModelIndex.value = defaultModelIndex();
+    normalizeImageParams();
+    return;
+  }
   const requestToken = ++imageModelRequestToken;
   models.value = [];
   modelTiersLoading.value = true;
@@ -726,6 +738,7 @@ function loadImageModelsForMode() {
     const list = Array.isArray(res.list) ? res.list as Record<string, unknown>[] : [];
     if (!list.length && isDevFallbackEnabled) warnDevFallback('image-tiers', `GET /public/model-tiers?feature=${featureKey} returned empty list`);
     imageModelCache.set(featureKey, { list, loadedAt: Date.now() });
+    writePersistentCache('ai_creator_image_models_' + featureKey, list);
     models.value = list;
     selectedModelIndex.value = defaultModelIndex();
     normalizeImageParams();

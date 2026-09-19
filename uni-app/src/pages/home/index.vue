@@ -378,7 +378,7 @@ async function refreshHomePage(reloadInspirations: boolean, force = false) {
   const authHydrated = authStore.hydrate().catch(() => undefined);
   const userHydrated = userStore.hydrate().catch(() => undefined);
 
-  const configPromise = configStore.loadPublicConfig({ force: true }).catch(() => undefined);
+  const configPromise = configStore.loadPublicConfig({ force }).catch(() => undefined);
   const configLoaded = await Promise.race([configPromise.then(() => true), delay(1200).then(() => false)]);
   if (configLoaded && shouldCheckLaunchRedirect.value) {
     shouldCheckLaunchRedirect.value = false;
