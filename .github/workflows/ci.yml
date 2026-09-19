@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    name: Server build and checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ai-creator-server/server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ai-creator-server/server/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+      - name: Provider parameter regression checks
+        run: |
+          npm run check:xiaoma-image-params
+          npm run check:xiaoma-video-params
+          npm run check:hongniao-video
+      - name: Architecture checks
+        run: |
+          npm run check:image-size
+          npm run check:video-pricing
+          npm run check:image-pricing
+          npm run check:architecture-unified
+
+  mini-program:
+    name: Mini-program typecheck and build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: uni-app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: uni-app/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test:login-guard
+      - run: npm run test:login-review-compliance
+      - run: npm run test:ai-image-ratio-conflict
+      - run: npm run test:ai-video-capabilities
+      - run: npm run build:mp-weixin
+      - run: npm run check:mp-size
