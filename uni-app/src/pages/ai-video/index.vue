@@ -851,6 +851,16 @@ function loadVideoModelsForMode() {
     normalizeVideoParams();
     return;
   }
+  const persistent = readPersistentCache<Record<string, unknown>[]>('ai_creator_video_models_' + featureKey, MODEL_PERSISTENT_CACHE_TTL_MS);
+  if (persistent?.length) {
+    models.value = persistent;
+    modelTiersLoading.value = false;
+    modelTiersLoaded.value = true;
+    videoModelCache.set(featureKey, { list: persistent, loadedAt: Date.now() });
+    selectedModelIndex.value = defaultModelIndex();
+    normalizeVideoParams();
+    return;
+  }
   const requestToken = ++videoModelRequestToken;
   models.value = [];
   modelTiersLoading.value = true;
