@@ -11,7 +11,8 @@
     "test:login-guard": "node --test src/utils/login-guard.test.mjs",
     "test:login-review-compliance": "node --test src/pages/login-review-compliance.test.mjs",
     "test:ai-image-ratio-conflict": "node --test src/pages/ai-image-ratio-conflict.test.mjs",
-    "typecheck": "vue-tsc --noEmit"
+    "typecheck": "vue-tsc --noEmit",
+    "test:ai-video-capabilities": "node --test src/pages/ai-video-capabilities.test.mjs"
   },
   "dependencies": {
     "@dcloudio/uni-app": "3.0.0-alpha-5010120260522001",
