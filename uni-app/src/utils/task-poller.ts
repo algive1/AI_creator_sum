@@ -2,6 +2,7 @@ import { getTasksByIds } from '@/api/task';
 import { isTaskEnded } from '@/utils/task-display';
 
 type TaskListener = (task: Record<string, unknown>) => void;
+type TaskPollingSubscription = () => void;
 
 class TaskPoller {
   private readonly taskIds = new Set<number>();
@@ -9,22 +10,24 @@ class TaskPoller {
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
 
-  add(taskId: number, listener?: TaskListener) {
-    if (!Number.isInteger(taskId) || taskId <= 0) return;
+  add(taskId: number, listener: TaskListener): TaskPollingSubscription {
+    if (!Number.isInteger(taskId) || taskId <= 0) return () => undefined;
     this.taskIds.add(taskId);
-    if (listener) {
-      const bucket = this.listeners.get(taskId) || new Set<TaskListener>();
-      bucket.add(listener);
-      this.listeners.set(taskId, bucket);
-    }
+    const bucket = this.listeners.get(taskId) || new Set<TaskListener>();
+    bucket.add(listener);
+    this.listeners.set(taskId, bucket);
     this.ensureTimer();
+    return () => this.removeListener(taskId, listener);
   }
 
   removeListener(taskId: number, listener: TaskListener) {
     const bucket = this.listeners.get(taskId);
     if (!bucket) return;
     bucket.delete(listener);
-    if (!bucket.size) this.listeners.delete(taskId);
+    if (bucket.size) return;
+    this.listeners.delete(taskId);
+    this.taskIds.delete(taskId);
+    if (!this.taskIds.size) this.stopTimer();
   }
 
   remove(taskId: number) {

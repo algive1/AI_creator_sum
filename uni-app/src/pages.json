@@ -1,7 +1,7 @@
 {
   "pages": [
     { "path": "pages/home/index", "style": { "navigationBarTitleText": "AI艺术生成工坊", "navigationStyle": "custom", "enablePullDownRefresh": true } },
-    { "path": "pages/inspiration/index", "style": { "navigationBarTitleText": "灵感", "navigationStyle": "custom" } },
+    { "path": "pages/inspiration/index", "style": { "navigationBarTitleText": "灵感", "navigationStyle": "custom", "onReachBottomDistance": 80 } },
     { "path": "pages/tools/index", "style": { "navigationBarTitleText": "工具", "navigationStyle": "custom" } },
     { "path": "pages/tools/run/index", "style": { "navigationBarTitleText": "工具", "navigationStyle": "custom" } },
     { "path": "pages/tools/aion-obs/index", "style": { "navigationBarTitleText": "OBS遗物计算器", "navigationStyle": "custom" } },

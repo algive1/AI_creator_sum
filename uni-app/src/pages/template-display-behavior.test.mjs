@@ -172,7 +172,8 @@ test('inspiration waterfall primes cover ratios before render and keeps video pl
   assert.match(inspirationSource, /COVER_RATIO_PRELOAD_LIMIT/);
   assert.match(inspirationSource, /function primeCoverRatios/);
   assert.match(inspirationSource, /uni\.getImageInfo/);
-  assert.match(inspirationSource, /works\.value = await primeCoverRatios\(list\.map\(\(item, index\) => inspirationToWork\(item, index\)\)\)/);
+  assert.match(inspirationSource, /const next = await primeCoverRatios\(list\.map\(\(item, index\) => inspirationToWork\(item, offset \+ index\)\)\)/);
+  assert.match(inspirationSource, /works\.value = reset \? next : mergeWorks\(works\.value, next\)/);
   assert.match(inspirationSource, /topTemplates\.value = await primeCoverRatios\(list\.map\(\(item, index\) => inspirationToWork\(item, index\)\)\)/);
   assert.doesNotMatch(inspirationSource, /\.feed-card\.aspect-(short|standard|tall|poster) \.feed-art \{ height:/);
 
@@ -279,9 +280,9 @@ test('notification APIs are wired to profile red dot and announcement message pa
 test('inspiration refresh requests random top and waterfall templates together', () => {
   assert.match(inspirationSource, /refreshRandomInspirations/);
   assert.match(inspirationSource, /loadTopTemplates\(true\)/);
-  assert.match(inspirationSource, /loadWorks\(true\)/);
+  assert.match(inspirationSource, /loadWorks\(\{ reset: true, random: true \}\)/);
   assert.match(inspirationSource, /getTopInspirations<[\s\S]*random:\s*random/);
-  assert.match(inspirationSource, /getInspirations<[\s\S]*random:\s*random/);
+  assert.match(inspirationSource, /getInspirations<[\s\S]*random,\s*\}\)/);
 });
 
 test('inspiration refresh uses the same loading and cycling motion as home', () => {

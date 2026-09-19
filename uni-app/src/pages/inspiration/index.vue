@@ -244,7 +244,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { onLoad, onShareAppMessage, onShareTimeline, onShow } from '@dcloudio/uni-app';
+import { onLoad, onReachBottom, onShareAppMessage, onShareTimeline, onShow } from '@dcloudio/uni-app';
 import AppTabBar from '@/components/common/AppTabBar.vue';
 import AppTopbar from '@/components/common/AppTopbar.vue';
 import AppDialogHost from '@/components/common/AppDialogHost.vue';
@@ -319,6 +319,7 @@ const WATERFALL_CARD_WIDTH_RPX = 342;
 const COVER_MAX_HEIGHT_RPX = 720;
 const COVER_RATIO_PRELOAD_LIMIT = 12;
 const COVER_RATIO_PRELOAD_TIMEOUT_MS = 500;
+const WORK_PAGE_SIZE = 24;
 
 const activeTab = ref('推荐');
 const mediaFilter = ref<'all' | 'image' | 'video'>('all');
@@ -329,6 +330,9 @@ const showCategoryPanel = ref(false);
 const searchKeyword = ref('');
 const works = ref<WorkItem[]>([]);
 const topTemplates = ref<WorkItem[]>([]);
+const worksLoading = ref(false);
+const worksHasMore = ref(true);
+let worksPage = 1;
 const loadingRandomInspirations = ref(false);
 const cyclingRandomInspirations = ref(false);
 const categories = ref<TemplateCategory[]>(fallbackCategories);
@@ -388,6 +392,10 @@ onShow(() => {
   configStore.loadPublicConfig().catch(() => undefined);
   loadCategories();
   loadTopTemplates();
+  loadWorks({ reset: true });
+});
+
+onReachBottom(() => {
   loadWorks();
 });
 
@@ -420,12 +428,27 @@ async function loadCategories() {
   }
 }
 
-async function loadWorks(random = false) {
+async function loadWorks(options: { reset?: boolean; random?: boolean } = {}) {
+  const { reset = false, random = false } = options;
+  if (worksLoading.value || (!reset && !worksHasMore.value)) return;
+  if (reset) {
+    worksPage = 1;
+    worksHasMore.value = true;
+  }
+  worksLoading.value = true;
   try {
-    const res = await getInspirations<{ list?: Record<string, unknown>[] }>({ random: random });
+    const res = await getInspirations<{ list?: Record<string, unknown>[]; hasMore?: boolean }>({
+      page: worksPage,
+      pageSize: WORK_PAGE_SIZE,
+      random,
+    });
     const list = Array.isArray(res.list) ? res.list : [];
     if (list.length) {
-      works.value = await primeCoverRatios(list.map((item, index) => inspirationToWork(item, index)));
+      const offset = (worksPage - 1) * WORK_PAGE_SIZE;
+      const next = await primeCoverRatios(list.map((item, index) => inspirationToWork(item, offset + index)));
+      works.value = reset ? next : mergeWorks(works.value, next);
+      worksPage += 1;
+      worksHasMore.value = typeof res.hasMore === 'boolean' ? res.hasMore : list.length >= WORK_PAGE_SIZE;
       ensureSelectedTagExists();
       consumePendingFavorite();
       return;
@@ -433,22 +456,28 @@ async function loadWorks(random = false) {
     if (isDevFallbackEnabled) {
       warnDevFallback('inspiration', 'GET /templates/inspirations returned empty list');
       works.value = fallbackWorks;
+      worksHasMore.value = false;
       ensureSelectedTagExists();
       consumePendingFavorite();
       return;
     }
-    works.value = [];
+    if (reset) works.value = [];
+    worksHasMore.value = false;
     ensureSelectedTagExists();
   } catch {
     if (isDevFallbackEnabled) {
       warnDevFallback('inspiration', 'GET /templates/inspirations failed');
-      works.value = fallbackWorks;
+      if (reset) works.value = fallbackWorks;
+      worksHasMore.value = false;
       ensureSelectedTagExists();
       consumePendingFavorite();
       return;
     }
-    works.value = [];
+    if (reset) works.value = [];
+    worksHasMore.value = false;
     ensureSelectedTagExists();
+  } finally {
+    worksLoading.value = false;
   }
 }
 
@@ -472,7 +501,7 @@ async function refreshRandomInspirations() {
   playRandomInspirationRefreshMotion();
   loadingRandomInspirations.value = true;
   try {
-    await Promise.all([loadTopTemplates(true), loadWorks(true)]);
+    await Promise.all([loadTopTemplates(true), loadWorks({ reset: true, random: true })]);
   } finally {
     loadingRandomInspirations.value = false;
   }
@@ -559,6 +588,15 @@ function workToTemplate(work: WorkItem): CreativeTemplate {
     canSave: work.canSave !== false && work.canUse !== false,
     lockReason: work.lockReason || ''
   };
+}
+
+function mergeWorks(current: WorkItem[], next: WorkItem[]) {
+  const ids = new Set(current.map((item) => item.id));
+  return [...current, ...next.filter((item) => {
+    if (ids.has(item.id)) return false;
+    ids.add(item.id);
+    return true;
+  })];
 }
 
 function workFromTemplate(template: CreativeTemplate) {

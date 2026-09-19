@@ -540,12 +540,11 @@ const selectedModelIndex = ref(1);
 const modelTiersLoading = ref(false);
 const modelTiersLoaded = ref(false);
 let videoModelRequestToken = 0;
-const VIDEO_TEMPLATE_FEATURES = ['text_to_video', 'image_to_video', 'first_last_frame_video', 'video_edit'];
 const MODEL_CACHE_TTL_MS = 60_000;
 const TEMPLATE_CACHE_TTL_MS = 60_000;
 const videoModelCache = new Map<string, { list: Record<string, unknown>[]; loadedAt: number }>();
-let videoTemplatesCache: { list: CreativeTemplate[]; loadedAt: number } | null = null;
-let videoTemplatesPromise: Promise<CreativeTemplate[]> | null = null;
+const videoTemplateCache = new Map<string, { list: CreativeTemplate[]; loadedAt: number }>();
+const videoTemplatePromises = new Map<string, Promise<CreativeTemplate[]>>();
 const DEFAULT_MAX_REFERENCE_IMAGES = 4;
 const videoRatios = ['16:9', '9:16', '1:1', '4:3', '3:4'];
 
@@ -789,6 +788,7 @@ onShareTimeline(() => createShareTimeline({
 
 watch(videoMode, () => {
   loadVideoModelsForMode();
+  loadVideoTemplates();
   scheduleDraftSave();
 });
 
@@ -882,37 +882,35 @@ function selectVideoMode(value: string) {
 }
 
 function loadVideoTemplates() {
-  if (videoTemplatesCache && Date.now() - videoTemplatesCache.loadedAt < TEMPLATE_CACHE_TTL_MS) {
-    backendVideoTemplates.value = videoTemplatesCache.list;
+  const feature = videoFeatureForMode();
+  const cached = videoTemplateCache.get(feature);
+  if (cached && Date.now() - cached.loadedAt < TEMPLATE_CACHE_TTL_MS) {
+    backendVideoTemplates.value = cached.list;
     return;
   }
-  if (!videoTemplatesPromise) {
-    videoTemplatesPromise = Promise.all(VIDEO_TEMPLATE_FEATURES.map((targetFeature) => (
-      getTemplates<{ list?: Record<string, unknown>[] }>({ templateType: 'video', targetFeature, page: 1, pageSize: 24 })
-    )))
-      .then((responses) => {
-      const merged = new Map<string, CreativeTemplate>();
-      responses.forEach((res) => {
-        const list = Array.isArray(res.list) ? res.list : [];
-        list.map(normalizeCreativeTemplate).forEach((item) => {
-          if (item) merged.set(String(item.id), item);
-        });
+  let request = videoTemplatePromises.get(feature);
+  if (!request) {
+    request = getTemplates<{ list?: Record<string, unknown>[] }>({ templateType: 'video', targetFeature: feature, page: 1, pageSize: 24 })
+      .then((res) => {
+        const list = (Array.isArray(res.list) ? res.list : [])
+          .map(normalizeCreativeTemplate)
+          .filter((item): item is CreativeTemplate => Boolean(item));
+        videoTemplateCache.set(feature, { list, loadedAt: Date.now() });
+        return list;
       });
-      const list = Array.from(merged.values());
-      videoTemplatesCache = { list, loadedAt: Date.now() };
-      return list;
-    });
+    videoTemplatePromises.set(feature, request);
+    request.finally(() => {
+      if (videoTemplatePromises.get(feature) === request) videoTemplatePromises.delete(feature);
+    }).catch(() => undefined);
   }
-  videoTemplatesPromise
+  if (feature === videoFeatureForMode()) backendVideoTemplates.value = [];
+  request
     .then((list) => {
-      backendVideoTemplates.value = list;
+      if (feature === videoFeatureForMode()) backendVideoTemplates.value = list;
     })
     .catch(() => {
-      backendVideoTemplates.value = [];
+      if (feature === videoFeatureForMode()) backendVideoTemplates.value = [];
       if (isDevFallbackEnabled) warnDevFallback('video-templates', 'GET /templates?templateType=video&targetFeature=... failed');
-    })
-    .finally(() => {
-      videoTemplatesPromise = null;
     });
 }
 

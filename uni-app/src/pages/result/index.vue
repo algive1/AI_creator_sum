@@ -250,6 +250,7 @@ const shareNicknameInput = ref('');
 const savingShareNickname = ref(false);
 let pendingShareResolver: ((value: boolean) => void) | null = null;
 let pollTaskId = 0;
+let stopTaskPolling: (() => void) | null = null;
 
 const isVideo = computed(() => taskTypeOf(task.value || { type: routeType.value }) === 'video');
 const thumbnail = computed(() => taskThumbnailOf(task.value));
@@ -435,12 +436,13 @@ function startPolling() {
   if (!task.value.id || isTaskEnded(task.value)) return;
   pollStartTime.value = Date.now();
   pollTaskId = Number(task.value.id || 0);
-  taskPoller.add(pollTaskId, handlePolledTask);
+  stopTaskPolling = taskPoller.add(pollTaskId, handlePolledTask);
   taskPoller.pollNow().catch(() => undefined);
 }
 
 function stopPolling() {
-  if (pollTaskId) taskPoller.removeListener(pollTaskId, handlePolledTask);
+  stopTaskPolling?.();
+  stopTaskPolling = null;
   pollTaskId = 0;
 }
 

@@ -204,6 +204,7 @@ const query = ref('');
 const loading = ref(false);
 const syncFailed = ref(false);
 const pollingIds = new Set<number>();
+const stopPollingByTaskId = new Map<number, () => void>();
 const source = computed<Record<string, unknown>[]>(() => taskStore.list as Record<string, unknown>[]);
 const overview = computed(() => buildWorkLibraryOverview(source.value));
 const records = computed(() => buildWorkLibraryItems(source.value, activeFilter.value, query.value));
@@ -294,20 +295,22 @@ function syncPollingWorks() {
     .map((item) => item.id);
   pollingIds.forEach((id) => {
     if (!activeIds.includes(id)) {
-      taskPoller.removeListener(id, handlePolledTask);
+      stopPollingByTaskId.get(id)?.();
+      stopPollingByTaskId.delete(id);
       pollingIds.delete(id);
     }
   });
   activeIds.forEach((id) => {
     if (pollingIds.has(id)) return;
     pollingIds.add(id);
-    taskPoller.add(id, handlePolledTask);
+    stopPollingByTaskId.set(id, taskPoller.add(id, handlePolledTask));
   });
   if (activeIds.length) taskPoller.pollNow().catch(() => undefined);
 }
 
 function stopPollingWorks() {
-  pollingIds.forEach((id) => taskPoller.removeListener(id, handlePolledTask));
+  stopPollingByTaskId.forEach((stop) => stop());
+  stopPollingByTaskId.clear();
   pollingIds.clear();
 }
 

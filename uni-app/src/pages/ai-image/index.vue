@@ -484,12 +484,11 @@ const fallbackModels: ModelTier[] = [
     isDefault: false
   }
 ];
-const IMAGE_TEMPLATE_FEATURES = ['text_to_image', 'image_to_image', 'image_edit'];
 const MODEL_CACHE_TTL_MS = 60_000;
 const TEMPLATE_CACHE_TTL_MS = 60_000;
 const imageModelCache = new Map<string, { list: Record<string, unknown>[]; loadedAt: number }>();
-let imageTemplatesCache: { list: CreativeTemplate[]; loadedAt: number } | null = null;
-let imageTemplatesPromise: Promise<CreativeTemplate[]> | null = null;
+const imageTemplateCache = new Map<string, { list: CreativeTemplate[]; loadedAt: number }>();
+const imageTemplatePromises = new Map<string, Promise<CreativeTemplate[]>>();
 
 const modelOptions = computed<ModelTier[]>(() => {
   const source: ModelTier[] = models.value.map((item) => ({
@@ -666,6 +665,7 @@ onShareTimeline(() => createShareTimeline({
 
 watch(imageType, () => {
   loadImageModelsForMode();
+  loadImageTemplates();
   scheduleDraftSave();
 });
 
@@ -751,37 +751,35 @@ async function loadFreeImageQuota() {
 }
 
 function loadImageTemplates() {
-  if (imageTemplatesCache && Date.now() - imageTemplatesCache.loadedAt < TEMPLATE_CACHE_TTL_MS) {
-    backendTemplates.value = imageTemplatesCache.list;
+  const feature = imageFeatureForType();
+  const cached = imageTemplateCache.get(feature);
+  if (cached && Date.now() - cached.loadedAt < TEMPLATE_CACHE_TTL_MS) {
+    backendTemplates.value = cached.list;
     return;
   }
-  if (!imageTemplatesPromise) {
-    imageTemplatesPromise = Promise.all(IMAGE_TEMPLATE_FEATURES.map((targetFeature) => (
-    getTemplates<{ list?: Record<string, unknown>[] }>({ templateType: 'image', targetFeature, page: 1, pageSize: 24 })
-    )))
-      .then((responses) => {
-      const merged = new Map<string, CreativeTemplate>();
-      responses.forEach((res) => {
-        const list = Array.isArray(res.list) ? res.list : [];
-        list.map(normalizeCreativeTemplate).forEach((item) => {
-          if (item) merged.set(String(item.id), item);
-        });
+  let request = imageTemplatePromises.get(feature);
+  if (!request) {
+    request = getTemplates<{ list?: Record<string, unknown>[] }>({ templateType: 'image', targetFeature: feature, page: 1, pageSize: 24 })
+      .then((res) => {
+        const list = (Array.isArray(res.list) ? res.list : [])
+          .map(normalizeCreativeTemplate)
+          .filter((item): item is CreativeTemplate => Boolean(item));
+        imageTemplateCache.set(feature, { list, loadedAt: Date.now() });
+        return list;
       });
-      const list = Array.from(merged.values());
-      imageTemplatesCache = { list, loadedAt: Date.now() };
-      return list;
-    });
+    imageTemplatePromises.set(feature, request);
+    request.finally(() => {
+      if (imageTemplatePromises.get(feature) === request) imageTemplatePromises.delete(feature);
+    }).catch(() => undefined);
   }
-  imageTemplatesPromise
+  if (feature === imageFeatureForType()) backendTemplates.value = [];
+  request
     .then((list) => {
-      backendTemplates.value = list;
+      if (feature === imageFeatureForType()) backendTemplates.value = list;
     })
     .catch(() => {
-      backendTemplates.value = [];
+      if (feature === imageFeatureForType()) backendTemplates.value = [];
       if (isDevFallbackEnabled) warnDevFallback('image-templates', 'GET /templates?templateType=image&targetFeature=... failed');
-    })
-    .finally(() => {
-      imageTemplatesPromise = null;
     });
 }
 

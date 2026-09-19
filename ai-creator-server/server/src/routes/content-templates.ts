@@ -78,8 +78,8 @@ router.get('/search', async (req: Request, res: Response) => {
 router.get('/inspirations', async (req: Request, res: Response) => {
   try {
     const userId = await optionalUserId(req);
-    const list = await queryDisplayPositionTemplates('inspiration', userId || 0, req);
-    success(res, { list });
+    const result = await queryDisplayPositionTemplates('inspiration', userId || 0, req);
+    success(res, result);
   } catch {
     error(res, ErrorCodes.SERVER_ERROR, '获取灵感模板失败');
   }
@@ -88,12 +88,12 @@ router.get('/inspirations', async (req: Request, res: Response) => {
 router.get('/home-inspirations', async (req: Request, res: Response) => {
   try {
     const userId = await optionalUserId(req);
-    let list = await queryDisplayPositionTemplates('home_inspiration', userId || 0, req);
-    const fallback = list.length === 0;
+    let result = await queryDisplayPositionTemplates('home_inspiration', userId || 0, req);
+    const fallback = result.list.length === 0;
     if (fallback) {
-      list = await queryDisplayPositionTemplates('inspiration', userId || 0, req);
+      result = await queryDisplayPositionTemplates('inspiration', userId || 0, req);
     }
-    success(res, { list, fallback });
+    success(res, { ...result, fallback });
   } catch {
     error(res, ErrorCodes.SERVER_ERROR, '获取首页灵感推荐失败');
   }
@@ -118,11 +118,7 @@ router.get('/inspirations/top', async (req: Request, res: Response) => {
         LIMIT ?`,
       [pageSize],
     );
-    const list = [];
-    for (const row of rows) {
-      const item = await toPublicTemplate(row, userId || 0, req);
-      if (item.canView !== false) list.push(item);
-    }
+    const list = await buildPublicTemplateList(rows, userId || 0, req);
     success(res, { list });
   } catch {
     error(res, ErrorCodes.SERVER_ERROR, '获取顶部灵感模板失败');
@@ -567,7 +563,7 @@ router.get('/my-templates', authMiddleware, async (req: Request, res: Response) 
   }
 });
 
-async function toPublicTemplate(row: any, userId: number, req?: Request) {
+async function toPublicTemplate(row: any, userId: number, req?: Request, favoritedTemplateIds?: Set<number>) {
   const permission = await checkMembershipPermission(userId, row);
   const imageUseMemberOnly = await isImageTemplateUseMemberOnly(row, userId);
   const canUse = permission.canUse && !imageUseMemberOnly;
@@ -630,7 +626,7 @@ async function toPublicTemplate(row: any, userId: number, req?: Request) {
     usageCount: row.usage_count,
     viewCount: row.view_count,
     favoriteCount: row.favorite_count,
-    isFavorited: userId > 0 ? await isTemplateFavorited(userId, Number(row.id)) : false,
+    isFavorited: favoritedTemplateIds ? favoritedTemplateIds.has(Number(row.id)) : userId > 0 ? await isTemplateFavorited(userId, Number(row.id)) : false,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -742,11 +738,7 @@ async function queryTemplates(userId: number, queryParams: any, req?: Request) {
       WHERE ${where.join(' AND ')}`,
     params,
   );
-  const list = [];
-  for (const row of rows) {
-    const item = await toPublicTemplate(row, userId, req);
-    if (item.canView !== false) list.push(item);
-  }
+  const list = await buildPublicTemplateList(rows, userId, req);
   return {
     list,
     pagination: { page: pg, pageSize: ps, total: Number(countRow?.total || 0), totalPages: Math.ceil(Number(countRow?.total || 0) / ps) },
@@ -754,26 +746,58 @@ async function queryTemplates(userId: number, queryParams: any, req?: Request) {
 }
 
 async function queryDisplayPositionTemplates(position: 'home_inspiration' | 'inspiration', userId: number, req?: Request) {
+  const page = Math.max(parseInt(String(req?.query?.page || '1'), 10) || 1, 1);
+  const pageSize = Math.min(Math.max(parseInt(String(req?.query?.pageSize || '24'), 10) || 24, 1), 50);
+  const offset = (page - 1) * pageSize;
   const publicUserTemplatesEnabled = await SettingsService.getBoolean('template.user_public_enabled', false);
   const sourceFilter = publicUserTemplatesEnabled ? '' : "AND t.source = 'official'";
   const includeUserShared = position === 'inspiration' && publicUserTemplatesEnabled;
   const displayPath = displayConfigJsonPath(position);
-  const rows = await query<any>(
+  const where = `t.deleted_at IS NULL AND t.is_enabled = 1 AND t.status = 'approved' AND t.review_status = 'approved'
+        ${sourceFilter}
+        AND (JSON_EXTRACT(t.display_config, '${displayPath}') IS NOT NULL${includeUserShared ? " OR t.source = 'user'" : ''})`;
+  const [rows, countRows] = await Promise.all([
+    query<any>(
     `SELECT t.*, c.name AS category_name, c.category_key, u.nickname, u.avatar_url
        FROM templates t
        LEFT JOIN template_categories c ON c.id = t.category_id
        LEFT JOIN users u ON u.id = t.user_id
-      WHERE t.deleted_at IS NULL AND t.is_enabled = 1 AND t.status = 'approved' AND t.review_status = 'approved'
-        ${sourceFilter}
-        AND (JSON_EXTRACT(t.display_config, '${displayPath}') IS NOT NULL${includeUserShared ? " OR t.source = 'user'" : ''})
-      ORDER BY ${templateDefaultOrderBy(position, isRandomTemplateRequest(req))}`,
-  );
+      WHERE ${where}
+      ORDER BY ${templateDefaultOrderBy(position, isRandomTemplateRequest(req))}
+      LIMIT ? OFFSET ?`,
+      [pageSize, offset],
+    ),
+    query<any>(`SELECT COUNT(*) AS total FROM templates t WHERE ${where}`),
+  ]);
+  const list = await buildPublicTemplateList(rows, userId, req);
+  const total = Number(countRows[0]?.total || 0);
+  return {
+    list,
+    pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) },
+    total,
+    hasMore: offset + rows.length < total,
+  };
+}
+
+async function buildPublicTemplateList(rows: any[], userId: number, req?: Request) {
+  const favoritedTemplateIds = await getFavoritedTemplateIds(userId, rows);
   const list = [];
   for (const row of rows) {
-    const item = await toPublicTemplate(row, userId, req);
+    const item = await toPublicTemplate(row, userId, req, favoritedTemplateIds);
     if (item.canView !== false) list.push(item);
   }
   return list;
+}
+
+async function getFavoritedTemplateIds(userId: number, templates: any[]): Promise<Set<number>> {
+  const templateIds = [...new Set(templates.map((item) => Number(item.id)).filter((id) => Number.isInteger(id) && id > 0))];
+  if (!userId || !templateIds.length) return new Set();
+  const rows = await query<any>(
+    `SELECT template_id FROM template_favorites
+      WHERE user_id = ? AND template_id IN (${templateIds.map(() => '?').join(',')})`,
+    [userId, ...templateIds],
+  );
+  return new Set(rows.map((row) => Number(row.template_id)).filter((id) => Number.isInteger(id) && id > 0));
 }
 
 async function isImageTemplateUseMemberOnly(row: any, userId: number) {

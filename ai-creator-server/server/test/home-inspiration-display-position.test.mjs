@@ -31,6 +31,10 @@ test('backend exposes a separate home inspiration endpoint with inspiration fall
   assert.match(block, /queryDisplayPositionTemplates\('home_inspiration'/);
   assert.match(block, /queryDisplayPositionTemplates\('inspiration'/);
   assert.match(helperBlock, /templateDefaultOrderBy\(position, isRandomTemplateRequest\(req\)\)/);
+  assert.match(helperBlock, /LIMIT \? OFFSET \?/);
+  assert.match(helperBlock, /COUNT\(\*\) AS total/);
+  assert.match(helperBlock, /hasMore:/);
+  assert.match(helperBlock, /getFavoritedTemplateIds/);
 });
 
 test('admin inspiration list includes templates configured only for home inspiration', () => {
@@ -43,6 +47,7 @@ test('mini program home calls the home inspiration endpoint instead of the navig
   assert.match(miniTemplateApiSource, /export function getHomeInspirations/);
   assert.match(miniTemplateApiSource, /\/templates\/home-inspirations/);
   assert.match(homePageSource, /getHomeInspirations/);
+  assert.match(homePageSource, /pageSize/);
   assert.doesNotMatch(homePageSource, /getInspirations<\{/);
 });
 

@@ -10,6 +10,8 @@ interface TaskState {
   loading: boolean;
 }
 
+let stopCurrentTaskPolling: (() => void) | null = null;
+
 export const useTaskStore = defineStore('task', {
   state: (): TaskState => ({
     list: [],
@@ -37,13 +39,15 @@ export const useTaskStore = defineStore('task', {
       return task;
     },
     startPolling(id: number, _interval = 3000) {
-      taskPoller.add(id, (task) => {
+      stopCurrentTaskPolling?.();
+      stopCurrentTaskPolling = taskPoller.add(id, (task) => {
         this.currentTask = task;
       });
       taskPoller.pollNow().catch(() => undefined);
     },
     stopPolling() {
-      // Global poller stays alive for other pages.
+      stopCurrentTaskPolling?.();
+      stopCurrentTaskPolling = null;
     }
   }
 });
