@@ -71,10 +71,15 @@ git push -u origin <当前分支>
 ## 推送状态
 
 - 本地提交已创建：`ed58570 feat: update provider capabilities and organize workspace`。
-- 当前工作区已经干净。
-- 推送尚未完成，原因是本机没有 GitHub HTTPS 登录凭据，也没有可用的 SSH key 或 `gh` 登录状态。
-- 完成 GitHub 登录后，在项目根目录执行：
+- 当时推送未完成，原因是本机没有 GitHub HTTPS 登录凭据，也没有可用的 SSH key 或 `gh` 登录状态。
 
-```bash
-git push -u origin codex/wechat-tools-config
-```
+## 推送补记（2026-08-30）
+
+本机 GitHub 凭据已可用，上述阻塞已解除。`codex/wechat-tools-config` 已成功推送到 `https://github.com/algive1/AI_creator_sum.git`，本次批次包含 4 个提交：
+
+- `1a8e3a9 fix: require explicit local test admin password`
+- `49eba3a docs: reorganize and reconcile project documentation`
+- `49e32e1 feat: make phone binding optional during login`
+- `a51e35a perf: paginate inspiration feed and cut redundant template loads`
+
+推送后远程 `refs/heads/codex/wechat-tools-config` 与 `refs/pull/1/head` 均为 `a51e35a`，本地与远程一致，工作区干净。`main` 仍停留在 `34cd7e26`，落后该分支 23 个提交；按 `README.md` 的工作方式，稳定版本再通过 Pull Request 或合并进入 `main`。
