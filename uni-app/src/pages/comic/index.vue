@@ -188,7 +188,22 @@
 
       <view class="pipeline-actions"><button class="pipeline-secondary" :disabled="pipelineBusy" @tap="buildScript">{{ generatedScript ? '重新生成剧本' : '生成剧本' }}</button><button class="pipeline-secondary" :disabled="pipelineBusy || !generatedScript" @tap="buildStoryboard">{{ storyboardShots.length ? '重新拆分分镜' : '生成分镜' }}</button></view>
       <view v-if="generatedScript" class="production-card"><view class="production-head"><text>剧本</text><text>{{ generatedScript.length }} 字</text></view><textarea v-model="generatedScript" class="script-editor" maxlength="8000" auto-height /></view>
-      <view v-if="storyboardShots.length" class="production-card"><view class="production-head"><text>分镜预览</text><text>{{ storyboardShots.length }} 镜</text></view><view v-for="(shot, index) in storyboardShots" :key="index" class="shot-row"><view class="shot-index">{{ index + 1 }}</view><view class="shot-copy"><view class="shot-title">{{ shot.title || ('镜头 ' + (index + 1)) }}</view><view class="shot-desc">{{ shot.description }}</view><view v-if="shot.dialogue" class="shot-dialogue">{{ shot.dialogue }}</view></view></view></view>
+      <view v-if="storyboardShots.length" class="production-card"><view class="production-head"><text>分镜预览</text><text>{{ storyboardShots.length }} 镜</text></view><view v-for="(shot, index) in storyboardShots" :key="shot.id" class="shot-row">
+          <view class="shot-index">{{ index + 1 }}</view>
+          <view class="shot-copy">
+            <view class="shot-head"><input v-model="shot.title" class="shot-title-input" /><text class="shot-status">{{ shotStatusLabel(shot.status) }}</text></view>
+            <textarea v-model="shot.description" class="shot-description-input" auto-height maxlength="1200" />
+            <input v-model="shot.dialogue" class="shot-field" placeholder="对白 / 旁白（可选）" />
+            <view class="shot-meta-grid">
+              <input v-model="shot.character" class="shot-field" placeholder="出镜角色" />
+              <input v-model="shot.scene" class="shot-field" placeholder="场景" />
+              <input v-model="shot.shotSize" class="shot-field" placeholder="景别，如近景" />
+              <input v-model="shot.camera" class="shot-field" placeholder="运镜，如缓慢推进" />
+            </view>
+            <view class="shot-actions"><button @tap="moveShot(index, -1)">上移</button><button @tap="moveShot(index, 1)">下移</button><button @tap="duplicateShot(index)">复制</button><button class="danger" @tap="removeShot(index)">删除</button></view>
+          </view>
+        </view>
+        <button class="add-shot-button" @tap="addShot">＋ 添加镜头</button></view>
       <view class="form-section">
         <view class="form-title">角色设定</view>
         <input v-model="character" class="character-input" placeholder="主角身份、性格、服装或关键关系" placeholder-class="field-placeholder" />
@@ -380,7 +395,19 @@ const character = ref('');
 const promptExpanded = ref(false);
 const pipelineStep = ref<'idea' | 'script' | 'storyboard' | 'generate'>('idea');
 const generatedScript = ref('');
-const storyboardShots = ref<Array<{ title: string; description: string; dialogue?: string }>>([]);
+type ComicShot = {
+  id: string;
+  title: string;
+  description: string;
+  dialogue?: string;
+  character?: string;
+  scene?: string;
+  shotSize?: string;
+  camera?: string;
+  status: 'draft' | 'ready' | 'generating' | 'done' | 'failed';
+  taskId?: number;
+};
+const storyboardShots = ref<ComicShot[]>([]);
 const pipelineBusy = ref(false);
 const COMIC_DRAFT_CACHE_KEY = 'ai_creator_comic_studio_draft_v2';
 const COMIC_MODEL_CACHE_KEY = 'ai_creator_comic_models_v2';
@@ -640,7 +667,14 @@ async function submitManga() {
   if (!loggedIn) return;
   try {
     pipelineStep.value = 'generate';
-    const productionPrompt = storyboardShots.value.length ? storyboardShots.value.map((shot, index) => '镜头' + (index + 1) + '：' + shot.description + (shot.dialogue ? '；对白/旁白：' + shot.dialogue : '')).join('\n') : generatedScript.value.trim() || story.value;
+    const productionPrompt = storyboardShots.value.length ? storyboardShots.value.map((shot, index) => [
+      '镜头' + (index + 1) + '：' + shot.description,
+      shot.character ? '角色：' + shot.character : '',
+      shot.scene ? '场景：' + shot.scene : '',
+      shot.shotSize ? '景别：' + shot.shotSize : '',
+      shot.camera ? '运镜：' + shot.camera : '',
+      shot.dialogue ? '对白/旁白：' + shot.dialogue : ''
+    ].filter(Boolean).join('；')).join('\n') : generatedScript.value.trim() || story.value;
     const result = await createComicTask<Record<string, unknown>>({
       prompt: productionPrompt,
       tierKey: selectedModel.value.tierKey,
@@ -703,11 +737,41 @@ function normalizeStoryboard(result: Record<string, unknown>) {
   const source = (result.storyboard || result.shots || result.scenes || result.list) as unknown;
   if (Array.isArray(source)) return source.map((item, index) => {
     const shot = item && typeof item === 'object' ? item as Record<string, unknown> : {};
-    return { title: String(shot.title || shot.shot || shot.scene || ('镜头 ' + (index + 1))), description: String(shot.description || shot.visual || shot.prompt || shot.content || ''), dialogue: String(shot.dialogue || shot.narration || '') };
+    return {
+      id: String(shot.id || ('shot-' + Date.now() + '-' + index)),
+      title: String(shot.title || shot.shot || shot.scene || ('镜头 ' + (index + 1))),
+      description: String(shot.description || shot.visual || shot.prompt || shot.content || ''),
+      dialogue: String(shot.dialogue || shot.narration || ''),
+      character: String(shot.character || shot.characters || ''),
+      scene: String(shot.location || shot.sceneName || ''),
+      shotSize: String(shot.shotSize || shot.shot_size || shot.framing || ''),
+      camera: String(shot.camera || shot.cameraMove || shot.camera_move || ''),
+      status: 'ready' as const
+    };
   }).filter((item) => item.description || item.dialogue);
   const text = extractGeneratedText(result, ['storyboard', 'content', 'text']);
-  return text ? text.split(/\n+/).filter(Boolean).slice(0, 24).map((line, index) => ({ title: '镜头 ' + (index + 1), description: line })) : [];
+  return text ? text.split(/\n+/).filter(Boolean).slice(0, 24).map((line, index) => ({
+    id: 'shot-' + Date.now() + '-' + index, title: '镜头 ' + (index + 1), description: line, status: 'ready' as const
+  })) : [];
 }
+
+function shotStatusLabel(status: ComicShot['status']) {
+  return ({ draft: '草稿', ready: '待生成', generating: '生成中', done: '已完成', failed: '失败' })[status];
+}
+function addShot() {
+  storyboardShots.value.push({ id: 'shot-' + Date.now(), title: '镜头 ' + (storyboardShots.value.length + 1), description: '', status: 'draft' });
+  pipelineStep.value = 'storyboard';
+}
+function removeShot(index: number) { storyboardShots.value.splice(index, 1); }
+function duplicateShot(index: number) {
+  const source = storyboardShots.value[index]; if (!source) return;
+  storyboardShots.value.splice(index + 1, 0, { ...source, id: 'shot-' + Date.now(), title: source.title + ' 副本', status: 'draft', taskId: undefined });
+}
+function moveShot(index: number, delta: number) {
+  const target = index + delta; if (target < 0 || target >= storyboardShots.value.length) return;
+  const [shot] = storyboardShots.value.splice(index, 1); storyboardShots.value.splice(target, 0, shot);
+}
+
 function saveComicDraft() {
   writePersistentCache(COMIC_DRAFT_CACHE_KEY, { story: story.value, character: character.value, genre: selectedGenre.value, style: selectedStyle.value, ratio: selectedRatio.value, duration: selectedDuration.value, script: generatedScript.value, storyboard: storyboardShots.value, step: pipelineStep.value });
 }
@@ -718,7 +782,13 @@ function restoreComicDraft() {
   if (!character.value) character.value = String(draft.character || '');
   selectedGenre.value = String(draft.genre || selectedGenre.value); selectedStyle.value = String(draft.style || selectedStyle.value);
   selectedRatio.value = String(draft.ratio || selectedRatio.value); selectedDuration.value = String(draft.duration || selectedDuration.value);
-  generatedScript.value = String(draft.script || ''); storyboardShots.value = Array.isArray(draft.storyboard) ? draft.storyboard as Array<{ title: string; description: string; dialogue?: string }> : [];
+  generatedScript.value = String(draft.script || ''); storyboardShots.value = Array.isArray(draft.storyboard) ? (draft.storyboard as Record<string, unknown>[]).map((shot, index) => ({
+    id: String(shot.id || ('shot-restored-' + index)), title: String(shot.title || ('镜头 ' + (index + 1))),
+    description: String(shot.description || ''), dialogue: String(shot.dialogue || ''), character: String(shot.character || ''),
+    scene: String(shot.scene || ''), shotSize: String(shot.shotSize || ''), camera: String(shot.camera || ''),
+    status: ['draft','ready','generating','done','failed'].includes(String(shot.status)) ? String(shot.status) as ComicShot['status'] : 'ready',
+    taskId: Number(shot.taskId) || undefined
+  })) : [];
   const step = String(draft.step || 'idea'); if (['idea','script','storyboard','generate'].includes(step)) pipelineStep.value = step as 'idea'|'script'|'storyboard'|'generate';
 }
 
@@ -1699,5 +1769,5 @@ function middleModelIndex() {
   color: #ffffff;
   box-shadow: none;
 }
- .pipeline-card,.production-card{margin-bottom:24rpx;padding:24rpx;border-radius:22rpx;background:#fff;box-shadow:0 8rpx 24rpx rgba(83,65,160,.08)} .pipeline-title,.production-head{display:flex;justify-content:space-between;font-weight:900;font-size:28rpx}.pipeline-steps{display:flex;justify-content:space-between;margin-top:22rpx}.pipeline-step{display:flex;align-items:center;gap:7rpx;color:#9a96aa;font-size:22rpx}.pipeline-step.active,.pipeline-step.done{color:#6c4bff;font-weight:800}.pipeline-dot{width:14rpx;height:14rpx;border-radius:50%;background:#ddd8eb}.pipeline-step.active .pipeline-dot,.pipeline-step.done .pipeline-dot{background:#6c4bff}.pipeline-hint{margin-top:18rpx;color:#777184;font-size:22rpx;line-height:1.6}.pipeline-actions{display:grid;grid-template-columns:1fr 1fr;gap:16rpx;margin:20rpx 0}.pipeline-secondary{height:72rpx;border-radius:18rpx;background:#f1edff;color:#6847e8;font-size:24rpx;font-weight:800}.script-editor{width:100%;min-height:220rpx;margin-top:18rpx;padding:18rpx;box-sizing:border-box;border-radius:16rpx;background:#f8f7fb;font-size:24rpx;line-height:1.65}.shot-row{display:flex;gap:16rpx;padding:18rpx 0;border-bottom:1rpx solid #f0edf6}.shot-index{display:flex;align-items:center;justify-content:center;flex:0 0 46rpx;height:46rpx;border-radius:14rpx;background:#eee9ff;color:#6545dc;font-weight:900}.shot-title{font-size:24rpx;font-weight:900}.shot-desc,.shot-dialogue{margin-top:8rpx;color:#686372;font-size:22rpx;line-height:1.55}.shot-dialogue{color:#8a64c9}
+ .pipeline-card,.production-card{margin-bottom:24rpx;padding:24rpx;border-radius:22rpx;background:#fff;box-shadow:0 8rpx 24rpx rgba(83,65,160,.08)} .pipeline-title,.production-head{display:flex;justify-content:space-between;font-weight:900;font-size:28rpx}.pipeline-steps{display:flex;justify-content:space-between;margin-top:22rpx}.pipeline-step{display:flex;align-items:center;gap:7rpx;color:#9a96aa;font-size:22rpx}.pipeline-step.active,.pipeline-step.done{color:#6c4bff;font-weight:800}.pipeline-dot{width:14rpx;height:14rpx;border-radius:50%;background:#ddd8eb}.pipeline-step.active .pipeline-dot,.pipeline-step.done .pipeline-dot{background:#6c4bff}.pipeline-hint{margin-top:18rpx;color:#777184;font-size:22rpx;line-height:1.6}.pipeline-actions{display:grid;grid-template-columns:1fr 1fr;gap:16rpx;margin:20rpx 0}.pipeline-secondary{height:72rpx;border-radius:18rpx;background:#f1edff;color:#6847e8;font-size:24rpx;font-weight:800}.script-editor{width:100%;min-height:220rpx;margin-top:18rpx;padding:18rpx;box-sizing:border-box;border-radius:16rpx;background:#f8f7fb;font-size:24rpx;line-height:1.65}.shot-row{display:flex;gap:16rpx;padding:18rpx 0;border-bottom:1rpx solid #f0edf6}.shot-index{display:flex;align-items:center;justify-content:center;flex:0 0 46rpx;height:46rpx;border-radius:14rpx;background:#eee9ff;color:#6545dc;font-weight:900}.shot-head{display:flex;align-items:center;gap:12rpx}.shot-title-input{flex:1;font-size:24rpx;font-weight:900}.shot-status{padding:5rpx 12rpx;border-radius:999rpx;background:#f0ecff;color:#6c4bff;font-size:18rpx}.shot-description-input{width:100%;min-height:86rpx;margin-top:10rpx;font-size:22rpx;line-height:1.55}.shot-meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:10rpx;margin-top:10rpx}.shot-field{height:58rpx;padding:0 14rpx;border-radius:12rpx;background:#f8f7fb;font-size:20rpx}.shot-actions{display:flex;gap:10rpx;margin-top:12rpx}.shot-actions button{height:52rpx;padding:0 16rpx;border-radius:12rpx;background:#f4f2f8;font-size:19rpx;line-height:52rpx}.shot-actions .danger{color:#d84f67}.add-shot-button{height:66rpx;margin-top:18rpx;border-radius:16rpx;background:#f0ecff;color:#6847e8;font-size:22rpx;font-weight:800}.shot-desc,.shot-dialogue{margin-top:8rpx;color:#686372;font-size:22rpx;line-height:1.55}.shot-dialogue{color:#8a64c9}
 </style>

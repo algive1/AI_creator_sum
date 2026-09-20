@@ -36,3 +36,15 @@ test('comic studio uses a staged script-storyboard-production workflow', () => {
   assert.match(comicApiSource, /\/tasks\/script/);
   assert.match(comicApiSource, /\/tasks\/storyboard/);
 });
+
+test('comic storyboard is editable as persistent shot assets', () => {
+  assert.match(comicSource, /type ComicShot/);
+  assert.match(comicSource, /shotSize/);
+  assert.match(comicSource, /camera/);
+  assert.match(comicSource, /shotStatusLabel/);
+  assert.match(comicSource, /duplicateShot/);
+  assert.match(comicSource, /moveShot/);
+  assert.match(comicSource, /addShot/);
+  assert.match(comicSource, /角色：/);
+  assert.match(comicSource, /运镜：/);
+});
