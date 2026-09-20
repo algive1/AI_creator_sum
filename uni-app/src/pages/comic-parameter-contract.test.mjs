@@ -130,3 +130,28 @@ test('comic assembly requires every ordered shot to have usable media', () => {
   assert.match(comicSource, /严格按当前分镜顺序合成/);
   assert.match(comicSource, /暂不能合成/);
 });
+
+test('comic reference assets use the real image-to-video contract', () => {
+  assert.match(comicSource, /FEATURE_KEYS\.imageToVideo/);
+  assert.match(comicSource, /subType: 'image_to_video'/);
+  assert.match(comicSource, /videoMode: 'image_to_video'/);
+  assert.match(comicSource, /inputAssets: videoContract\.inputAssets/);
+  assert.match(comicSource, /referenceMode: videoContract\.referenceMode/);
+  assert.doesNotMatch(comicSource, /referenceFileIds:\s*shotReferenceFileIds/);
+});
+
+test('comic only enables identity reference images for compatible image-to-video tiers', () => {
+  assert.match(comicSource, /\['reference_images', 'first_frame'\]/);
+  assert.match(comicSource, /imageToVideoTierKeys\.value\.has/);
+  assert.doesNotMatch(comicSource, /\['reference_images', 'first_frame', 'first_last'\]/);
+});
+
+test('comic actively polls generating shot tasks and rejects stale completions', () => {
+  assert.match(comicSource, /taskPoller\.add/);
+  assert.match(comicSource, /taskPoller\.pollNow/);
+  assert.match(comicSource, /stopShotTaskPolling/);
+  assert.match(comicSource, /onHide\(\(\) =>/);
+  assert.match(comicSource, /onUnload\(\(\) =>/);
+  assert.match(comicSource, /shot\.generationFingerprint !== shotFingerprint\(shot\)/);
+  assert.match(comicSource, /shot\.status = 'draft'/);
+});
