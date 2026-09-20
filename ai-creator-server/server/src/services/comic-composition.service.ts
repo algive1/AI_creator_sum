@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import { query, queryOne } from '../utils/db';
 import { assertActiveProject } from './project.service';
-import { enqueue } from './task-queue.service';
+import { enqueueComicCompositionJob } from './comic-composition-queue.service';
 
 export type ComicCompositionShot = { index: number; title?: string; url: string };
 
@@ -24,7 +24,7 @@ export async function createComicCompositionJob(userId: number, payload: any) {
     [jobNo, userId, projectId, JSON.stringify(shots)],
   );
   const jobId = Number(result.insertId);
-  const queued = await enqueue(-jobId, { jobId }, async () => { const { processComicCompositionJob } = await import('./comic-composition-worker.service'); await processComicCompositionJob(jobId); });
+  const queued = await enqueueComicCompositionJob(jobId);
   if (!queued) { await query("UPDATE comic_composition_jobs SET status = 'failed', error_message = '合成任务队列繁忙，请稍后重试' WHERE id = ?", [jobId]); }
   return getComicCompositionJob(userId, jobId);
 }
