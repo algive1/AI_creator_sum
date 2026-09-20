@@ -29,6 +29,10 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run build
+      - name: Install FFmpeg runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
       - run: npm run check:ffmpeg
       - run: npm run test:comic-composition
       - name: Provider parameter regression checks
