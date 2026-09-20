@@ -121,3 +121,12 @@ test('comic batch submission isolates per-shot failures', () => {
   assert.match(comicSource, /失败镜头已保留，可单独重试/);
   assert.match(comicSource, /throw err/);
 });
+
+test('comic assembly requires every ordered shot to have usable media', () => {
+  assert.match(comicSource, /assemblyShots/);
+  assert.match(comicSource, /shot\.status === 'done' && Boolean\(shot\.outputUrl\)/);
+  assert.match(comicSource, /assemblyMissingCount/);
+  assert.match(comicSource, /assemblyReady/);
+  assert.match(comicSource, /严格按当前分镜顺序合成/);
+  assert.match(comicSource, /暂不能合成/);
+});
