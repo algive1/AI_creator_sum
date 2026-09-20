@@ -90,3 +90,16 @@ test('comic studio supports reusable multi-character assets', () => {
   assert.match(comicSource, /shotReferenceFileIds/);
   assert.match(comicSource, /角色身份锁定/);
 });
+
+test('comic studio reuses scene assets and guards batch generation cost', () => {
+  assert.match(comicSource, /type ComicScene/);
+  assert.match(comicSource, /sceneLibrary/);
+  assert.match(comicSource, /matchedScene/);
+  assert.match(comicSource, /场景身份锁定/);
+  assert.match(comicSource, /shotReferenceAssets/);
+  assert.match(comicSource, /pendingShotCount/);
+  assert.match(comicSource, /batchEstimatedPoints/);
+  assert.match(comicSource, /generatePendingShots/);
+  assert.match(comicSource, /预计最多消耗/);
+  assert.match(comicSource, /已完成和生成中的镜头不会重复提交/);
+});
