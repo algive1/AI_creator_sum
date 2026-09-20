@@ -259,6 +259,8 @@ import AppTopbar from '@/components/common/AppTopbar.vue';
 import AppDialogHost from '@/components/common/AppDialogHost.vue';
 import LegacyPromptComposer from '@/components/legacy/LegacyPromptComposer.vue';
 import { createComicTask, generateComicScript, generateComicStoryboard } from '@/api/comic';
+import { getTasksByIds } from '@/api/task';
+import { isTaskCompleted, isTaskFailed, isTaskProcessing, taskOutputList, taskThumbnailOf } from '@/utils/task-display';
 import { getVideoModels } from '@/api/ai-video';
 import { useAuthStore } from '@/stores/auth';
 import { useConfigStore } from '@/stores/config';
@@ -482,6 +484,7 @@ onShow(async () => {
   configStore.hydrate();
   await configStore.loadPublicConfig().catch(() => undefined);
   restoreComicDraft();
+  syncShotTasks().catch(() => undefined);
   if (comicMaintenanceMode.value) {
     showComicMaintenanceMessage();
   }
@@ -758,6 +761,28 @@ function normalizeStoryboard(result: Record<string, unknown>) {
   })) : [];
 }
 
+
+
+async function syncShotTasks() {
+  const taskIds = storyboardShots.value.map((shot) => Number(shot.taskId || 0)).filter((id) => id > 0);
+  if (!taskIds.length) return;
+  const result = await getTasksByIds<{ list?: Record<string, unknown>[]; records?: Record<string, unknown>[] }>(taskIds);
+  const tasks = (result.list || result.records || []) as Record<string, unknown>[];
+  const byId = new Map(tasks.map((task) => [Number(task.taskId || task.id || 0), task]));
+  let changed = false;
+  for (const shot of storyboardShots.value) {
+    if (!shot.taskId) continue;
+    const task = byId.get(shot.taskId); if (!task) continue;
+    const nextStatus: ComicShot['status'] = isTaskCompleted(task) ? 'done' : isTaskFailed(task) ? 'failed' : isTaskProcessing(task) ? 'generating' : shot.status;
+    const output = taskOutputList(task)[0] || {};
+    const nextUrl = String(output.video || output.url || output.image || shot.outputUrl || '');
+    const nextThumbnail = taskThumbnailOf(task) || shot.thumbnail || '';
+    if (nextStatus !== shot.status || nextUrl !== shot.outputUrl || nextThumbnail !== shot.thumbnail) {
+      shot.status = nextStatus; shot.outputUrl = nextUrl; shot.thumbnail = nextThumbnail; changed = true;
+    }
+  }
+  if (changed) saveComicDraft();
+}
 
 function buildShotPrompt(shot: ComicShot, index: number) {
   return [
