@@ -1115,6 +1115,7 @@ function buildShotPrompt(shot: ComicShot, index: number) {
     shot.character ? '出镜角色：' + shot.character : '',
     shotCharacterBible(shot) ? '角色身份锁定：' + shotCharacterBible(shot) : '',
     shot.scene ? '场景：' + shot.scene : '',
+    matchedScene(shot)?.description ? '场景身份锁定：' + matchedScene(shot)?.description : '',
     shot.shotSize ? '景别：' + shot.shotSize : '',
     shot.camera ? '运镜：' + shot.camera : '',
     shot.dialogue ? '对白/旁白：' + shot.dialogue : '',
