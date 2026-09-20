@@ -79,3 +79,14 @@ test('comic character reference follows declared video capabilities', () => {
   assert.match(comicSource, /characterReferenceFileId/);
   assert.match(comicSource, /未声明参考图能力/);
 });
+
+test('comic studio supports reusable multi-character assets', () => {
+  assert.match(comicSource, /type ComicCharacter/);
+  assert.match(comicSource, /characterLibrary/);
+  assert.match(comicSource, /addCharacterAsset/);
+  assert.match(comicSource, /chooseRoleReference/);
+  assert.match(comicSource, /shotCharacters/);
+  assert.match(comicSource, /shotCharacterBible/);
+  assert.match(comicSource, /shotReferenceFileIds/);
+  assert.match(comicSource, /角色身份锁定/);
+});

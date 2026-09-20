@@ -208,6 +208,14 @@
       <view class="form-section">
         <view class="form-title">角色设定</view>
         <input v-model="character" class="character-input" placeholder="主角身份、性格、服装或关键关系" placeholder-class="field-placeholder" />
+        <view class="character-library">
+          <view class="character-library-head"><text>角色资产库</text><button @tap="addCharacterAsset">＋ 新角色</button></view>
+          <view v-for="(role, roleIndex) in characterLibrary" :key="role.id" class="character-asset">
+            <view class="character-asset-media" @tap="chooseRoleReference(roleIndex)"><image v-if="role.referenceUrl" :src="role.referenceUrl" mode="aspectFill" /><text v-else>参考图</text></view>
+            <view class="character-asset-fields"><input v-model="role.name" placeholder="角色名" /><textarea v-model="role.description" auto-height placeholder="固定外貌、发型、服装、年龄等" /></view>
+            <button class="character-asset-delete" @tap="removeCharacterAsset(roleIndex)">删除</button>
+          </view>
+        </view>
         <view class="character-reference-card">
           <view class="character-reference-copy"><text class="character-reference-title">角色参考图</text><text class="character-reference-desc">{{ characterReferenceHint }}</text></view>
           <view class="character-reference-media" @tap="chooseCharacterReference"><image v-if="characterReferenceUrl" :src="characterReferenceUrl" mode="aspectFill" /><text v-else>＋ 上传</text></view>
@@ -470,6 +478,8 @@ const modelOptions = computed<ModelTier[]>(() => {
   return isDevFallbackEnabled ? fallbackModels : [];
 });
 
+type ComicCharacter = { id: string; name: string; description: string; referenceUrl?: string; referenceFileId?: number };
+const characterLibrary = ref<ComicCharacter[]>([]);
 const characterReferenceUrl = ref('');
 const characterReferenceFileId = ref<number | undefined>(undefined);
 const supportsCharacterReference = computed(() => {
@@ -479,6 +489,37 @@ const supportsCharacterReference = computed(() => {
 const characterReferenceHint = computed(() => supportsCharacterReference.value
   ? '当前模型支持参考图，生成镜头时会携带它提高人物一致性。'
   : '当前模型未声明参考图能力；仅使用角色文字设定，不伪装支持参考图。');
+
+function addCharacterAsset() {
+  characterLibrary.value.push({ id: 'character-' + Date.now(), name: '新角色', description: '' }); saveComicDraft();
+}
+function removeCharacterAsset(index: number) { characterLibrary.value.splice(index, 1); saveComicDraft(); }
+function chooseRoleReference(index: number) {
+  const role = characterLibrary.value[index]; if (!role) return;
+  uni.chooseImage({ count: 1, sizeType: ['compressed'], sourceType: ['album', 'camera'], success: async (res) => {
+    const path = res.tempFilePaths?.[0]; if (!path) return;
+    try {
+      const uploaded = await uploadAsset<Record<string, unknown>>(path, 'ref_image', 'public');
+      role.referenceUrl = String(uploaded.url || uploaded.fileUrl || uploaded.cdnUrl || path);
+      role.referenceFileId = Number(uploaded.fileId || uploaded.id || 0) || undefined; saveComicDraft();
+    } catch { uni.showToast({ title: '角色参考图上传失败', icon: 'none' }); }
+  }});
+}
+function shotCharacters(shot: ComicShot) {
+  const names = String(shot.character || '').split(/[、,，/]/).map((v) => v.trim()).filter(Boolean);
+  return characterLibrary.value.filter((role) => names.some((name) => role.name === name || role.name.includes(name) || name.includes(role.name)));
+}
+function shotCharacterBible(shot: ComicShot) {
+  const matched = shotCharacters(shot);
+  return matched.length ? matched.map((role) => role.name + '：' + role.description).join('；') : character.value;
+}
+function shotReferenceFileIds(shot: ComicShot) {
+  if (!supportsCharacterReference.value) return [] as number[];
+  const matched = shotCharacters(shot).map((role) => role.referenceFileId).filter((id): id is number => Boolean(id));
+  if (matched.length) return matched.slice(0, Number(selectedModel.value?.capabilities?.maxReferenceImages || 1));
+  return characterReferenceFileId.value ? [characterReferenceFileId.value] : [];
+}
+
 async function chooseCharacterReference() {
   uni.chooseImage({ count: 1, sizeType: ['compressed'], sourceType: ['album', 'camera'], success: async (res) => {
     const path = res.tempFilePaths?.[0]; if (!path) return;
@@ -818,7 +859,8 @@ function buildShotPrompt(shot: ComicShot, index: number) {
   return [
     '这是同一部漫剧的第' + (index + 1) + '个镜头，请保持人物身份、服装、发型和整体画风连续。',
     shot.description,
-    shot.character ? '出镜角色：' + shot.character : (character.value ? '主角设定：' + character.value : ''),
+    shot.character ? '出镜角色：' + shot.character : '',
+    shotCharacterBible(shot) ? '角色身份锁定：' + shotCharacterBible(shot) : '',
     shot.scene ? '场景：' + shot.scene : '',
     shot.shotSize ? '景别：' + shot.shotSize : '',
     shot.camera ? '运镜：' + shot.camera : '',
@@ -839,8 +881,8 @@ async function generateShot(index: number) {
     const result = await createComicTask<Record<string, unknown>>({
       prompt: buildShotPrompt(shot, index), tierKey: selectedModel.value.tierKey, videoMode: 'text_to_video',
       ratio: selectedRatio.value, duration: shotDuration(), style: selectedStyle.value, autoScript: false,
-      params: { genre: selectedGenre.value, character: shot.character || character.value, sceneType: 'comic_shot', shotId: shot.id, shotIndex: index,
-        ...(supportsCharacterReference.value && characterReferenceFileId.value ? { referenceFileIds: [characterReferenceFileId.value], firstFrameFileId: characterReferenceFileId.value } : {}) }
+      params: { genre: selectedGenre.value, character: shotCharacterBible(shot), sceneType: 'comic_shot', shotId: shot.id, shotIndex: index,
+        ...(shotReferenceFileIds(shot).length ? { referenceFileIds: shotReferenceFileIds(shot), firstFrameFileId: shotReferenceFileIds(shot)[0] } : {}) }
     });
     const id = Number(result.id || result.taskId);
     if (!Number.isInteger(id) || id <= 0) throw new Error('invalid task');
@@ -880,7 +922,7 @@ function moveShot(index: number, delta: number) {
 }
 
 function saveComicDraft() {
-  writePersistentCache(COMIC_DRAFT_CACHE_KEY, { story: story.value, character: character.value, genre: selectedGenre.value, style: selectedStyle.value, ratio: selectedRatio.value, duration: selectedDuration.value, script: generatedScript.value, storyboard: storyboardShots.value, step: pipelineStep.value, characterReferenceUrl: characterReferenceUrl.value, characterReferenceFileId: characterReferenceFileId.value });
+  writePersistentCache(COMIC_DRAFT_CACHE_KEY, { story: story.value, character: character.value, genre: selectedGenre.value, style: selectedStyle.value, ratio: selectedRatio.value, duration: selectedDuration.value, script: generatedScript.value, storyboard: storyboardShots.value, step: pipelineStep.value, characterReferenceUrl: characterReferenceUrl.value, characterReferenceFileId: characterReferenceFileId.value, characterLibrary: characterLibrary.value });
 }
 function restoreComicDraft() {
   const draft = readPersistentCache<Record<string, unknown>>(COMIC_DRAFT_CACHE_KEY, 7 * 24 * 60 * 60_000);
@@ -1879,5 +1921,5 @@ function middleModelIndex() {
   color: #ffffff;
   box-shadow: none;
 }
- .pipeline-card,.production-card{margin-bottom:24rpx;padding:24rpx;border-radius:22rpx;background:#fff;box-shadow:0 8rpx 24rpx rgba(83,65,160,.08)} .pipeline-title,.production-head{display:flex;justify-content:space-between;font-weight:900;font-size:28rpx}.pipeline-steps{display:flex;justify-content:space-between;margin-top:22rpx}.pipeline-step{display:flex;align-items:center;gap:7rpx;color:#9a96aa;font-size:22rpx}.pipeline-step.active,.pipeline-step.done{color:#6c4bff;font-weight:800}.pipeline-dot{width:14rpx;height:14rpx;border-radius:50%;background:#ddd8eb}.pipeline-step.active .pipeline-dot,.pipeline-step.done .pipeline-dot{background:#6c4bff}.pipeline-hint{margin-top:18rpx;color:#777184;font-size:22rpx;line-height:1.6}.pipeline-actions{display:grid;grid-template-columns:1fr 1fr;gap:16rpx;margin:20rpx 0}.pipeline-secondary{height:72rpx;border-radius:18rpx;background:#f1edff;color:#6847e8;font-size:24rpx;font-weight:800}.script-editor{width:100%;min-height:220rpx;margin-top:18rpx;padding:18rpx;box-sizing:border-box;border-radius:16rpx;background:#f8f7fb;font-size:24rpx;line-height:1.65}.shot-row{display:flex;gap:16rpx;padding:18rpx 0;border-bottom:1rpx solid #f0edf6}.shot-index{display:flex;align-items:center;justify-content:center;flex:0 0 46rpx;height:46rpx;border-radius:14rpx;background:#eee9ff;color:#6545dc;font-weight:900}.shot-head{display:flex;align-items:center;gap:12rpx}.shot-title-input{flex:1;font-size:24rpx;font-weight:900}.shot-status{padding:5rpx 12rpx;border-radius:999rpx;background:#f0ecff;color:#6c4bff;font-size:18rpx}.shot-description-input{width:100%;min-height:86rpx;margin-top:10rpx;font-size:22rpx;line-height:1.55}.shot-meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:10rpx;margin-top:10rpx}.shot-field{height:58rpx;padding:0 14rpx;border-radius:12rpx;background:#f8f7fb;font-size:20rpx}.character-reference-card{display:flex;align-items:center;gap:16rpx;margin-top:14rpx;padding:16rpx;border-radius:18rpx;background:#f8f7fb}.character-reference-copy{display:flex;flex:1;flex-direction:column;gap:6rpx}.character-reference-title{font-size:22rpx;font-weight:800}.character-reference-desc{font-size:18rpx;line-height:1.45;color:#8c8798}.character-reference-media{display:flex;align-items:center;justify-content:center;width:92rpx;height:92rpx;overflow:hidden;border-radius:16rpx;background:#eee9ff;color:#6847e8;font-size:20rpx}.character-reference-media image{width:100%;height:100%}.character-reference-remove{height:48rpx;padding:0 12rpx;background:transparent;color:#d84f67;font-size:18rpx;line-height:48rpx}.shot-output{overflow:hidden;width:100%;height:260rpx;margin-top:12rpx;border-radius:16rpx;background:#111}.shot-output video,.shot-output image{width:100%;height:100%}.shot-actions{display:flex;flex-wrap:wrap;gap:10rpx;margin-top:12rpx}.shot-actions button{height:52rpx;padding:0 16rpx;border-radius:12rpx;background:#f4f2f8;font-size:19rpx;line-height:52rpx}.shot-actions .generate{background:#6c4bff;color:#fff}.shot-actions .danger{color:#d84f67}.add-shot-button{height:66rpx;margin-top:18rpx;border-radius:16rpx;background:#f0ecff;color:#6847e8;font-size:22rpx;font-weight:800}.shot-desc,.shot-dialogue{margin-top:8rpx;color:#686372;font-size:22rpx;line-height:1.55}.shot-dialogue{color:#8a64c9}
+ .pipeline-card,.production-card{margin-bottom:24rpx;padding:24rpx;border-radius:22rpx;background:#fff;box-shadow:0 8rpx 24rpx rgba(83,65,160,.08)} .pipeline-title,.production-head{display:flex;justify-content:space-between;font-weight:900;font-size:28rpx}.pipeline-steps{display:flex;justify-content:space-between;margin-top:22rpx}.pipeline-step{display:flex;align-items:center;gap:7rpx;color:#9a96aa;font-size:22rpx}.pipeline-step.active,.pipeline-step.done{color:#6c4bff;font-weight:800}.pipeline-dot{width:14rpx;height:14rpx;border-radius:50%;background:#ddd8eb}.pipeline-step.active .pipeline-dot,.pipeline-step.done .pipeline-dot{background:#6c4bff}.pipeline-hint{margin-top:18rpx;color:#777184;font-size:22rpx;line-height:1.6}.pipeline-actions{display:grid;grid-template-columns:1fr 1fr;gap:16rpx;margin:20rpx 0}.pipeline-secondary{height:72rpx;border-radius:18rpx;background:#f1edff;color:#6847e8;font-size:24rpx;font-weight:800}.script-editor{width:100%;min-height:220rpx;margin-top:18rpx;padding:18rpx;box-sizing:border-box;border-radius:16rpx;background:#f8f7fb;font-size:24rpx;line-height:1.65}.shot-row{display:flex;gap:16rpx;padding:18rpx 0;border-bottom:1rpx solid #f0edf6}.shot-index{display:flex;align-items:center;justify-content:center;flex:0 0 46rpx;height:46rpx;border-radius:14rpx;background:#eee9ff;color:#6545dc;font-weight:900}.shot-head{display:flex;align-items:center;gap:12rpx}.shot-title-input{flex:1;font-size:24rpx;font-weight:900}.shot-status{padding:5rpx 12rpx;border-radius:999rpx;background:#f0ecff;color:#6c4bff;font-size:18rpx}.shot-description-input{width:100%;min-height:86rpx;margin-top:10rpx;font-size:22rpx;line-height:1.55}.shot-meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:10rpx;margin-top:10rpx}.shot-field{height:58rpx;padding:0 14rpx;border-radius:12rpx;background:#f8f7fb;font-size:20rpx}.character-library{margin-top:16rpx}.character-library-head{display:flex;align-items:center;justify-content:space-between;font-size:22rpx;font-weight:800}.character-library-head button{height:50rpx;padding:0 14rpx;border-radius:12rpx;background:#eee9ff;color:#6847e8;font-size:18rpx;line-height:50rpx}.character-asset{display:flex;align-items:flex-start;gap:12rpx;margin-top:12rpx;padding:14rpx;border-radius:16rpx;background:#f8f7fb}.character-asset-media{display:flex;align-items:center;justify-content:center;width:82rpx;height:82rpx;overflow:hidden;border-radius:14rpx;background:#eee9ff;color:#6847e8;font-size:18rpx}.character-asset-media image{width:100%;height:100%}.character-asset-fields{display:flex;flex:1;flex-direction:column;gap:8rpx}.character-asset-fields input,.character-asset-fields textarea{width:100%;font-size:20rpx}.character-asset-delete{height:44rpx;padding:0 10rpx;background:transparent;color:#d84f67;font-size:17rpx;line-height:44rpx}.character-reference-card{display:flex;align-items:center;gap:16rpx;margin-top:14rpx;padding:16rpx;border-radius:18rpx;background:#f8f7fb}.character-reference-copy{display:flex;flex:1;flex-direction:column;gap:6rpx}.character-reference-title{font-size:22rpx;font-weight:800}.character-reference-desc{font-size:18rpx;line-height:1.45;color:#8c8798}.character-reference-media{display:flex;align-items:center;justify-content:center;width:92rpx;height:92rpx;overflow:hidden;border-radius:16rpx;background:#eee9ff;color:#6847e8;font-size:20rpx}.character-reference-media image{width:100%;height:100%}.character-reference-remove{height:48rpx;padding:0 12rpx;background:transparent;color:#d84f67;font-size:18rpx;line-height:48rpx}.shot-output{overflow:hidden;width:100%;height:260rpx;margin-top:12rpx;border-radius:16rpx;background:#111}.shot-output video,.shot-output image{width:100%;height:100%}.shot-actions{display:flex;flex-wrap:wrap;gap:10rpx;margin-top:12rpx}.shot-actions button{height:52rpx;padding:0 16rpx;border-radius:12rpx;background:#f4f2f8;font-size:19rpx;line-height:52rpx}.shot-actions .generate{background:#6c4bff;color:#fff}.shot-actions .danger{color:#d84f67}.add-shot-button{height:66rpx;margin-top:18rpx;border-radius:16rpx;background:#f0ecff;color:#6847e8;font-size:22rpx;font-weight:800}.shot-desc,.shot-dialogue{margin-top:8rpx;color:#686372;font-size:22rpx;line-height:1.55}.shot-dialogue{color:#8a64c9}
 </style>
