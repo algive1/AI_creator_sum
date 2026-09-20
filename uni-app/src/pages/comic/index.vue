@@ -687,6 +687,7 @@ onShow(async () => {
   getVideoModels(FEATURE_KEYS.imageToVideo).then((res) => {
     const list = Array.isArray(res.list) ? res.list as Record<string, unknown>[] : [];
     imageToVideoTierKeys.value = new Set(list.map((item) => String(item.tierKey || '')).filter(Boolean));
+    invalidateStaleShotAssets();
   }).catch(() => { imageToVideoTierKeys.value = new Set(); });
   getVideoModels(FEATURE_KEYS.video).then((res) => {
     const list = Array.isArray(res.list) ? res.list as Record<string, unknown>[] : [];
@@ -1085,9 +1086,11 @@ async function generateShot(index: number, options: { silent?: boolean } = {}) {
     const id = Number(result.id || result.taskId);
     if (!Number.isInteger(id) || id <= 0) throw new Error('invalid task');
     shot.taskId = id; shot.status = 'generating'; shot.generationFingerprint = shotFingerprint(shot); saveComicDraft(); ensureShotTaskPolling();
-    uni.showToast({ title: '镜头已提交，可继续编辑其他镜头', icon: 'none' });
-  } catch {
+    if (!options.silent) uni.showToast({ title: '镜头已提交，可继续编辑其他镜头', icon: 'none' });
+  } catch (err: any) {
     shot.status = 'failed'; saveComicDraft();
+    if (!options.silent) uni.showToast({ title: err?.message || '镜头生成失败', icon: 'none' });
+    throw err;
   }
 }
 function shotDuration() {
