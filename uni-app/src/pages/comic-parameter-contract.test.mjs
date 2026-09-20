@@ -112,3 +112,12 @@ test('comic generated shots become stale when production inputs change', () => {
   assert.match(comicSource, /shot\.outputUrl = ''/);
   assert.match(comicSource, /watch\(\[selectedStyle, selectedRatio, characterLibrary, sceneLibrary, storyboardShots\]/);
 });
+
+test('comic batch submission isolates per-shot failures', () => {
+  assert.match(comicSource, /generateShot\(index: number, options:/);
+  assert.match(comicSource, /generateShot\(index, \{ silent: true \}\)/);
+  assert.match(comicSource, /submitted \+= 1/);
+  assert.match(comicSource, /failed \+= 1/);
+  assert.match(comicSource, /失败镜头已保留，可单独重试/);
+  assert.match(comicSource, /throw err/);
+});
