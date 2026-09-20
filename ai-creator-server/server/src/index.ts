@@ -53,6 +53,7 @@ import { preloadStorageConfigs } from './services/storage/storage-config-loader'
 import { ensureLocalUploadDir, getLocalStaticMountPath } from './services/storage/local-paths';
 import { recoverStaleAiTasks } from './services/task.service';
 import { closeTaskQueue } from './services/task-queue.service';
+import { closeComicCompositionQueue, recoverComicCompositionJobs } from './services/comic-composition-queue.service';
 import { startVideoPollingScheduler } from './services/video-polling.service';
 import { processExpiredMemberships } from './services/membership.service';
 import { processMembershipMonthlyPointGrants } from './services/membership-points.service';
@@ -678,6 +679,7 @@ function startInstalledRuntime(): void {
     .catch(err => console.error('[Startup] Orphaned text charge recovery failed:', err.message));
   warnIfNoUsableAiProvider().catch(err => console.error('[Startup] AI provider config check failed:', err.message));
   startVideoPollingScheduler();
+  recoverComicCompositionJobs().then(count => { if (count > 0) console.log(`[Startup] Requeued ${count} comic composition job(s).`); }).catch(err => console.error('[Startup] Comic composition recovery failed:', err.message));
 }
 
 function startInstallCompletionWatcher(): void {
@@ -709,6 +711,7 @@ function gracefulShutdown(signal: string) {
   // 给进行中的请求 10 秒排空时间
   setTimeout(async () => {
     try { await closeTaskQueue(); } catch (e: any) { console.error('[Shutdown] Queue close error:', e.message); }
+    try { await closeComicCompositionQueue(); } catch (e: any) { console.error('[Shutdown] Comic composition queue close error:', e.message); }
     try { await endDbPool(); } catch (e: any) { console.error('[Shutdown] DB pool close error:', e.message); }
     console.log('[Shutdown] Done.');
     process.exit(0);
