@@ -1,8 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 
-import { isPrivateAddress, targetDimensions } from '../src/services/comic-composition-worker.service';
+import { isPrivateAddress, normalizeShot, probeMedia, targetDimensions } from '../src/services/comic-composition-worker.service';
 import { compositionQueueJobId } from '../src/services/comic-composition-queue.service';
 
 const compositionServiceSource = readFileSync(new URL('../src/services/comic-composition.service.ts', import.meta.url), 'utf8');
@@ -46,4 +50,39 @@ test('comic composition output is registered as a file and project media asset',
   assert.match(compositionWorkerSource, /createUploadedMediaAsset/);
   assert.match(compositionWorkerSource, /output_file_id=\?/);
   assert.match(compositionWorkerSource, /file_category, visibility, ref_type, ref_id/);
+});
+
+test('comic composition actually normalizes mixed ffmpeg inputs to one compatible stream shape', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'comic-compose-test-'));
+  try {
+    const sourceA = join(dir, 'a.mp4');
+    const sourceB = join(dir, 'b.mp4');
+    const normalizedA = join(dir, 'a-normalized.mp4');
+    const normalizedB = join(dir, 'b-normalized.mp4');
+    execFileSync(process.env.FFMPEG_PATH || 'ffmpeg', [
+      '-y', '-f', 'lavfi', '-i', 'color=c=black:s=320x240:r=24:d=1',
+      '-an', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', sourceA
+    ], { stdio: 'ignore' });
+    execFileSync(process.env.FFMPEG_PATH || 'ffmpeg', [
+      '-y', '-f', 'lavfi', '-i', 'color=c=black:s=640x360:r=25:d=1',
+      '-f', 'lavfi', '-i', 'sine=frequency=1000:duration=1',
+      '-shortest', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', sourceB
+    ], { stdio: 'ignore' });
+
+    const probeA = await probeMedia(sourceA);
+    const probeB = await probeMedia(sourceB);
+    await normalizeShot(sourceA, normalizedA, probeA, 320, 240);
+    await normalizeShot(sourceB, normalizedB, probeB, 320, 240);
+
+    const outA = await probeMedia(normalizedA);
+    const outB = await probeMedia(normalizedB);
+    assert.deepEqual([outA.width, outA.height], [320, 240]);
+    assert.deepEqual([outB.width, outB.height], [320, 240]);
+    assert.equal(outA.hasAudio, true);
+    assert.equal(outB.hasAudio, true);
+    assert.ok(outA.duration > 0);
+    assert.ok(outB.duration > 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
