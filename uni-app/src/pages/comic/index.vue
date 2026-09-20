@@ -206,7 +206,14 @@
         </view>
         <view class="assembly-readiness-card">
           <view><text class="assembly-title">成片准备</text><text>{{ assemblyReadyCount }}/{{ assemblyShots.length }} 镜可用 · 约 {{ assemblyDurationSeconds }} 秒</text></view>
-          <button :class="{ ready: assemblyReady }" @tap="previewAssemblyReadiness">{{ assemblyReady ? '检查成片序列' : '查看缺失镜头' }}</button>
+          <button :class="{ ready: assemblyReady }" :disabled="compositionJob?.status === 'processing' || compositionJob?.status === 'pending'" @tap="previewAssemblyReadiness">{{ assemblyActionLabel }}</button>
+        </view>
+        <view v-if="compositionJob" class="composition-status-card" :class="{ stale: compositionIsStale }">
+          <view class="composition-status-head"><text>成片任务 · {{ compositionStatusLabel }}</text><text v-if="compositionIsStale">当前分镜已变化</text></view>
+          <text v-if="compositionJob.status === 'processing' || compositionJob.status === 'pending'" class="composition-status-desc">服务器正在统一镜头规格并合成，离开页面后仍会继续。</text>
+          <text v-else-if="compositionIsStale" class="composition-status-desc">这个成片来自旧的镜头顺序或旧输出，可以预览，但发布前应重新合成。</text>
+          <text v-else-if="compositionJob.status === 'failed'" class="composition-status-desc danger">{{ compositionJob.errorMessage || '合成失败，可重新提交。' }}</text>
+          <video v-if="compositionJob.status === 'completed' && compositionJob.outputUrl" class="composition-output-video" :src="compositionJob.outputUrl" controls object-fit="contain" />
         </view>
         <view class="batch-generation-bar"><view><text>待生成 {{ pendingShotCount }} 镜</text><text>预计 {{ batchEstimatedPoints }} 点</text></view><button :disabled="!pendingShotCount" @tap="generatePendingShots">批量生成待完成镜头</button></view>
         <button class="add-shot-button" @tap="addShot">＋ 添加镜头</button></view>
@@ -284,7 +291,7 @@ import AppTabBar from '@/components/common/AppTabBar.vue';
 import AppTopbar from '@/components/common/AppTopbar.vue';
 import AppDialogHost from '@/components/common/AppDialogHost.vue';
 import LegacyPromptComposer from '@/components/legacy/LegacyPromptComposer.vue';
-import { createComicTask, generateComicScript, generateComicStoryboard } from '@/api/comic';
+import { createComicComposition, createComicTask, generateComicScript, generateComicStoryboard, getComicComposition } from '@/api/comic';
 import { getTasksByIds } from '@/api/task';
 import { isTaskCompleted, isTaskFailed, isTaskProcessing, taskOutputList, taskThumbnailOf } from '@/utils/task-display';
 import { getVideoModels } from '@/api/ai-video';
@@ -441,7 +448,16 @@ type ComicShot = {
   thumbnail?: string;
   generationFingerprint?: string;
 };
+type ComicCompositionState = {
+  id: number;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  outputUrl: string;
+  errorMessage: string;
+  fingerprint: string;
+};
 const storyboardShots = ref<ComicShot[]>([]);
+const compositionJob = ref<ComicCompositionState | null>(null);
+let compositionTimer: ReturnType<typeof setInterval> | null = null;
 const pipelineBusy = ref(false);
 const COMIC_DRAFT_CACHE_KEY = 'ai_creator_comic_studio_draft_v2';
 const COMIC_MODEL_CACHE_KEY = 'ai_creator_comic_models_v2';
@@ -550,14 +566,91 @@ const assemblyReadyCount = computed(() => assemblyShots.value.filter((shot) => s
 const assemblyMissingCount = computed(() => assemblyShots.value.length - assemblyReadyCount.value);
 const assemblyReady = computed(() => assemblyShots.value.length > 0 && assemblyMissingCount.value === 0);
 const assemblyDurationSeconds = computed(() => assemblyShots.value.filter((shot) => shot.ready).length * Number.parseInt(shotDuration(), 10));
-function previewAssemblyReadiness() {
+const assemblyFingerprint = computed(() => JSON.stringify(assemblyShots.value.map((shot) => ({ index: shot.index, title: shot.title, url: shot.outputUrl }))));
+const compositionIsStale = computed(() => Boolean(compositionJob.value?.fingerprint && compositionJob.value.fingerprint !== assemblyFingerprint.value));
+const compositionStatusLabel = computed(() => ({
+  pending: '排队中',
+  processing: '合成中',
+  completed: '已完成',
+  failed: '失败'
+}[compositionJob.value?.status || 'pending']));
+const assemblyActionLabel = computed(() => {
+  if (!assemblyReady.value) return '查看缺失镜头';
+  if (compositionJob.value && !compositionIsStale.value && ['pending', 'processing'].includes(compositionJob.value.status)) return '合成中';
+  if (compositionJob.value?.status === 'completed' && !compositionIsStale.value) return '重新合成';
+  if (compositionJob.value?.status === 'failed' && !compositionIsStale.value) return '重新合成';
+  return '合成成片';
+});
+function normalizeCompositionJob(raw: Record<string, unknown>, fingerprint: string): ComicCompositionState | null {
+  const id = Number(raw.id || raw.jobId || 0);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  const rawStatus = String(raw.status || 'pending');
+  const status: ComicCompositionState['status'] = ['pending', 'processing', 'completed', 'failed'].includes(rawStatus)
+    ? rawStatus as ComicCompositionState['status']
+    : 'pending';
+  return {
+    id,
+    status,
+    outputUrl: String(raw.outputUrl || raw.output_url || ''),
+    errorMessage: String(raw.errorMessage || raw.error_message || ''),
+    fingerprint
+  };
+}
+function stopCompositionPolling() {
+  if (compositionTimer) clearInterval(compositionTimer);
+  compositionTimer = null;
+}
+async function pollCompositionJob() {
+  const current = compositionJob.value;
+  if (!current || !['pending', 'processing'].includes(current.status)) { stopCompositionPolling(); return; }
+  try {
+    const result = await getComicComposition<Record<string, unknown>>(current.id);
+    const next = normalizeCompositionJob(result, current.fingerprint);
+    if (!next) return;
+    compositionJob.value = next;
+    saveComicDraft();
+    if (next.status === 'completed' || next.status === 'failed') stopCompositionPolling();
+  } catch { /* 静默轮询，页面重新进入时会继续恢复 */ }
+}
+function startCompositionPolling() {
+  if (!comicPageVisible || !compositionJob.value || !['pending', 'processing'].includes(compositionJob.value.status)) return;
+  stopCompositionPolling();
+  pollCompositionJob().catch(() => undefined);
+  compositionTimer = setInterval(() => { pollCompositionJob().catch(() => undefined); }, 3000);
+}
+async function previewAssemblyReadiness() {
   if (!assemblyShots.value.length) { uni.showToast({ title: '请先生成分镜', icon: 'none' }); return; }
   if (!assemblyReady.value) {
     const missing = assemblyShots.value.filter((shot) => !shot.ready).slice(0, 4).map((shot) => shot.title).join('、');
     uni.showModal({ title: '暂不能合成', content: '还有 ' + assemblyMissingCount.value + ' 个镜头没有可用成片：' + missing + (assemblyMissingCount.value > 4 ? ' 等' : '') + '。请生成或重试后再合成。', showCancel: false });
     return;
   }
-  uni.showModal({ title: '成片序列已就绪', content: '共 ' + assemblyReadyCount.value + ' 个镜头，将严格按当前分镜顺序合成。预计视频时长约 ' + assemblyDurationSeconds.value + ' 秒。', showCancel: false });
+  if (compositionJob.value && !compositionIsStale.value && ['pending', 'processing'].includes(compositionJob.value.status)) {
+    startCompositionPolling();
+    uni.showToast({ title: '成片正在后台合成', icon: 'none' });
+    return;
+  }
+  const loggedIn = await ensureLoggedIn({ title: '登录后合成成片', subtitle: '成片会在服务器后台合成，离开页面后任务仍会继续。' });
+  if (!loggedIn) return;
+  const confirmed = await new Promise<boolean>((resolve) => uni.showModal({
+    title: compositionJob.value?.status === 'completed' && !compositionIsStale.value ? '重新合成成片' : '开始合成成片',
+    content: '将按当前 ' + assemblyReadyCount.value + ' 个镜头的顺序合成，预计时长约 ' + assemblyDurationSeconds.value + ' 秒。合成过程会统一分辨率、帧率和音轨。',
+    confirmText: '开始合成',
+    success: (res) => resolve(Boolean(res.confirm)),
+    fail: () => resolve(false)
+  }));
+  if (!confirmed) return;
+  try {
+    const fingerprint = assemblyFingerprint.value;
+    const result = await createComicComposition<Record<string, unknown>>({
+      shots: assemblyShots.value.map((shot) => ({ index: shot.index, title: shot.title, url: shot.outputUrl }))
+    });
+    const next = normalizeCompositionJob(result, fingerprint);
+    if (!next) throw new Error('invalid composition job');
+    compositionJob.value = next;
+    saveComicDraft();
+    startCompositionPolling();
+  } catch { /* 请求层已提示错误 */ }
 }
 
 const pendingShotCount = computed(() => storyboardShots.value.filter((shot) => shot.status !== 'done' && shot.status !== 'generating' && shot.description.trim()).length);
@@ -679,6 +772,7 @@ onShow(async () => {
   restoreComicDraft();
   comicPageVisible = true;
   await syncShotTasks().catch(() => undefined);
+  startCompositionPolling();
   if (comicMaintenanceMode.value) {
     showComicMaintenanceMessage();
   }
@@ -717,8 +811,8 @@ watch(() => selectedModel.value?.tierKey, () => { normalizeComicParams(); invali
 watch([selectedStyle, selectedRatio, characterLibrary, sceneLibrary, storyboardShots], invalidateStaleShotAssets, { deep: true });
 watch([story, character, selectedGenre, selectedStyle, selectedRatio, selectedDuration, generatedScript, storyboardShots], saveComicDraft, { deep: true });
 
-onHide(() => { comicPageVisible = false; stopShotTaskPolling(); });
-onUnload(() => { comicPageVisible = false; stopShotTaskPolling(); });
+onHide(() => { comicPageVisible = false; stopShotTaskPolling(); stopCompositionPolling(); });
+onUnload(() => { comicPageVisible = false; stopShotTaskPolling(); stopCompositionPolling(); });
 
 onShareAppMessage(() => createShareMessage({
   title: '用 AI 创作漫画短剧',
@@ -1132,7 +1226,7 @@ function moveShot(index: number, delta: number) {
 }
 
 function saveComicDraft() {
-  writePersistentCache(COMIC_DRAFT_CACHE_KEY, { story: story.value, character: character.value, genre: selectedGenre.value, style: selectedStyle.value, ratio: selectedRatio.value, duration: selectedDuration.value, script: generatedScript.value, storyboard: storyboardShots.value, step: pipelineStep.value, selectedTierKey: selectedModel.value?.tierKey || restoredTierKey.value, characterReferenceUrl: characterReferenceUrl.value, characterReferenceFileId: characterReferenceFileId.value, characterLibrary: characterLibrary.value, sceneLibrary: sceneLibrary.value });
+  writePersistentCache(COMIC_DRAFT_CACHE_KEY, { story: story.value, character: character.value, genre: selectedGenre.value, style: selectedStyle.value, ratio: selectedRatio.value, duration: selectedDuration.value, script: generatedScript.value, storyboard: storyboardShots.value, step: pipelineStep.value, selectedTierKey: selectedModel.value?.tierKey || restoredTierKey.value, characterReferenceUrl: characterReferenceUrl.value, characterReferenceFileId: characterReferenceFileId.value, characterLibrary: characterLibrary.value, sceneLibrary: sceneLibrary.value, compositionJob: compositionJob.value });
 }
 function restoreComicDraft() {
   const draft = readPersistentCache<Record<string, unknown>>(COMIC_DRAFT_CACHE_KEY, 7 * 24 * 60 * 60_000);
@@ -1149,6 +1243,8 @@ function restoreComicDraft() {
     taskId: Number(shot.taskId) || undefined,
     outputUrl: String(shot.outputUrl || ''), thumbnail: String(shot.thumbnail || ''), generationFingerprint: String(shot.generationFingerprint || '')
   })) : [];
+  const savedComposition = draft.compositionJob && typeof draft.compositionJob === 'object' ? draft.compositionJob as Record<string, unknown> : null;
+  if (savedComposition) compositionJob.value = normalizeCompositionJob(savedComposition, String(savedComposition.fingerprint || ''));
   const step = String(draft.step || 'idea'); if (['idea','script','storyboard','generate'].includes(step)) pipelineStep.value = step as 'idea'|'script'|'storyboard'|'generate';
 }
 
@@ -2139,5 +2235,5 @@ function restoreSelectedModelIndex() {
   color: #ffffff;
   box-shadow: none;
 }
- .pipeline-card,.production-card{margin-bottom:24rpx;padding:24rpx;border-radius:22rpx;background:#fff;box-shadow:0 8rpx 24rpx rgba(83,65,160,.08)} .pipeline-title,.production-head{display:flex;justify-content:space-between;font-weight:900;font-size:28rpx}.pipeline-steps{display:flex;justify-content:space-between;margin-top:22rpx}.pipeline-step{display:flex;align-items:center;gap:7rpx;color:#9a96aa;font-size:22rpx}.pipeline-step.active,.pipeline-step.done{color:#6c4bff;font-weight:800}.pipeline-dot{width:14rpx;height:14rpx;border-radius:50%;background:#ddd8eb}.pipeline-step.active .pipeline-dot,.pipeline-step.done .pipeline-dot{background:#6c4bff}.pipeline-hint{margin-top:18rpx;color:#777184;font-size:22rpx;line-height:1.6}.pipeline-actions{display:grid;grid-template-columns:1fr 1fr;gap:16rpx;margin:20rpx 0}.pipeline-secondary{height:72rpx;border-radius:18rpx;background:#f1edff;color:#6847e8;font-size:24rpx;font-weight:800}.script-editor{width:100%;min-height:220rpx;margin-top:18rpx;padding:18rpx;box-sizing:border-box;border-radius:16rpx;background:#f8f7fb;font-size:24rpx;line-height:1.65}.shot-row{display:flex;gap:16rpx;padding:18rpx 0;border-bottom:1rpx solid #f0edf6}.shot-index{display:flex;align-items:center;justify-content:center;flex:0 0 46rpx;height:46rpx;border-radius:14rpx;background:#eee9ff;color:#6545dc;font-weight:900}.shot-head{display:flex;align-items:center;gap:12rpx}.shot-title-input{flex:1;font-size:24rpx;font-weight:900}.shot-status{padding:5rpx 12rpx;border-radius:999rpx;background:#f0ecff;color:#6c4bff;font-size:18rpx}.shot-description-input{width:100%;min-height:86rpx;margin-top:10rpx;font-size:22rpx;line-height:1.55}.shot-meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:10rpx;margin-top:10rpx}.shot-field{height:58rpx;padding:0 14rpx;border-radius:12rpx;background:#f8f7fb;font-size:20rpx}.assembly-readiness-card{display:flex;align-items:center;justify-content:space-between;gap:16rpx;margin-top:18rpx;padding:18rpx;border-radius:18rpx;background:#f7f8fb}.assembly-readiness-card>view{display:flex;flex-direction:column;gap:5rpx;font-size:19rpx;color:#777184}.assembly-title{font-size:22rpx;font-weight:800;color:#302c3a}.assembly-readiness-card button{height:56rpx;padding:0 16rpx;border-radius:14rpx;background:#eceaf2;color:#665f72;font-size:18rpx;line-height:56rpx}.assembly-readiness-card button.ready{background:#6c4bff;color:#fff}.scene-library{margin-top:16rpx}.batch-generation-bar{display:flex;align-items:center;justify-content:space-between;gap:16rpx;margin-top:18rpx;padding:16rpx;border-radius:16rpx;background:#f4f0ff}.batch-generation-bar view{display:flex;flex-direction:column;gap:4rpx;font-size:19rpx;color:#766d88}.batch-generation-bar button{height:58rpx;padding:0 18rpx;border-radius:14rpx;background:#6c4bff;color:#fff;font-size:19rpx;line-height:58rpx}.character-library{margin-top:16rpx}.character-library-head{display:flex;align-items:center;justify-content:space-between;font-size:22rpx;font-weight:800}.character-library-head button{height:50rpx;padding:0 14rpx;border-radius:12rpx;background:#eee9ff;color:#6847e8;font-size:18rpx;line-height:50rpx}.character-asset{display:flex;align-items:flex-start;gap:12rpx;margin-top:12rpx;padding:14rpx;border-radius:16rpx;background:#f8f7fb}.character-asset-media{display:flex;align-items:center;justify-content:center;width:82rpx;height:82rpx;overflow:hidden;border-radius:14rpx;background:#eee9ff;color:#6847e8;font-size:18rpx}.character-asset-media image{width:100%;height:100%}.character-asset-fields{display:flex;flex:1;flex-direction:column;gap:8rpx}.character-asset-fields input,.character-asset-fields textarea{width:100%;font-size:20rpx}.character-asset-delete{height:44rpx;padding:0 10rpx;background:transparent;color:#d84f67;font-size:17rpx;line-height:44rpx}.character-reference-card{display:flex;align-items:center;gap:16rpx;margin-top:14rpx;padding:16rpx;border-radius:18rpx;background:#f8f7fb}.character-reference-copy{display:flex;flex:1;flex-direction:column;gap:6rpx}.character-reference-title{font-size:22rpx;font-weight:800}.character-reference-desc{font-size:18rpx;line-height:1.45;color:#8c8798}.character-reference-media{display:flex;align-items:center;justify-content:center;width:92rpx;height:92rpx;overflow:hidden;border-radius:16rpx;background:#eee9ff;color:#6847e8;font-size:20rpx}.character-reference-media image{width:100%;height:100%}.character-reference-remove{height:48rpx;padding:0 12rpx;background:transparent;color:#d84f67;font-size:18rpx;line-height:48rpx}.shot-output{overflow:hidden;width:100%;height:260rpx;margin-top:12rpx;border-radius:16rpx;background:#111}.shot-output video,.shot-output image{width:100%;height:100%}.shot-actions{display:flex;flex-wrap:wrap;gap:10rpx;margin-top:12rpx}.shot-actions button{height:52rpx;padding:0 16rpx;border-radius:12rpx;background:#f4f2f8;font-size:19rpx;line-height:52rpx}.shot-actions .generate{background:#6c4bff;color:#fff}.shot-actions .danger{color:#d84f67}.add-shot-button{height:66rpx;margin-top:18rpx;border-radius:16rpx;background:#f0ecff;color:#6847e8;font-size:22rpx;font-weight:800}.shot-desc,.shot-dialogue{margin-top:8rpx;color:#686372;font-size:22rpx;line-height:1.55}.shot-dialogue{color:#8a64c9}
+ .pipeline-card,.production-card{margin-bottom:24rpx;padding:24rpx;border-radius:22rpx;background:#fff;box-shadow:0 8rpx 24rpx rgba(83,65,160,.08)} .pipeline-title,.production-head{display:flex;justify-content:space-between;font-weight:900;font-size:28rpx}.pipeline-steps{display:flex;justify-content:space-between;margin-top:22rpx}.pipeline-step{display:flex;align-items:center;gap:7rpx;color:#9a96aa;font-size:22rpx}.pipeline-step.active,.pipeline-step.done{color:#6c4bff;font-weight:800}.pipeline-dot{width:14rpx;height:14rpx;border-radius:50%;background:#ddd8eb}.pipeline-step.active .pipeline-dot,.pipeline-step.done .pipeline-dot{background:#6c4bff}.pipeline-hint{margin-top:18rpx;color:#777184;font-size:22rpx;line-height:1.6}.pipeline-actions{display:grid;grid-template-columns:1fr 1fr;gap:16rpx;margin:20rpx 0}.pipeline-secondary{height:72rpx;border-radius:18rpx;background:#f1edff;color:#6847e8;font-size:24rpx;font-weight:800}.script-editor{width:100%;min-height:220rpx;margin-top:18rpx;padding:18rpx;box-sizing:border-box;border-radius:16rpx;background:#f8f7fb;font-size:24rpx;line-height:1.65}.shot-row{display:flex;gap:16rpx;padding:18rpx 0;border-bottom:1rpx solid #f0edf6}.shot-index{display:flex;align-items:center;justify-content:center;flex:0 0 46rpx;height:46rpx;border-radius:14rpx;background:#eee9ff;color:#6545dc;font-weight:900}.shot-head{display:flex;align-items:center;gap:12rpx}.shot-title-input{flex:1;font-size:24rpx;font-weight:900}.shot-status{padding:5rpx 12rpx;border-radius:999rpx;background:#f0ecff;color:#6c4bff;font-size:18rpx}.shot-description-input{width:100%;min-height:86rpx;margin-top:10rpx;font-size:22rpx;line-height:1.55}.shot-meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:10rpx;margin-top:10rpx}.shot-field{height:58rpx;padding:0 14rpx;border-radius:12rpx;background:#f8f7fb;font-size:20rpx}.composition-status-card{margin-top:12rpx;padding:18rpx;border:1rpx solid #e6e1f6;border-radius:18rpx;background:#fff}.composition-status-card.stale{border-color:#f0d59a;background:#fffaf0}.composition-status-head{display:flex;align-items:center;justify-content:space-between;gap:12rpx;color:#302c3a;font-size:21rpx;font-weight:800}.composition-status-head text:last-child{color:#a87822;font-size:18rpx}.composition-status-desc{display:block;margin-top:8rpx;color:#7a7485;font-size:19rpx;line-height:1.55}.composition-status-desc.danger{color:#c64545}.composition-output-video{width:100%;height:360rpx;margin-top:14rpx;border-radius:16rpx;background:#111}.assembly-readiness-card{display:flex;align-items:center;justify-content:space-between;gap:16rpx;margin-top:18rpx;padding:18rpx;border-radius:18rpx;background:#f7f8fb}.assembly-readiness-card>view{display:flex;flex-direction:column;gap:5rpx;font-size:19rpx;color:#777184}.assembly-title{font-size:22rpx;font-weight:800;color:#302c3a}.assembly-readiness-card button{height:56rpx;padding:0 16rpx;border-radius:14rpx;background:#eceaf2;color:#665f72;font-size:18rpx;line-height:56rpx}.assembly-readiness-card button.ready{background:#6c4bff;color:#fff}.scene-library{margin-top:16rpx}.batch-generation-bar{display:flex;align-items:center;justify-content:space-between;gap:16rpx;margin-top:18rpx;padding:16rpx;border-radius:16rpx;background:#f4f0ff}.batch-generation-bar view{display:flex;flex-direction:column;gap:4rpx;font-size:19rpx;color:#766d88}.batch-generation-bar button{height:58rpx;padding:0 18rpx;border-radius:14rpx;background:#6c4bff;color:#fff;font-size:19rpx;line-height:58rpx}.character-library{margin-top:16rpx}.character-library-head{display:flex;align-items:center;justify-content:space-between;font-size:22rpx;font-weight:800}.character-library-head button{height:50rpx;padding:0 14rpx;border-radius:12rpx;background:#eee9ff;color:#6847e8;font-size:18rpx;line-height:50rpx}.character-asset{display:flex;align-items:flex-start;gap:12rpx;margin-top:12rpx;padding:14rpx;border-radius:16rpx;background:#f8f7fb}.character-asset-media{display:flex;align-items:center;justify-content:center;width:82rpx;height:82rpx;overflow:hidden;border-radius:14rpx;background:#eee9ff;color:#6847e8;font-size:18rpx}.character-asset-media image{width:100%;height:100%}.character-asset-fields{display:flex;flex:1;flex-direction:column;gap:8rpx}.character-asset-fields input,.character-asset-fields textarea{width:100%;font-size:20rpx}.character-asset-delete{height:44rpx;padding:0 10rpx;background:transparent;color:#d84f67;font-size:17rpx;line-height:44rpx}.character-reference-card{display:flex;align-items:center;gap:16rpx;margin-top:14rpx;padding:16rpx;border-radius:18rpx;background:#f8f7fb}.character-reference-copy{display:flex;flex:1;flex-direction:column;gap:6rpx}.character-reference-title{font-size:22rpx;font-weight:800}.character-reference-desc{font-size:18rpx;line-height:1.45;color:#8c8798}.character-reference-media{display:flex;align-items:center;justify-content:center;width:92rpx;height:92rpx;overflow:hidden;border-radius:16rpx;background:#eee9ff;color:#6847e8;font-size:20rpx}.character-reference-media image{width:100%;height:100%}.character-reference-remove{height:48rpx;padding:0 12rpx;background:transparent;color:#d84f67;font-size:18rpx;line-height:48rpx}.shot-output{overflow:hidden;width:100%;height:260rpx;margin-top:12rpx;border-radius:16rpx;background:#111}.shot-output video,.shot-output image{width:100%;height:100%}.shot-actions{display:flex;flex-wrap:wrap;gap:10rpx;margin-top:12rpx}.shot-actions button{height:52rpx;padding:0 16rpx;border-radius:12rpx;background:#f4f2f8;font-size:19rpx;line-height:52rpx}.shot-actions .generate{background:#6c4bff;color:#fff}.shot-actions .danger{color:#d84f67}.add-shot-button{height:66rpx;margin-top:18rpx;border-radius:16rpx;background:#f0ecff;color:#6847e8;font-size:22rpx;font-weight:800}.shot-desc,.shot-dialogue{margin-top:8rpx;color:#686372;font-size:22rpx;line-height:1.55}.shot-dialogue{color:#8a64c9}
 </style>
