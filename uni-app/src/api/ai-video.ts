@@ -6,6 +6,7 @@ export interface VideoTaskPayload {
   subType?: 'text2video' | 'img2video' | 'first_last_frame' | 'video_edit' | string;
   videoMode?: string;
   referenceMode?: string;
+  inputAssets?: Array<Record<string, unknown>>;
   prompt: string;
   tierKey?: string;
   tierId?: number;

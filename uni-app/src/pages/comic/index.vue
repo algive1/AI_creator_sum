@@ -279,7 +279,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { onShareAppMessage, onShareTimeline, onShow } from '@dcloudio/uni-app';
+import { onHide, onShareAppMessage, onShareTimeline, onShow, onUnload } from '@dcloudio/uni-app';
 import AppTabBar from '@/components/common/AppTabBar.vue';
 import AppTopbar from '@/components/common/AppTopbar.vue';
 import AppDialogHost from '@/components/common/AppDialogHost.vue';
@@ -291,7 +291,7 @@ import { getVideoModels } from '@/api/ai-video';
 import { uploadAsset } from '@/api/upload';
 import { useAuthStore } from '@/stores/auth';
 import { useConfigStore } from '@/stores/config';
-import { PAGE_ROUTES } from '@/utils/constants';
+import { FEATURE_KEYS, PAGE_ROUTES } from '@/utils/constants';
 import { readPersistentCache, writePersistentCache } from '@/utils/persistent-cache';
 import { assertPrompt } from '@/utils/validator';
 import { isDevFallbackEnabled, warnDevFallback } from '@/utils/dev-fallback';
@@ -301,6 +301,7 @@ import { createShareMessage, createShareTimeline, enableShareMenu } from '@/util
 import { ensureLoggedIn } from '@/utils/login-guard';
 import { showAppDialog } from '@/utils/app-dialog';
 import { getPromptGuide, hasPromptGuideDialog } from '@/utils/prompt-guide';
+import { taskPoller } from '@/utils/task-poller';
 
 const genres = ['都市逆袭', '古风权谋', '奇幻冒险', '甜宠治愈'];
 const styles = ['国漫精致', '赛博霓虹', '水彩电影', '厚涂幻想'];
@@ -498,13 +499,22 @@ const sceneLibrary = ref<ComicScene[]>([]);
 const characterLibrary = ref<ComicCharacter[]>([]);
 const characterReferenceUrl = ref('');
 const characterReferenceFileId = ref<number | undefined>(undefined);
+const imageToVideoTierKeys = ref<Set<string>>(new Set());
+const videoCatalogReady = ref(false);
+const referenceCatalogReady = ref(false);
+const restoredTierKey = ref('');
+const productionContractReady = computed(() => videoCatalogReady.value && referenceCatalogReady.value);
+const shotTaskSubscriptions = new Map<number, () => void>();
+let comicPageVisible = false;
 const supportsCharacterReference = computed(() => {
   const caps = selectedModel.value?.capabilities;
-  return Number(caps?.maxReferenceImages || 0) > 0 && ['reference_images', 'first_frame', 'first_last'].includes(String(caps?.referenceUploadMode || ''));
+  return Number(caps?.maxReferenceImages || 0) > 0
+    && ['reference_images', 'first_frame'].includes(String(caps?.referenceUploadMode || ''))
+    && imageToVideoTierKeys.value.has(String(selectedModel.value?.tierKey || ''));
 });
 const characterReferenceHint = computed(() => supportsCharacterReference.value
-  ? '当前模型支持参考图，生成镜头时会携带它提高人物一致性。'
-  : '当前模型未声明参考图能力；仅使用角色文字设定，不伪装支持参考图。');
+  ? '当前档位已绑定图生视频能力，参考图会通过正式 inputAssets 契约参与生成。'
+  : '当前档位没有可用的图生视频参考图契约；仅使用角色文字设定。首尾帧能力不会被误当成人物参考图。');
 
 
 function addSceneAsset() { sceneLibrary.value.push({ id: 'scene-' + Date.now(), name: '新场景', description: '' }); saveComicDraft(); }
@@ -602,6 +612,35 @@ function shotReferenceFileIds(shot: ComicShot) {
   if (!supportsCharacterReference.value) return [] as number[];
   return shotReferenceAssets(shot);
 }
+function shotReferenceInputAssets(shot: ComicShot) {
+  return shotReferenceFileIds(shot).map((fileId, index) => ({
+    type: 'reference_image',
+    typeLabel: index === 0 ? '主参考图' : '角色/场景参考图',
+    mediaType: 'image',
+    sourceType: 'upload',
+    fileId
+  }));
+}
+function shotVideoContract(shot: ComicShot) {
+  const inputAssets = shotReferenceInputAssets(shot);
+  const referenceMode = String(selectedModel.value?.capabilities?.referenceUploadMode || '');
+  if (inputAssets.length && supportsCharacterReference.value) {
+    return {
+      featureKey: FEATURE_KEYS.imageToVideo,
+      subType: 'image_to_video',
+      videoMode: 'image_to_video',
+      referenceMode,
+      inputAssets
+    };
+  }
+  return {
+    featureKey: FEATURE_KEYS.video,
+    subType: 'text_to_video',
+    videoMode: 'text_to_video',
+    referenceMode: 'none',
+    inputAssets: [] as Array<Record<string, unknown>>
+  };
+}
 
 async function chooseCharacterReference() {
   uni.chooseImage({ count: 1, sizeType: ['compressed'], sourceType: ['album', 'camera'], success: async (res) => {
@@ -638,7 +677,8 @@ onShow(async () => {
   configStore.hydrate();
   await configStore.loadPublicConfig().catch(() => undefined);
   restoreComicDraft();
-  syncShotTasks().catch(() => undefined);
+  comicPageVisible = true;
+  await syncShotTasks().catch(() => undefined);
   if (comicMaintenanceMode.value) {
     showComicMaintenanceMessage();
   }
@@ -647,25 +687,38 @@ onShow(async () => {
     return;
   }
   const cachedComicModels = readPersistentCache<Record<string, unknown>[]>(COMIC_MODEL_CACHE_KEY, 24 * 60 * 60_000);
-  if (cachedComicModels?.length) { models.value = cachedComicModels; selectedModelIndex.value = middleModelIndex(); normalizeComicParams(); }
-  getVideoModels().then((res) => {
+  if (cachedComicModels?.length) { models.value = cachedComicModels; videoCatalogReady.value = true; restoreSelectedModelIndex(); normalizeComicParams(); }
+  getVideoModels(FEATURE_KEYS.imageToVideo).then((res) => {
+    const list = Array.isArray(res.list) ? res.list as Record<string, unknown>[] : [];
+    imageToVideoTierKeys.value = new Set(list.map((item) => String(item.tierKey || '')).filter(Boolean));
+    referenceCatalogReady.value = true;
+    if (productionContractReady.value) invalidateStaleShotAssets();
+  }).catch(() => { imageToVideoTierKeys.value = new Set(); referenceCatalogReady.value = true; if (productionContractReady.value) invalidateStaleShotAssets(); });
+  getVideoModels(FEATURE_KEYS.video).then((res) => {
     const list = Array.isArray(res.list) ? res.list as Record<string, unknown>[] : [];
     if (!list.length && isDevFallbackEnabled) warnDevFallback('comic-tiers', 'GET /public/model-tiers returned empty list');
     models.value = list;
     if (list.length) writePersistentCache(COMIC_MODEL_CACHE_KEY, list);
-    selectedModelIndex.value = middleModelIndex();
+    videoCatalogReady.value = true;
+    restoreSelectedModelIndex();
     normalizeComicParams();
+    if (productionContractReady.value) invalidateStaleShotAssets();
   }).catch(() => {
     if (isDevFallbackEnabled) warnDevFallback('comic-tiers', 'GET /public/model-tiers failed');
-    models.value = [];
-    selectedModelIndex.value = middleModelIndex();
+    if (!cachedComicModels?.length) models.value = [];
+    videoCatalogReady.value = true;
+    restoreSelectedModelIndex();
     normalizeComicParams();
+    if (productionContractReady.value) invalidateStaleShotAssets();
   });
 });
 
 watch(() => selectedModel.value?.tierKey, () => { normalizeComicParams(); invalidateStaleShotAssets(); });
 watch([selectedStyle, selectedRatio, characterLibrary, sceneLibrary, storyboardShots], invalidateStaleShotAssets, { deep: true });
 watch([story, character, selectedGenre, selectedStyle, selectedRatio, selectedDuration, generatedScript, storyboardShots], saveComicDraft, { deep: true });
+
+onHide(() => { comicPageVisible = false; stopShotTaskPolling(); });
+onUnload(() => { comicPageVisible = false; stopShotTaskPolling(); });
 
 onShareAppMessage(() => createShareMessage({
   title: '用 AI 创作漫画短剧',
@@ -925,7 +978,8 @@ function shotFingerprint(shot: ComicShot) {
     description: shot.description, dialogue: shot.dialogue, character: shot.character, scene: shot.scene,
     shotSize: shot.shotSize, camera: shot.camera, characterBible: shotCharacterBible(shot),
     sceneBible: matchedScene(shot)?.description || '', style: selectedStyle.value, ratio: selectedRatio.value,
-    model: selectedModel.value?.tierKey || '', references: shotReferenceFileIds(shot)
+    model: selectedModel.value?.tierKey || '', videoMode: shotVideoContract(shot).videoMode,
+    referenceMode: shotVideoContract(shot).referenceMode, references: shotReferenceFileIds(shot)
   });
 }
 function invalidateStaleShotAssets() {
@@ -939,6 +993,49 @@ function invalidateStaleShotAssets() {
   if (changed) saveComicDraft();
 }
 
+function applyTaskToShot(shot: ComicShot, task: Record<string, unknown>) {
+  if (productionContractReady.value && isTaskCompleted(task) && shot.generationFingerprint && shot.generationFingerprint !== shotFingerprint(shot)) {
+    shot.status = 'draft';
+    shot.taskId = undefined;
+    shot.outputUrl = '';
+    shot.thumbnail = '';
+    shot.generationFingerprint = '';
+    return true;
+  }
+  const nextStatus: ComicShot['status'] = isTaskCompleted(task) ? 'done' : isTaskFailed(task) ? 'failed' : isTaskProcessing(task) ? 'generating' : shot.status;
+  const output = taskOutputList(task)[0] || {};
+  const nextUrl = String(output.video || output.url || output.image || shot.outputUrl || '');
+  const nextThumbnail = taskThumbnailOf(task) || shot.thumbnail || '';
+  if (nextStatus === shot.status && nextUrl === shot.outputUrl && nextThumbnail === shot.thumbnail) return false;
+  shot.status = nextStatus;
+  shot.outputUrl = nextUrl;
+  shot.thumbnail = nextThumbnail;
+  return true;
+}
+function stopShotTaskPolling() {
+  for (const unsubscribe of shotTaskSubscriptions.values()) unsubscribe();
+  shotTaskSubscriptions.clear();
+}
+function ensureShotTaskPolling() {
+  if (!comicPageVisible) return;
+  const activeIds = new Set(storyboardShots.value
+    .filter((shot) => shot.status === 'generating' && Number(shot.taskId || 0) > 0)
+    .map((shot) => Number(shot.taskId)));
+  for (const [taskId, unsubscribe] of shotTaskSubscriptions.entries()) {
+    if (!activeIds.has(taskId)) { unsubscribe(); shotTaskSubscriptions.delete(taskId); }
+  }
+  for (const taskId of activeIds) {
+    if (shotTaskSubscriptions.has(taskId)) continue;
+    const unsubscribe = taskPoller.add(taskId, (task) => {
+      const shot = storyboardShots.value.find((item) => Number(item.taskId || 0) === taskId);
+      if (!shot) return;
+      if (applyTaskToShot(shot, task)) saveComicDraft();
+      if (isTaskCompleted(task) || isTaskFailed(task)) shotTaskSubscriptions.delete(taskId);
+    });
+    shotTaskSubscriptions.set(taskId, unsubscribe);
+  }
+  if (activeIds.size) taskPoller.pollNow().catch(() => undefined);
+}
 async function syncShotTasks() {
   const taskIds = storyboardShots.value.map((shot) => Number(shot.taskId || 0)).filter((id) => id > 0);
   if (!taskIds.length) return;
@@ -949,15 +1046,10 @@ async function syncShotTasks() {
   for (const shot of storyboardShots.value) {
     if (!shot.taskId) continue;
     const task = byId.get(shot.taskId); if (!task) continue;
-    const nextStatus: ComicShot['status'] = isTaskCompleted(task) ? 'done' : isTaskFailed(task) ? 'failed' : isTaskProcessing(task) ? 'generating' : shot.status;
-    const output = taskOutputList(task)[0] || {};
-    const nextUrl = String(output.video || output.url || output.image || shot.outputUrl || '');
-    const nextThumbnail = taskThumbnailOf(task) || shot.thumbnail || '';
-    if (nextStatus !== shot.status || nextUrl !== shot.outputUrl || nextThumbnail !== shot.thumbnail) {
-      shot.status = nextStatus; shot.outputUrl = nextUrl; shot.thumbnail = nextThumbnail; changed = true;
-    }
+    changed = applyTaskToShot(shot, task) || changed;
   }
   if (changed) saveComicDraft();
+  ensureShotTaskPolling();
 }
 
 function buildShotPrompt(shot: ComicShot, index: number) {
@@ -983,18 +1075,31 @@ async function generateShot(index: number, options: { silent?: boolean } = {}) {
   if (!loggedIn) return;
   shot.status = 'generating'; shot.outputUrl = ''; shot.thumbnail = ''; saveComicDraft();
   try {
+    const videoContract = shotVideoContract(shot);
     const result = await createComicTask<Record<string, unknown>>({
-      prompt: buildShotPrompt(shot, index), tierKey: selectedModel.value.tierKey, videoMode: 'text_to_video',
+      prompt: buildShotPrompt(shot, index),
+      tierKey: selectedModel.value.tierKey,
+      featureKey: videoContract.featureKey,
+      subType: videoContract.subType,
+      videoMode: videoContract.videoMode,
+      referenceMode: videoContract.referenceMode,
+      inputAssets: videoContract.inputAssets,
       ratio: selectedRatio.value, duration: shotDuration(), style: selectedStyle.value, autoScript: false,
-      params: { genre: selectedGenre.value, character: shotCharacterBible(shot), sceneType: 'comic_shot', shotId: shot.id, shotIndex: index,
-        ...(shotReferenceFileIds(shot).length ? { referenceFileIds: shotReferenceFileIds(shot), firstFrameFileId: shotReferenceFileIds(shot)[0] } : {}) }
+      params: {
+        genre: selectedGenre.value, character: shotCharacterBible(shot), sceneType: 'comic_shot', shotId: shot.id, shotIndex: index,
+        referenceMode: videoContract.referenceMode,
+        inputAssets: videoContract.inputAssets
+      },
+      uploadKeys: videoContract.inputAssets.length ? [] : undefined
     });
     const id = Number(result.id || result.taskId);
     if (!Number.isInteger(id) || id <= 0) throw new Error('invalid task');
-    shot.taskId = id; shot.status = 'generating'; shot.generationFingerprint = shotFingerprint(shot); saveComicDraft();
-    uni.showToast({ title: '镜头已提交，可继续编辑其他镜头', icon: 'none' });
-  } catch {
+    shot.taskId = id; shot.status = 'generating'; shot.generationFingerprint = shotFingerprint(shot); saveComicDraft(); ensureShotTaskPolling();
+    if (!options.silent) uni.showToast({ title: '镜头已提交，可继续编辑其他镜头', icon: 'none' });
+  } catch (err: any) {
     shot.status = 'failed'; saveComicDraft();
+    if (!options.silent) uni.showToast({ title: err?.message || '镜头生成失败', icon: 'none' });
+    throw err;
   }
 }
 function shotDuration() {
@@ -1027,7 +1132,7 @@ function moveShot(index: number, delta: number) {
 }
 
 function saveComicDraft() {
-  writePersistentCache(COMIC_DRAFT_CACHE_KEY, { story: story.value, character: character.value, genre: selectedGenre.value, style: selectedStyle.value, ratio: selectedRatio.value, duration: selectedDuration.value, script: generatedScript.value, storyboard: storyboardShots.value, step: pipelineStep.value, characterReferenceUrl: characterReferenceUrl.value, characterReferenceFileId: characterReferenceFileId.value, characterLibrary: characterLibrary.value, sceneLibrary: sceneLibrary.value });
+  writePersistentCache(COMIC_DRAFT_CACHE_KEY, { story: story.value, character: character.value, genre: selectedGenre.value, style: selectedStyle.value, ratio: selectedRatio.value, duration: selectedDuration.value, script: generatedScript.value, storyboard: storyboardShots.value, step: pipelineStep.value, selectedTierKey: selectedModel.value?.tierKey || restoredTierKey.value, characterReferenceUrl: characterReferenceUrl.value, characterReferenceFileId: characterReferenceFileId.value, characterLibrary: characterLibrary.value, sceneLibrary: sceneLibrary.value });
 }
 function restoreComicDraft() {
   const draft = readPersistentCache<Record<string, unknown>>(COMIC_DRAFT_CACHE_KEY, 7 * 24 * 60 * 60_000);
@@ -1036,7 +1141,7 @@ function restoreComicDraft() {
   if (!character.value) character.value = String(draft.character || '');
   selectedGenre.value = String(draft.genre || selectedGenre.value); selectedStyle.value = String(draft.style || selectedStyle.value);
   selectedRatio.value = String(draft.ratio || selectedRatio.value); selectedDuration.value = String(draft.duration || selectedDuration.value);
-  generatedScript.value = String(draft.script || ''); storyboardShots.value = Array.isArray(draft.storyboard) ? (draft.storyboard as Record<string, unknown>[]).map((shot, index) => ({
+  generatedScript.value = String(draft.script || ''); restoredTierKey.value = String(draft.selectedTierKey || ''); storyboardShots.value = Array.isArray(draft.storyboard) ? (draft.storyboard as Record<string, unknown>[]).map((shot, index) => ({
     id: String(shot.id || ('shot-restored-' + index)), title: String(shot.title || ('镜头 ' + (index + 1))),
     description: String(shot.description || ''), dialogue: String(shot.dialogue || ''), character: String(shot.character || ''),
     scene: String(shot.scene || ''), shotSize: String(shot.shotSize || ''), camera: String(shot.camera || ''),
@@ -1049,7 +1154,9 @@ function restoreComicDraft() {
 
 function selectModel(index: number) {
   selectedModelIndex.value = index;
+  restoredTierKey.value = String(selectedModel.value?.tierKey || '');
   normalizeComicParams();
+  saveComicDraft();
 }
 
 function normalizeComicParams() {
@@ -1112,6 +1219,12 @@ function showComicMaintenanceMessage() {
 
 function middleModelIndex() {
   return Math.min(1, Math.max(0, modelOptions.value.length - 1));
+}
+function restoreSelectedModelIndex() {
+  const preferred = restoredTierKey.value || String(selectedModel.value?.tierKey || '');
+  const index = preferred ? modelOptions.value.findIndex((item) => item.tierKey === preferred) : -1;
+  selectedModelIndex.value = index >= 0 ? index : middleModelIndex();
+  restoredTierKey.value = String(selectedModel.value?.tierKey || preferred || '');
 }
 
 </script>

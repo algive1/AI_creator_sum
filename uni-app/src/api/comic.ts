@@ -21,7 +21,7 @@ export function createComicTask<T = Record<string, unknown>>(payload: VideoTaskP
     subType: payload.subType || 'comic',
     params: {
       ...params,
-      sceneType: 'comic',
+      sceneType: params.sceneType || 'comic',
       genre: params.genre,
       character: params.character,
     }
