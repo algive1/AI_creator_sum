@@ -17,6 +17,8 @@ function run(command: string, args: string[], cwd?: string): Promise<void> {
 async function download(url: string, target: string) {
   const parsed = new URL(url);
   if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('unsupported media URL protocol');
+  const host = parsed.hostname.toLowerCase();
+  if (host === 'localhost' || host === '::1' || /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host) || /^169\.254\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host)) throw new Error('private media URL is not allowed');
   const response = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(120000) });
   if (!response.ok || !response.body) throw new Error('download failed: HTTP ' + response.status);
   await pipeline(Readable.fromWeb(response.body as any), (await import('fs')).createWriteStream(target));
