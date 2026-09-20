@@ -539,7 +539,17 @@ async function generatePendingShots() {
     confirmText: '开始生成', success: (res) => resolve(Boolean(res.confirm)), fail: () => resolve(false)
   }));
   if (!confirmed) return;
-  for (const index of indexes) await generateShot(index);
+  let submitted = 0; let failed = 0;
+  for (const index of indexes) {
+    try { await generateShot(index, { silent: true }); submitted += 1; }
+    catch { failed += 1; }
+  }
+  saveComicDraft();
+  uni.showModal({
+    title: '批量提交完成',
+    content: failed ? ('成功提交 ' + submitted + ' 镜，失败 ' + failed + ' 镜。失败镜头已保留，可单独重试。') : ('已成功提交 ' + submitted + ' 个镜头，离开页面后任务仍会继续。'),
+    showCancel: false
+  });
 }
 
 function addCharacterAsset() {
@@ -941,7 +951,7 @@ function buildShotPrompt(shot: ComicShot, index: number) {
     '统一画风：' + selectedStyle.value
   ].filter(Boolean).join('；');
 }
-async function generateShot(index: number) {
+async function generateShot(index: number, options: { silent?: boolean } = {}) {
   const shot = storyboardShots.value[index];
   if (!shot || !shot.description.trim() || !selectedModel.value) {
     uni.showToast({ title: '请先完善镜头内容', icon: 'none' }); return;
