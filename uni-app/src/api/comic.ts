@@ -50,8 +50,7 @@ export function generateComicStoryboard<T = Record<string, unknown>>(payload: Co
 }
 
 export interface ComicCompositionPayload {
-  projectId?: number;
-  shots: Array<{ index: number; title?: string; url: string }>;
+  shots: Array<{ index: number; title?: string; taskId: number }>;
 }
 export function createComicComposition<T = Record<string, unknown>>(payload: ComicCompositionPayload) {
   return post<T>('/comic-compositions', payload, { loading: '正在创建成片任务' });
