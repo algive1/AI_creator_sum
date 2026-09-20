@@ -103,3 +103,12 @@ test('comic studio reuses scene assets and guards batch generation cost', () => 
   assert.match(comicSource, /预计最多消耗/);
   assert.match(comicSource, /已完成和生成中的镜头不会重复提交/);
 });
+
+test('comic generated shots become stale when production inputs change', () => {
+  assert.match(comicSource, /generationFingerprint/);
+  assert.match(comicSource, /shotFingerprint/);
+  assert.match(comicSource, /invalidateStaleShotAssets/);
+  assert.match(comicSource, /shot\.taskId = undefined/);
+  assert.match(comicSource, /shot\.outputUrl = ''/);
+  assert.match(comicSource, /watch\(\[selectedStyle, selectedRatio, characterLibrary, sceneLibrary, storyboardShots\]/);
+});
