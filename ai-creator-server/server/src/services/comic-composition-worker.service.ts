@@ -51,7 +51,7 @@ function runCapture(command: string, args: string[], cwd?: string): Promise<stri
   });
 }
 
-function isPrivateAddress(address: string): boolean {
+export function isPrivateAddress(address: string): boolean {
   const normalized = address.toLowerCase().replace(/^::ffff:/, '');
   if (normalized === '::1' || normalized === '0:0:0:0:0:0:0:1') return true;
   if (normalized.startsWith('fc') || normalized.startsWith('fd') || normalized.startsWith('fe8') || normalized.startsWith('fe9') || normalized.startsWith('fea') || normalized.startsWith('feb')) return true;
@@ -132,7 +132,7 @@ async function probeMedia(file: string): Promise<MediaProbe> {
   };
 }
 
-function targetDimensions(probe: MediaProbe) {
+export function targetDimensions(probe: MediaProbe) {
   const scale = Math.min(1, MAX_DIMENSION / Math.max(probe.width, probe.height));
   const width = Math.max(2, Math.floor((probe.width * scale) / 2) * 2);
   const height = Math.max(2, Math.floor((probe.height * scale) / 2) * 2);
