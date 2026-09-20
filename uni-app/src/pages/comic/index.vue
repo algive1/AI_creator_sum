@@ -500,6 +500,10 @@ const characterLibrary = ref<ComicCharacter[]>([]);
 const characterReferenceUrl = ref('');
 const characterReferenceFileId = ref<number | undefined>(undefined);
 const imageToVideoTierKeys = ref<Set<string>>(new Set());
+const videoCatalogReady = ref(false);
+const referenceCatalogReady = ref(false);
+const restoredTierKey = ref('');
+const productionContractReady = computed(() => videoCatalogReady.value && referenceCatalogReady.value);
 const shotTaskSubscriptions = new Map<number, () => void>();
 let comicPageVisible = false;
 const supportsCharacterReference = computed(() => {
@@ -683,24 +687,29 @@ onShow(async () => {
     return;
   }
   const cachedComicModels = readPersistentCache<Record<string, unknown>[]>(COMIC_MODEL_CACHE_KEY, 24 * 60 * 60_000);
-  if (cachedComicModels?.length) { models.value = cachedComicModels; selectedModelIndex.value = middleModelIndex(); normalizeComicParams(); }
+  if (cachedComicModels?.length) { models.value = cachedComicModels; videoCatalogReady.value = true; restoreSelectedModelIndex(); normalizeComicParams(); }
   getVideoModels(FEATURE_KEYS.imageToVideo).then((res) => {
     const list = Array.isArray(res.list) ? res.list as Record<string, unknown>[] : [];
     imageToVideoTierKeys.value = new Set(list.map((item) => String(item.tierKey || '')).filter(Boolean));
-    invalidateStaleShotAssets();
-  }).catch(() => { imageToVideoTierKeys.value = new Set(); });
+    referenceCatalogReady.value = true;
+    if (productionContractReady.value) invalidateStaleShotAssets();
+  }).catch(() => { imageToVideoTierKeys.value = new Set(); referenceCatalogReady.value = true; if (productionContractReady.value) invalidateStaleShotAssets(); });
   getVideoModels(FEATURE_KEYS.video).then((res) => {
     const list = Array.isArray(res.list) ? res.list as Record<string, unknown>[] : [];
     if (!list.length && isDevFallbackEnabled) warnDevFallback('comic-tiers', 'GET /public/model-tiers returned empty list');
     models.value = list;
     if (list.length) writePersistentCache(COMIC_MODEL_CACHE_KEY, list);
-    selectedModelIndex.value = middleModelIndex();
+    videoCatalogReady.value = true;
+    restoreSelectedModelIndex();
     normalizeComicParams();
+    if (productionContractReady.value) invalidateStaleShotAssets();
   }).catch(() => {
     if (isDevFallbackEnabled) warnDevFallback('comic-tiers', 'GET /public/model-tiers failed');
-    models.value = [];
-    selectedModelIndex.value = middleModelIndex();
+    if (!cachedComicModels?.length) models.value = [];
+    videoCatalogReady.value = true;
+    restoreSelectedModelIndex();
     normalizeComicParams();
+    if (productionContractReady.value) invalidateStaleShotAssets();
   });
 });
 
@@ -985,7 +994,7 @@ function invalidateStaleShotAssets() {
 }
 
 function applyTaskToShot(shot: ComicShot, task: Record<string, unknown>) {
-  if (isTaskCompleted(task) && shot.generationFingerprint && shot.generationFingerprint !== shotFingerprint(shot)) {
+  if (productionContractReady.value && isTaskCompleted(task) && shot.generationFingerprint && shot.generationFingerprint !== shotFingerprint(shot)) {
     shot.status = 'draft';
     shot.taskId = undefined;
     shot.outputUrl = '';
@@ -1123,7 +1132,7 @@ function moveShot(index: number, delta: number) {
 }
 
 function saveComicDraft() {
-  writePersistentCache(COMIC_DRAFT_CACHE_KEY, { story: story.value, character: character.value, genre: selectedGenre.value, style: selectedStyle.value, ratio: selectedRatio.value, duration: selectedDuration.value, script: generatedScript.value, storyboard: storyboardShots.value, step: pipelineStep.value, characterReferenceUrl: characterReferenceUrl.value, characterReferenceFileId: characterReferenceFileId.value, characterLibrary: characterLibrary.value, sceneLibrary: sceneLibrary.value });
+  writePersistentCache(COMIC_DRAFT_CACHE_KEY, { story: story.value, character: character.value, genre: selectedGenre.value, style: selectedStyle.value, ratio: selectedRatio.value, duration: selectedDuration.value, script: generatedScript.value, storyboard: storyboardShots.value, step: pipelineStep.value, selectedTierKey: selectedModel.value?.tierKey || restoredTierKey.value, characterReferenceUrl: characterReferenceUrl.value, characterReferenceFileId: characterReferenceFileId.value, characterLibrary: characterLibrary.value, sceneLibrary: sceneLibrary.value });
 }
 function restoreComicDraft() {
   const draft = readPersistentCache<Record<string, unknown>>(COMIC_DRAFT_CACHE_KEY, 7 * 24 * 60 * 60_000);
@@ -1132,7 +1141,7 @@ function restoreComicDraft() {
   if (!character.value) character.value = String(draft.character || '');
   selectedGenre.value = String(draft.genre || selectedGenre.value); selectedStyle.value = String(draft.style || selectedStyle.value);
   selectedRatio.value = String(draft.ratio || selectedRatio.value); selectedDuration.value = String(draft.duration || selectedDuration.value);
-  generatedScript.value = String(draft.script || ''); storyboardShots.value = Array.isArray(draft.storyboard) ? (draft.storyboard as Record<string, unknown>[]).map((shot, index) => ({
+  generatedScript.value = String(draft.script || ''); restoredTierKey.value = String(draft.selectedTierKey || ''); storyboardShots.value = Array.isArray(draft.storyboard) ? (draft.storyboard as Record<string, unknown>[]).map((shot, index) => ({
     id: String(shot.id || ('shot-restored-' + index)), title: String(shot.title || ('镜头 ' + (index + 1))),
     description: String(shot.description || ''), dialogue: String(shot.dialogue || ''), character: String(shot.character || ''),
     scene: String(shot.scene || ''), shotSize: String(shot.shotSize || ''), camera: String(shot.camera || ''),
@@ -1145,7 +1154,9 @@ function restoreComicDraft() {
 
 function selectModel(index: number) {
   selectedModelIndex.value = index;
+  restoredTierKey.value = String(selectedModel.value?.tierKey || '');
   normalizeComicParams();
+  saveComicDraft();
 }
 
 function normalizeComicParams() {
@@ -1208,6 +1219,12 @@ function showComicMaintenanceMessage() {
 
 function middleModelIndex() {
   return Math.min(1, Math.max(0, modelOptions.value.length - 1));
+}
+function restoreSelectedModelIndex() {
+  const preferred = restoredTierKey.value || String(selectedModel.value?.tierKey || '');
+  const index = preferred ? modelOptions.value.findIndex((item) => item.tierKey === preferred) : -1;
+  selectedModelIndex.value = index >= 0 ? index : middleModelIndex();
+  restoredTierKey.value = String(selectedModel.value?.tierKey || preferred || '');
 }
 
 </script>
