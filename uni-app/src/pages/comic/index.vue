@@ -274,8 +274,8 @@
         </view>
       </view>
 
-      <view class="generate-button" :class="{ disabled: comicMaintenanceMode }" @tap="submitManga">
-        {{ comicMaintenanceMode ? '正在开发' : '生成漫剧' }}
+      <view class="generate-button" :class="{ disabled: comicMaintenanceMode || pipelineBusy || generatingShotCount > 0 }" @tap="handlePrimaryAction">
+        {{ primaryActionLabel }}
       </view>
     </view>
 
@@ -654,7 +654,31 @@ async function previewAssemblyReadiness() {
 }
 
 const pendingShotCount = computed(() => storyboardShots.value.filter((shot) => shot.status !== 'done' && shot.status !== 'generating' && shot.description.trim()).length);
+const generatingShotCount = computed(() => storyboardShots.value.filter((shot) => shot.status === 'generating').length);
 const batchEstimatedPoints = computed(() => pendingShotCount.value * selectedModelCost.value);
+const primaryActionLabel = computed(() => {
+  if (comicMaintenanceMode.value) return '正在开发';
+  if (pipelineBusy.value) return 'AI 正在处理';
+  if (!generatedScript.value.trim()) return '生成 AI 剧本';
+  if (!storyboardShots.value.length) return '生成 AI 分镜';
+  if (generatingShotCount.value > 0) return '镜头生成中 · ' + generatingShotCount.value;
+  if (pendingShotCount.value > 0) return '生成待完成镜头 · ' + pendingShotCount.value;
+  if (!assemblyReady.value) return '检查成片准备';
+  return assemblyActionLabel.value;
+});
+async function handlePrimaryAction() {
+  if (comicMaintenanceMode.value) { showComicMaintenanceMessage(); return; }
+  if (pipelineBusy.value) return;
+  if (!generatedScript.value.trim()) { await buildScript(); return; }
+  if (!storyboardShots.value.length) { await buildStoryboard(); return; }
+  if (generatingShotCount.value > 0) {
+    ensureShotTaskPolling();
+    uni.showToast({ title: '镜头仍在后台生成', icon: 'none' });
+    return;
+  }
+  if (pendingShotCount.value > 0) { await generatePendingShots(); return; }
+  await previewAssemblyReadiness();
+}
 async function generatePendingShots() {
   const indexes = storyboardShots.value.map((shot, index) => ({ shot, index }))
     .filter(({ shot }) => shot.status !== 'done' && shot.status !== 'generating' && shot.description.trim()).map(({ index }) => index);
@@ -665,6 +689,7 @@ async function generatePendingShots() {
     confirmText: '开始生成', success: (res) => resolve(Boolean(res.confirm)), fail: () => resolve(false)
   }));
   if (!confirmed) return;
+  pipelineStep.value = 'generate';
   let submitted = 0; let failed = 0;
   for (const index of indexes) {
     try { await generateShot(index, { silent: true }); submitted += 1; }
@@ -944,69 +969,6 @@ function selectAllStoryPrompt() {
 function smartFillStoryPrompt() {
   const role = character.value.trim() || '主角拥有鲜明目标和反差性格';
   story.value = `${selectedGenre.value}题材，${selectedStyle.value}画风，主角设定：${role}。请生成一段适合${selectedRatio.value}比例、${selectedDuration.value}动态漫剧的剧情提示词，开头有强钩子，中段冲突升级，结尾留下继续观看的悬念。`;
-}
-
-async function submitManga() {
-  if (comicMaintenanceMode.value) {
-    showComicMaintenanceMessage();
-    return;
-  }
-  if (!storyboardGenerateEnabled.value) {
-    uni.showToast({ title: 'AI漫剧功能已关闭', icon: 'none' });
-    return;
-  }
-  if (!story.value.trim()) {
-    uni.showToast({ title: '请先填写剧情梗概', icon: 'none' });
-    return;
-  }
-  if (!assertPrompt(story.value)) return;
-  if (!character.value.trim()) {
-    uni.showToast({ title: '请先填写角色设定', icon: 'none' });
-    return;
-  }
-  if (!selectedModel.value) {
-    uni.showToast({ title: '请先在后台配置模型档位', icon: 'none' });
-    return;
-  }
-  const loggedIn = await ensureLoggedIn({
-    title: '登录后生成漫剧',
-    subtitle: '登录并授权手机号后，才能提交漫剧生成任务。'
-  });
-  if (!loggedIn) return;
-  try {
-    pipelineStep.value = 'generate';
-    const productionPrompt = storyboardShots.value.length ? storyboardShots.value.map((shot, index) => [
-      '镜头' + (index + 1) + '：' + shot.description,
-      shot.character ? '角色：' + shot.character : '',
-      shot.scene ? '场景：' + shot.scene : '',
-    matchedScene(shot)?.description ? '场景身份锁定：' + matchedScene(shot)?.description : '',
-      shot.shotSize ? '景别：' + shot.shotSize : '',
-      shot.camera ? '运镜：' + shot.camera : '',
-      shot.dialogue ? '对白/旁白：' + shot.dialogue : ''
-    ].filter(Boolean).join('；')).join('\n') : generatedScript.value.trim() || story.value;
-    const result = await createComicTask<Record<string, unknown>>({
-      prompt: productionPrompt,
-      tierKey: selectedModel.value.tierKey,
-      videoMode: 'text_to_video',
-      ratio: selectedRatio.value,
-      duration: selectedDuration.value,
-      style: selectedStyle.value,
-      autoScript: true,
-      params: {
-        genre: selectedGenre.value,
-        character: character.value,
-        sourceStory: story.value,
-        script: generatedScript.value,
-        storyboard: storyboardShots.value
-      }
-    });
-    const id = Number(result.id || result.taskId);
-    if (!Number.isInteger(id) || id <= 0) {
-      uni.showToast({ title: '任务提交失败，请稍后重试', icon: 'none' });
-      return;
-    }
-    uni.navigateTo({ url: `${PAGE_ROUTES.result}?id=${id}&type=video` });
-  } catch { /* 请求层会展示错误 */ }
 }
 
 
