@@ -155,3 +155,17 @@ test('comic actively polls generating shot tasks and rejects stale completions',
   assert.match(comicSource, /shot\.generationFingerprint !== shotFingerprint\(shot\)/);
   assert.match(comicSource, /shot\.status = 'draft'/);
 });
+
+test('comic stale-output invalidation waits for restored model contracts', () => {
+  assert.match(comicSource, /productionContractReady/);
+  assert.match(comicSource, /videoCatalogReady/);
+  assert.match(comicSource, /referenceCatalogReady/);
+  assert.match(comicSource, /productionContractReady\.value && isTaskCompleted/);
+});
+
+test('comic persists and restores the selected tier before fingerprint checks', () => {
+  assert.match(comicSource, /selectedTierKey/);
+  assert.match(comicSource, /restoredTierKey/);
+  assert.match(comicSource, /restoreSelectedModelIndex/);
+  assert.match(comicSource, /modelOptions\.value\.findIndex/);
+});
