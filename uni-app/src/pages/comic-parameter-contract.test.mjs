@@ -17,7 +17,7 @@ test('comic page follows selected model capabilities and guards submission with 
 
 test('comic API preserves comic semantics in the provider prompt and task params', () => {
   assert.match(comicApiSource, /漫剧创作要求/);
-  assert.match(comicApiSource, /sceneType: 'comic'/);
+  assert.match(comicApiSource, /sceneType: params\.sceneType \|\| 'comic'/);
   assert.match(comicApiSource, /genre: params\.genre/);
   assert.match(comicApiSource, /character: params\.character/);
 });
@@ -75,9 +75,9 @@ test('comic character reference follows declared video capabilities', () => {
   assert.match(comicSource, /maxReferenceImages/);
   assert.match(comicSource, /referenceUploadMode/);
   assert.match(comicSource, /uploadAsset/);
-  assert.match(comicSource, /referenceFileIds/);
+  assert.match(comicSource, /shotReferenceFileIds/);
   assert.match(comicSource, /characterReferenceFileId/);
-  assert.match(comicSource, /未声明参考图能力/);
+  assert.match(comicSource, /没有可用的图生视频参考图契约/);
 });
 
 test('comic studio supports reusable multi-character assets', () => {
@@ -127,7 +127,7 @@ test('comic assembly requires every ordered shot to have usable media', () => {
   assert.match(comicSource, /shot\.status === 'done' && Boolean\(shot\.outputUrl\)/);
   assert.match(comicSource, /assemblyMissingCount/);
   assert.match(comicSource, /assemblyReady/);
-  assert.match(comicSource, /严格按当前分镜顺序合成/);
+  assert.match(comicSource, /将按当前 .* 个镜头的顺序合成/);
   assert.match(comicSource, /暂不能合成/);
 });
 
@@ -191,4 +191,21 @@ test('comic stops composition polling when page is hidden or unloaded', () => {
   assert.match(comicSource, /stopCompositionPolling/);
   assert.match(comicSource, /onHide\(\(\) => \{ comicPageVisible = false; stopShotTaskPolling\(\); stopCompositionPolling\(\); \}\)/);
   assert.match(comicSource, /onUnload\(\(\) => \{ comicPageVisible = false; stopShotTaskPolling\(\); stopCompositionPolling\(\); \}\)/);
+});
+
+test('comic composition submits owned completed task ids instead of arbitrary media URLs', () => {
+  assert.match(comicApiSource, /taskId: number/);
+  assert.match(comicSource, /taskId: Number\(shot\.taskId \|\| 0\)/);
+  assert.match(comicSource, /taskId: shot\.taskId/);
+  assert.doesNotMatch(comicApiSource, /shots: Array<\{ index: number; title\?: string; url: string \}>/);
+});
+
+test('comic uses one staged primary action instead of a legacy whole-video shortcut', () => {
+  assert.match(comicSource, /primaryActionLabel/);
+  assert.match(comicSource, /handlePrimaryAction/);
+  assert.match(comicSource, /生成 AI 剧本/);
+  assert.match(comicSource, /生成 AI 分镜/);
+  assert.match(comicSource, /生成待完成镜头/);
+  assert.doesNotMatch(comicSource, /async function submitManga/);
+  assert.doesNotMatch(comicSource, /@tap="submitManga"/);
 });
