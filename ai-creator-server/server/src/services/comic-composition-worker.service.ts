@@ -9,6 +9,8 @@ import { pipeline } from 'stream/promises';
 import { Readable, Transform } from 'stream';
 import { query, queryOne } from '../utils/db';
 import { StorageService } from './storage/storage.service';
+import { md5File } from './storage/upload-temp-file';
+import { createUploadedMediaAsset } from './media-asset.service';
 
 const MAX_SHOT_BYTES = positiveInt(process.env.COMIC_COMPOSITION_MAX_SHOT_BYTES, 250 * 1024 * 1024);
 const MAX_TOTAL_BYTES = positiveInt(process.env.COMIC_COMPOSITION_MAX_TOTAL_BYTES, 4 * 1024 * 1024 * 1024);
@@ -166,6 +168,65 @@ async function normalizeShot(input: string, output: string, probe: MediaProbe, w
   ]);
 }
 
+async function persistCompositionOutput(input: {
+  jobId: number;
+  userId: number;
+  projectId: number;
+  outputPath: string;
+  probe: MediaProbe;
+}) {
+  const existing = await queryOne<any>(
+    "SELECT id, cdn_url, access_url FROM files WHERE user_id = ? AND ref_type = 'comic_composition' AND ref_id = ? AND is_deleted = 0 ORDER BY id DESC LIMIT 1",
+    [input.userId, String(input.jobId)],
+  );
+  if (existing?.id) {
+    await createUploadedMediaAsset({ userId: input.userId, projectId: input.projectId, fileId: Number(existing.id), name: '漫剧成片' });
+    return { fileId: Number(existing.id), outputUrl: String(existing.cdn_url || existing.access_url || '') };
+  }
+
+  const stat = await fs.stat(input.outputPath);
+  const adapter = StorageService.getActiveAdapter();
+  const storageKey = StorageService.genStorageKey('ai_video', 'comic-final.mp4');
+  const uploaded = await adapter.uploadLarge(storageKey, createReadStream(input.outputPath), 'video/mp4', stat.size, { publicRead: true });
+  const outputUrl = String(uploaded.cdnUrl || uploaded.url || '');
+  const fileNo = StorageService.genFileNo();
+  const md5Hash = await md5File(input.outputPath);
+  let fileId = 0;
+  try {
+    const [result] = await query<any>(
+      `INSERT INTO files
+       (file_no, user_id, provider, storage_key, original_name, mime_type, file_size, width, height, duration,
+        md5_hash, etag, access_url, cdn_url, file_category, visibility, ref_type, ref_id, created_at)
+       VALUES (?, ?, ?, ?, 'comic-final.mp4', 'video/mp4', ?, ?, ?, ?, ?, ?, ?, ?, 'ai_video', 'public', 'comic_composition', ?, NOW(3))`,
+      [
+        fileNo,
+        input.userId,
+        adapter.provider,
+        storageKey,
+        stat.size,
+        input.probe.width,
+        input.probe.height,
+        Math.round(input.probe.duration),
+        md5Hash,
+        uploaded.etag || '',
+        uploaded.url || outputUrl,
+        outputUrl,
+        String(input.jobId),
+      ],
+    );
+    fileId = Number(result.insertId || 0);
+    if (!fileId) throw new Error('composition output file record was not created');
+    await createUploadedMediaAsset({ userId: input.userId, projectId: input.projectId, fileId, name: '漫剧成片' });
+    return { fileId, outputUrl };
+  } catch (err) {
+    if (fileId) {
+      await query("UPDATE files SET is_deleted=1, deleted_at=NOW(3), updated_at=NOW(3) WHERE id=?", [fileId]).catch(() => undefined);
+    }
+    await adapter.delete(storageKey).catch(() => undefined);
+    throw err;
+  }
+}
+
 export async function assertFfmpegAvailable() {
   await run(process.env.FFMPEG_PATH || 'ffmpeg', ['-version']);
   await run(process.env.FFPROBE_PATH || 'ffprobe', ['-version']);
@@ -209,11 +270,18 @@ export async function processComicCompositionJob(jobId: number) {
     const output = path.join(tempDir, 'final.mp4');
     await run(process.env.FFMPEG_PATH || 'ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', listPath, '-c', 'copy', '-movflags', '+faststart', output], tempDir);
 
-    const stat = await fs.stat(output);
-    const adapter = StorageService.getActiveAdapter();
-    const storageKey = StorageService.genStorageKey('ai_video', 'comic-final.mp4');
-    const uploaded = await adapter.uploadLarge(storageKey, createReadStream(output), 'video/mp4', stat.size, { publicRead: true });
-    await query("UPDATE comic_composition_jobs SET status='completed', output_url=?, error_message=NULL WHERE id=?", [uploaded.cdnUrl || uploaded.url, jobId]);
+    const outputProbe = await probeMedia(output);
+    const persisted = await persistCompositionOutput({
+      jobId,
+      userId: Number(row.user_id),
+      projectId: Number(row.project_id),
+      outputPath: output,
+      probe: outputProbe,
+    });
+    await query(
+      "UPDATE comic_composition_jobs SET status='completed', output_file_id=?, output_url=?, error_message=NULL WHERE id=?",
+      [persisted.fileId, persisted.outputUrl, jobId],
+    );
   } catch (err: any) {
     await query("UPDATE comic_composition_jobs SET status='failed', error_message=? WHERE id=?", [String(err?.message || '合成失败').slice(0, 500), jobId]);
     throw err;
