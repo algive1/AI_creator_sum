@@ -559,7 +559,7 @@ function shotReferenceAssets(shot: ComicShot) {
 }
 
 const assemblyShots = computed(() => storyboardShots.value.map((shot, index) => ({
-  index, title: shot.title || ('镜头 ' + (index + 1)), ready: shot.status === 'done' && Boolean(shot.outputUrl),
+  index, title: shot.title || ('镜头 ' + (index + 1)), taskId: Number(shot.taskId || 0), ready: shot.status === 'done' && Boolean(shot.outputUrl) && Number(shot.taskId || 0) > 0,
   outputUrl: shot.outputUrl || '', status: shot.status
 })));
 const assemblyReadyCount = computed(() => assemblyShots.value.filter((shot) => shot.ready).length);
@@ -643,7 +643,7 @@ async function previewAssemblyReadiness() {
   try {
     const fingerprint = assemblyFingerprint.value;
     const result = await createComicComposition<Record<string, unknown>>({
-      shots: assemblyShots.value.map((shot) => ({ index: shot.index, title: shot.title, url: shot.outputUrl }))
+      shots: assemblyShots.value.map((shot) => ({ index: shot.index, title: shot.title, taskId: shot.taskId }))
     });
     const next = normalizeCompositionJob(result, fingerprint);
     if (!next) throw new Error('invalid composition job');
