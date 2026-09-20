@@ -48,3 +48,14 @@ test('comic storyboard is editable as persistent shot assets', () => {
   assert.match(comicSource, /角色：/);
   assert.match(comicSource, /运镜：/);
 });
+
+test('comic shots can be generated and regenerated independently', () => {
+  assert.match(comicSource, /async function generateShot/);
+  assert.match(comicSource, /buildShotPrompt/);
+  assert.match(comicSource, /sceneType: 'comic_shot'/);
+  assert.match(comicSource, /shotId: shot\.id/);
+  assert.match(comicSource, /shotIndex: index/);
+  assert.match(comicSource, /shot\.taskId = id/);
+  assert.match(comicSource, /openShotResult/);
+  assert.match(comicSource, /shotDuration/);
+});
