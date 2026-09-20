@@ -1,4 +1,4 @@
-import { post } from './request';
+import { get, post } from './request';
 import { createVideoTask, type VideoTaskPayload } from './ai-video';
 
 export function createComicTask<T = Record<string, unknown>>(payload: VideoTaskPayload) {
@@ -55,4 +55,8 @@ export interface ComicCompositionPayload {
 }
 export function createComicComposition<T = Record<string, unknown>>(payload: ComicCompositionPayload) {
   return post<T>('/comic-compositions', payload, { loading: '正在创建成片任务' });
+}
+
+export function getComicComposition<T = Record<string, unknown>>(id: number) {
+  return get<T>(`/comic-compositions/${id}`, undefined, { silent: true });
 }
