@@ -29,6 +29,12 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run build
+      - name: Install FFmpeg runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+      - run: npm run check:ffmpeg
+      - run: npm run test:comic-composition
       - name: Provider parameter regression checks
         run: |
           npm run check:xiaoma-image-params
@@ -64,4 +70,6 @@ jobs:
       - run: npm run test:performance-cache
       - run: node --test src/pages/comic-parameter-contract.test.mjs
       - run: npm run build:mp-weixin
+        env:
+          VITE_API_BASE_URL: https://ci.invalid/api/v1
       - run: npm run check:mp-size

@@ -1,4 +1,4 @@
-import { post } from './request';
+import { get, post } from './request';
 import { createVideoTask, type VideoTaskPayload } from './ai-video';
 
 export function createComicTask<T = Record<string, unknown>>(payload: VideoTaskPayload) {
@@ -28,14 +28,14 @@ export function createComicTask<T = Record<string, unknown>>(payload: VideoTaskP
   });
 }
 
-export interface ComicScriptPayload {
+export interface ComicScriptPayload extends Record<string, unknown> {
   topic: string;
   style?: string;
   duration?: string;
   characters?: string;
 }
 
-export interface ComicStoryboardPayload {
+export interface ComicStoryboardPayload extends Record<string, unknown> {
   script: string;
   style?: string;
   ratio?: string;
@@ -49,10 +49,13 @@ export function generateComicStoryboard<T = Record<string, unknown>>(payload: Co
   return post<T>('/tasks/storyboard', payload, { loading: '正在拆分分镜' });
 }
 
-export interface ComicCompositionPayload {
-  projectId?: number;
-  shots: Array<{ index: number; title?: string; url: string }>;
+export interface ComicCompositionPayload extends Record<string, unknown> {
+  shots: Array<{ index: number; title?: string; taskId: number }>;
 }
 export function createComicComposition<T = Record<string, unknown>>(payload: ComicCompositionPayload) {
   return post<T>('/comic-compositions', payload, { loading: '正在创建成片任务' });
+}
+
+export function getComicComposition<T = Record<string, unknown>>(id: number) {
+  return get<T>(`/comic-compositions/${id}`, undefined, { silent: true });
 }
