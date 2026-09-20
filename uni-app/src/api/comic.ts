@@ -48,3 +48,11 @@ export function generateComicScript<T = Record<string, unknown>>(payload: ComicS
 export function generateComicStoryboard<T = Record<string, unknown>>(payload: ComicStoryboardPayload) {
   return post<T>('/tasks/storyboard', payload, { loading: '正在拆分分镜' });
 }
+
+export interface ComicCompositionPayload {
+  projectId?: number;
+  shots: Array<{ index: number; title?: string; url: string }>;
+}
+export function createComicComposition<T = Record<string, unknown>>(payload: ComicCompositionPayload) {
+  return post<T>('/comic-compositions', payload, { loading: '正在创建成片任务' });
+}
