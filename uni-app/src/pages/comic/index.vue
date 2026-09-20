@@ -204,10 +204,19 @@
             <view class="shot-actions"><button class="generate" :disabled="shot.status === 'generating'" @tap="generateShot(index)">{{ shot.status === 'generating' ? '生成中' : (shot.taskId ? '重新生成' : '生成镜头') }}</button><button @tap="openShotResult(shot)">查看</button><button @tap="moveShot(index, -1)">上移</button><button @tap="moveShot(index, 1)">下移</button><button @tap="duplicateShot(index)">复制</button><button class="danger" @tap="removeShot(index)">删除</button></view>
           </view>
         </view>
+        <view class="batch-generation-bar"><view><text>待生成 {{ pendingShotCount }} 镜</text><text>预计 {{ batchEstimatedPoints }} 点</text></view><button :disabled="!pendingShotCount" @tap="generatePendingShots">批量生成待完成镜头</button></view>
         <button class="add-shot-button" @tap="addShot">＋ 添加镜头</button></view>
       <view class="form-section">
         <view class="form-title">角色设定</view>
         <input v-model="character" class="character-input" placeholder="主角身份、性格、服装或关键关系" placeholder-class="field-placeholder" />
+        <view class="scene-library">
+          <view class="character-library-head"><text>场景资产库</text><button @tap="addSceneAsset">＋ 新场景</button></view>
+          <view v-for="(sceneAsset, sceneIndex) in sceneLibrary" :key="sceneAsset.id" class="character-asset">
+            <view class="character-asset-media" @tap="chooseSceneReference(sceneIndex)"><image v-if="sceneAsset.referenceUrl" :src="sceneAsset.referenceUrl" mode="aspectFill" /><text v-else>场景图</text></view>
+            <view class="character-asset-fields"><input v-model="sceneAsset.name" placeholder="场景名" /><textarea v-model="sceneAsset.description" auto-height placeholder="固定空间、光线、陈设、时间氛围" /></view>
+            <button class="character-asset-delete" @tap="removeSceneAsset(sceneIndex)">删除</button>
+          </view>
+        </view>
         <view class="character-library">
           <view class="character-library-head"><text>角色资产库</text><button @tap="addCharacterAsset">＋ 新角色</button></view>
           <view v-for="(role, roleIndex) in characterLibrary" :key="role.id" class="character-asset">
@@ -479,6 +488,8 @@ const modelOptions = computed<ModelTier[]>(() => {
 });
 
 type ComicCharacter = { id: string; name: string; description: string; referenceUrl?: string; referenceFileId?: number };
+type ComicScene = { id: string; name: string; description: string; referenceUrl?: string; referenceFileId?: number };
+const sceneLibrary = ref<ComicScene[]>([]);
 const characterLibrary = ref<ComicCharacter[]>([]);
 const characterReferenceUrl = ref('');
 const characterReferenceFileId = ref<number | undefined>(undefined);
@@ -489,6 +500,46 @@ const supportsCharacterReference = computed(() => {
 const characterReferenceHint = computed(() => supportsCharacterReference.value
   ? '当前模型支持参考图，生成镜头时会携带它提高人物一致性。'
   : '当前模型未声明参考图能力；仅使用角色文字设定，不伪装支持参考图。');
+
+
+function addSceneAsset() { sceneLibrary.value.push({ id: 'scene-' + Date.now(), name: '新场景', description: '' }); saveComicDraft(); }
+function removeSceneAsset(index: number) { sceneLibrary.value.splice(index, 1); saveComicDraft(); }
+function chooseSceneReference(index: number) {
+  const sceneAsset = sceneLibrary.value[index]; if (!sceneAsset) return;
+  uni.chooseImage({ count: 1, sizeType: ['compressed'], sourceType: ['album', 'camera'], success: async (res) => {
+    const path = res.tempFilePaths?.[0]; if (!path) return;
+    try {
+      const uploaded = await uploadAsset<Record<string, unknown>>(path, 'ref_image', 'public');
+      sceneAsset.referenceUrl = String(uploaded.url || uploaded.fileUrl || uploaded.cdnUrl || path);
+      sceneAsset.referenceFileId = Number(uploaded.fileId || uploaded.id || 0) || undefined; saveComicDraft();
+    } catch { uni.showToast({ title: '场景参考图上传失败', icon: 'none' }); }
+  }});
+}
+function matchedScene(shot: ComicShot) {
+  const name = String(shot.scene || '').trim(); if (!name) return undefined;
+  return sceneLibrary.value.find((sceneAsset) => sceneAsset.name === name || sceneAsset.name.includes(name) || name.includes(sceneAsset.name));
+}
+function shotReferenceAssets(shot: ComicShot) {
+  if (!supportsCharacterReference.value) return [] as number[];
+  const ids = [...shotCharacters(shot).map((role) => role.referenceFileId), matchedScene(shot)?.referenceFileId]
+    .filter((id): id is number => Boolean(id));
+  if (!ids.length && characterReferenceFileId.value) ids.push(characterReferenceFileId.value);
+  return ids.slice(0, Number(selectedModel.value?.capabilities?.maxReferenceImages || 1));
+}
+const pendingShotCount = computed(() => storyboardShots.value.filter((shot) => shot.status !== 'done' && shot.status !== 'generating' && shot.description.trim()).length);
+const batchEstimatedPoints = computed(() => pendingShotCount.value * selectedModelCost.value);
+async function generatePendingShots() {
+  const indexes = storyboardShots.value.map((shot, index) => ({ shot, index }))
+    .filter(({ shot }) => shot.status !== 'done' && shot.status !== 'generating' && shot.description.trim()).map(({ index }) => index);
+  if (!indexes.length) { uni.showToast({ title: '没有待生成镜头', icon: 'none' }); return; }
+  const confirmed = await new Promise<boolean>((resolve) => uni.showModal({
+    title: '批量生成 ' + indexes.length + ' 个镜头',
+    content: '按当前模型预计最多消耗 ' + batchEstimatedPoints.value + ' 点。已完成和生成中的镜头不会重复提交。',
+    confirmText: '开始生成', success: (res) => resolve(Boolean(res.confirm)), fail: () => resolve(false)
+  }));
+  if (!confirmed) return;
+  for (const index of indexes) await generateShot(index);
+}
 
 function addCharacterAsset() {
   characterLibrary.value.push({ id: 'character-' + Date.now(), name: '新角色', description: '' }); saveComicDraft();
@@ -515,9 +566,7 @@ function shotCharacterBible(shot: ComicShot) {
 }
 function shotReferenceFileIds(shot: ComicShot) {
   if (!supportsCharacterReference.value) return [] as number[];
-  const matched = shotCharacters(shot).map((role) => role.referenceFileId).filter((id): id is number => Boolean(id));
-  if (matched.length) return matched.slice(0, Number(selectedModel.value?.capabilities?.maxReferenceImages || 1));
-  return characterReferenceFileId.value ? [characterReferenceFileId.value] : [];
+  return shotReferenceAssets(shot);
 }
 
 async function chooseCharacterReference() {
@@ -748,6 +797,7 @@ async function submitManga() {
       '镜头' + (index + 1) + '：' + shot.description,
       shot.character ? '角色：' + shot.character : '',
       shot.scene ? '场景：' + shot.scene : '',
+    matchedScene(shot)?.description ? '场景身份锁定：' + matchedScene(shot)?.description : '',
       shot.shotSize ? '景别：' + shot.shotSize : '',
       shot.camera ? '运镜：' + shot.camera : '',
       shot.dialogue ? '对白/旁白：' + shot.dialogue : ''
@@ -922,7 +972,7 @@ function moveShot(index: number, delta: number) {
 }
 
 function saveComicDraft() {
-  writePersistentCache(COMIC_DRAFT_CACHE_KEY, { story: story.value, character: character.value, genre: selectedGenre.value, style: selectedStyle.value, ratio: selectedRatio.value, duration: selectedDuration.value, script: generatedScript.value, storyboard: storyboardShots.value, step: pipelineStep.value, characterReferenceUrl: characterReferenceUrl.value, characterReferenceFileId: characterReferenceFileId.value, characterLibrary: characterLibrary.value });
+  writePersistentCache(COMIC_DRAFT_CACHE_KEY, { story: story.value, character: character.value, genre: selectedGenre.value, style: selectedStyle.value, ratio: selectedRatio.value, duration: selectedDuration.value, script: generatedScript.value, storyboard: storyboardShots.value, step: pipelineStep.value, characterReferenceUrl: characterReferenceUrl.value, characterReferenceFileId: characterReferenceFileId.value, characterLibrary: characterLibrary.value, sceneLibrary: sceneLibrary.value });
 }
 function restoreComicDraft() {
   const draft = readPersistentCache<Record<string, unknown>>(COMIC_DRAFT_CACHE_KEY, 7 * 24 * 60 * 60_000);
@@ -1921,5 +1971,5 @@ function middleModelIndex() {
   color: #ffffff;
   box-shadow: none;
 }
- .pipeline-card,.production-card{margin-bottom:24rpx;padding:24rpx;border-radius:22rpx;background:#fff;box-shadow:0 8rpx 24rpx rgba(83,65,160,.08)} .pipeline-title,.production-head{display:flex;justify-content:space-between;font-weight:900;font-size:28rpx}.pipeline-steps{display:flex;justify-content:space-between;margin-top:22rpx}.pipeline-step{display:flex;align-items:center;gap:7rpx;color:#9a96aa;font-size:22rpx}.pipeline-step.active,.pipeline-step.done{color:#6c4bff;font-weight:800}.pipeline-dot{width:14rpx;height:14rpx;border-radius:50%;background:#ddd8eb}.pipeline-step.active .pipeline-dot,.pipeline-step.done .pipeline-dot{background:#6c4bff}.pipeline-hint{margin-top:18rpx;color:#777184;font-size:22rpx;line-height:1.6}.pipeline-actions{display:grid;grid-template-columns:1fr 1fr;gap:16rpx;margin:20rpx 0}.pipeline-secondary{height:72rpx;border-radius:18rpx;background:#f1edff;color:#6847e8;font-size:24rpx;font-weight:800}.script-editor{width:100%;min-height:220rpx;margin-top:18rpx;padding:18rpx;box-sizing:border-box;border-radius:16rpx;background:#f8f7fb;font-size:24rpx;line-height:1.65}.shot-row{display:flex;gap:16rpx;padding:18rpx 0;border-bottom:1rpx solid #f0edf6}.shot-index{display:flex;align-items:center;justify-content:center;flex:0 0 46rpx;height:46rpx;border-radius:14rpx;background:#eee9ff;color:#6545dc;font-weight:900}.shot-head{display:flex;align-items:center;gap:12rpx}.shot-title-input{flex:1;font-size:24rpx;font-weight:900}.shot-status{padding:5rpx 12rpx;border-radius:999rpx;background:#f0ecff;color:#6c4bff;font-size:18rpx}.shot-description-input{width:100%;min-height:86rpx;margin-top:10rpx;font-size:22rpx;line-height:1.55}.shot-meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:10rpx;margin-top:10rpx}.shot-field{height:58rpx;padding:0 14rpx;border-radius:12rpx;background:#f8f7fb;font-size:20rpx}.character-library{margin-top:16rpx}.character-library-head{display:flex;align-items:center;justify-content:space-between;font-size:22rpx;font-weight:800}.character-library-head button{height:50rpx;padding:0 14rpx;border-radius:12rpx;background:#eee9ff;color:#6847e8;font-size:18rpx;line-height:50rpx}.character-asset{display:flex;align-items:flex-start;gap:12rpx;margin-top:12rpx;padding:14rpx;border-radius:16rpx;background:#f8f7fb}.character-asset-media{display:flex;align-items:center;justify-content:center;width:82rpx;height:82rpx;overflow:hidden;border-radius:14rpx;background:#eee9ff;color:#6847e8;font-size:18rpx}.character-asset-media image{width:100%;height:100%}.character-asset-fields{display:flex;flex:1;flex-direction:column;gap:8rpx}.character-asset-fields input,.character-asset-fields textarea{width:100%;font-size:20rpx}.character-asset-delete{height:44rpx;padding:0 10rpx;background:transparent;color:#d84f67;font-size:17rpx;line-height:44rpx}.character-reference-card{display:flex;align-items:center;gap:16rpx;margin-top:14rpx;padding:16rpx;border-radius:18rpx;background:#f8f7fb}.character-reference-copy{display:flex;flex:1;flex-direction:column;gap:6rpx}.character-reference-title{font-size:22rpx;font-weight:800}.character-reference-desc{font-size:18rpx;line-height:1.45;color:#8c8798}.character-reference-media{display:flex;align-items:center;justify-content:center;width:92rpx;height:92rpx;overflow:hidden;border-radius:16rpx;background:#eee9ff;color:#6847e8;font-size:20rpx}.character-reference-media image{width:100%;height:100%}.character-reference-remove{height:48rpx;padding:0 12rpx;background:transparent;color:#d84f67;font-size:18rpx;line-height:48rpx}.shot-output{overflow:hidden;width:100%;height:260rpx;margin-top:12rpx;border-radius:16rpx;background:#111}.shot-output video,.shot-output image{width:100%;height:100%}.shot-actions{display:flex;flex-wrap:wrap;gap:10rpx;margin-top:12rpx}.shot-actions button{height:52rpx;padding:0 16rpx;border-radius:12rpx;background:#f4f2f8;font-size:19rpx;line-height:52rpx}.shot-actions .generate{background:#6c4bff;color:#fff}.shot-actions .danger{color:#d84f67}.add-shot-button{height:66rpx;margin-top:18rpx;border-radius:16rpx;background:#f0ecff;color:#6847e8;font-size:22rpx;font-weight:800}.shot-desc,.shot-dialogue{margin-top:8rpx;color:#686372;font-size:22rpx;line-height:1.55}.shot-dialogue{color:#8a64c9}
+ .pipeline-card,.production-card{margin-bottom:24rpx;padding:24rpx;border-radius:22rpx;background:#fff;box-shadow:0 8rpx 24rpx rgba(83,65,160,.08)} .pipeline-title,.production-head{display:flex;justify-content:space-between;font-weight:900;font-size:28rpx}.pipeline-steps{display:flex;justify-content:space-between;margin-top:22rpx}.pipeline-step{display:flex;align-items:center;gap:7rpx;color:#9a96aa;font-size:22rpx}.pipeline-step.active,.pipeline-step.done{color:#6c4bff;font-weight:800}.pipeline-dot{width:14rpx;height:14rpx;border-radius:50%;background:#ddd8eb}.pipeline-step.active .pipeline-dot,.pipeline-step.done .pipeline-dot{background:#6c4bff}.pipeline-hint{margin-top:18rpx;color:#777184;font-size:22rpx;line-height:1.6}.pipeline-actions{display:grid;grid-template-columns:1fr 1fr;gap:16rpx;margin:20rpx 0}.pipeline-secondary{height:72rpx;border-radius:18rpx;background:#f1edff;color:#6847e8;font-size:24rpx;font-weight:800}.script-editor{width:100%;min-height:220rpx;margin-top:18rpx;padding:18rpx;box-sizing:border-box;border-radius:16rpx;background:#f8f7fb;font-size:24rpx;line-height:1.65}.shot-row{display:flex;gap:16rpx;padding:18rpx 0;border-bottom:1rpx solid #f0edf6}.shot-index{display:flex;align-items:center;justify-content:center;flex:0 0 46rpx;height:46rpx;border-radius:14rpx;background:#eee9ff;color:#6545dc;font-weight:900}.shot-head{display:flex;align-items:center;gap:12rpx}.shot-title-input{flex:1;font-size:24rpx;font-weight:900}.shot-status{padding:5rpx 12rpx;border-radius:999rpx;background:#f0ecff;color:#6c4bff;font-size:18rpx}.shot-description-input{width:100%;min-height:86rpx;margin-top:10rpx;font-size:22rpx;line-height:1.55}.shot-meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:10rpx;margin-top:10rpx}.shot-field{height:58rpx;padding:0 14rpx;border-radius:12rpx;background:#f8f7fb;font-size:20rpx}.scene-library{margin-top:16rpx}.batch-generation-bar{display:flex;align-items:center;justify-content:space-between;gap:16rpx;margin-top:18rpx;padding:16rpx;border-radius:16rpx;background:#f4f0ff}.batch-generation-bar view{display:flex;flex-direction:column;gap:4rpx;font-size:19rpx;color:#766d88}.batch-generation-bar button{height:58rpx;padding:0 18rpx;border-radius:14rpx;background:#6c4bff;color:#fff;font-size:19rpx;line-height:58rpx}.character-library{margin-top:16rpx}.character-library-head{display:flex;align-items:center;justify-content:space-between;font-size:22rpx;font-weight:800}.character-library-head button{height:50rpx;padding:0 14rpx;border-radius:12rpx;background:#eee9ff;color:#6847e8;font-size:18rpx;line-height:50rpx}.character-asset{display:flex;align-items:flex-start;gap:12rpx;margin-top:12rpx;padding:14rpx;border-radius:16rpx;background:#f8f7fb}.character-asset-media{display:flex;align-items:center;justify-content:center;width:82rpx;height:82rpx;overflow:hidden;border-radius:14rpx;background:#eee9ff;color:#6847e8;font-size:18rpx}.character-asset-media image{width:100%;height:100%}.character-asset-fields{display:flex;flex:1;flex-direction:column;gap:8rpx}.character-asset-fields input,.character-asset-fields textarea{width:100%;font-size:20rpx}.character-asset-delete{height:44rpx;padding:0 10rpx;background:transparent;color:#d84f67;font-size:17rpx;line-height:44rpx}.character-reference-card{display:flex;align-items:center;gap:16rpx;margin-top:14rpx;padding:16rpx;border-radius:18rpx;background:#f8f7fb}.character-reference-copy{display:flex;flex:1;flex-direction:column;gap:6rpx}.character-reference-title{font-size:22rpx;font-weight:800}.character-reference-desc{font-size:18rpx;line-height:1.45;color:#8c8798}.character-reference-media{display:flex;align-items:center;justify-content:center;width:92rpx;height:92rpx;overflow:hidden;border-radius:16rpx;background:#eee9ff;color:#6847e8;font-size:20rpx}.character-reference-media image{width:100%;height:100%}.character-reference-remove{height:48rpx;padding:0 12rpx;background:transparent;color:#d84f67;font-size:18rpx;line-height:48rpx}.shot-output{overflow:hidden;width:100%;height:260rpx;margin-top:12rpx;border-radius:16rpx;background:#111}.shot-output video,.shot-output image{width:100%;height:100%}.shot-actions{display:flex;flex-wrap:wrap;gap:10rpx;margin-top:12rpx}.shot-actions button{height:52rpx;padding:0 16rpx;border-radius:12rpx;background:#f4f2f8;font-size:19rpx;line-height:52rpx}.shot-actions .generate{background:#6c4bff;color:#fff}.shot-actions .danger{color:#d84f67}.add-shot-button{height:66rpx;margin-top:18rpx;border-radius:16rpx;background:#f0ecff;color:#6847e8;font-size:22rpx;font-weight:800}.shot-desc,.shot-dialogue{margin-top:8rpx;color:#686372;font-size:22rpx;line-height:1.55}.shot-dialogue{color:#8a64c9}
 </style>
