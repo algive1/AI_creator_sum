@@ -169,3 +169,26 @@ test('comic persists and restores the selected tier before fingerprint checks', 
   assert.match(comicSource, /restoreSelectedModelIndex/);
   assert.match(comicSource, /modelOptions\.value\.findIndex/);
 });
+
+test('comic final composition is created and polled from the production page', () => {
+  assert.match(comicSource, /createComicComposition/);
+  assert.match(comicSource, /getComicComposition/);
+  assert.match(comicSource, /assemblyFingerprint/);
+  assert.match(comicSource, /startCompositionPolling/);
+  assert.match(comicSource, /setInterval\(\(\) => \{ pollCompositionJob/);
+  assert.match(comicSource, /统一分辨率、帧率和音轨/);
+  assert.match(comicSource, /compositionJob\.value = next/);
+});
+
+test('comic preserves old composition output but marks it stale after shot changes', () => {
+  assert.match(comicSource, /compositionIsStale/);
+  assert.match(comicSource, /当前分镜已变化/);
+  assert.match(comicSource, /发布前应重新合成/);
+  assert.match(comicSource, /compositionJob: compositionJob\.value/);
+});
+
+test('comic stops composition polling when page is hidden or unloaded', () => {
+  assert.match(comicSource, /stopCompositionPolling/);
+  assert.match(comicSource, /onHide\(\(\) => \{ comicPageVisible = false; stopShotTaskPolling\(\); stopCompositionPolling\(\); \}\)/);
+  assert.match(comicSource, /onUnload\(\(\) => \{ comicPageVisible = false; stopShotTaskPolling\(\); stopCompositionPolling\(\); \}\)/);
+});
