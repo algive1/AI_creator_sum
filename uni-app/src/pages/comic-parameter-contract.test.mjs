@@ -69,3 +69,13 @@ test('comic studio restores shot task status and outputs in batch', () => {
   assert.match(comicSource, /isTaskFailed/);
   assert.match(comicSource, /syncShotTasks\(\)/);
 });
+
+test('comic character reference follows declared video capabilities', () => {
+  assert.match(comicSource, /supportsCharacterReference/);
+  assert.match(comicSource, /maxReferenceImages/);
+  assert.match(comicSource, /referenceUploadMode/);
+  assert.match(comicSource, /uploadAsset/);
+  assert.match(comicSource, /referenceFileIds/);
+  assert.match(comicSource, /characterReferenceFileId/);
+  assert.match(comicSource, /未声明参考图能力/);
+});
