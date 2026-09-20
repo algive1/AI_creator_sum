@@ -46,6 +46,7 @@
     "check:payment": "tsx scripts/check-payment.ts",
     "check:customer-service": "tsx scripts/check-customer-service.ts",
     "repair:public-files": "tsx scripts/repair-public-file-visibility.ts",
+    "check:ffmpeg": "ffmpeg -version",
     "check:deploy": "node scripts/check-deploy.js",
     "check:stage3": "tsx scripts/check-stage3.ts",
     "check:all": "npm run build && npm run check:install && npm run check:tiers && npm run check:tasks && npm run check:image-size && npm run check:image-pricing && npm run check:video-pricing && npm run check:xiaoma-image-params && npm run check:xiaoma-video-params && npm run check:xiaoma-config-refresh"
