@@ -162,7 +162,8 @@ async function normalizeShot(input: string, output: string, probe: MediaProbe, w
     '-c:a', 'aac',
     '-ar', '48000',
     '-ac', '2',
-    ...(probe.hasAudio ? ['-af', 'aresample=async=1:first_pts=0'] : ['-shortest']),
+    ...(probe.hasAudio ? ['-af', 'aresample=async=1:first_pts=0,apad'] : []),
+    '-shortest',
     '-movflags', '+faststart',
     output,
   ]);
