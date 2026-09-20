@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 
 const { config } = require('../dist/utils/config.js');
 const {
@@ -167,6 +168,23 @@ function formatDetails(details) {
 async function checkPlatform() {
   const status = process.platform === 'linux' ? 'ok' : (isProduction() ? 'fail' : 'warning');
   addCheck('current platform', status, `${process.platform}/${process.arch}`, { expected: 'linux' });
+}
+
+function checkMediaRuntime() {
+  const binaries = [
+    ['ffmpeg', String(process.env.FFMPEG_PATH || 'ffmpeg')],
+    ['ffprobe', String(process.env.FFPROBE_PATH || 'ffprobe')],
+  ];
+  for (const [name, binary] of binaries) {
+    const result = spawnSync(binary, ['-version'], { encoding: 'utf8', timeout: 10000 });
+    const ok = !result.error && result.status === 0;
+    addCheck(
+      name + ' runtime',
+      ok ? 'ok' : isProduction() ? 'fail' : 'warning',
+      ok ? binary + ' is executable' : binary + ' is missing or not executable',
+      ok ? undefined : { error: result.error?.message || String(result.stderr || '').trim().slice(0, 300) },
+    );
+  }
 }
 
 async function checkNodeModules() {
@@ -390,6 +408,7 @@ async function main() {
   await checkEnvironment();
   checkEnvFileSecurity();
   await checkNodeModules();
+  checkMediaRuntime();
   checkBuildOutputs();
   checkRuntimeReleaseVersionSource();
   await checkInstallState();
