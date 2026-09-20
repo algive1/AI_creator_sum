@@ -115,7 +115,7 @@ async function download(url: string, target: string): Promise<number> {
   return bytes;
 }
 
-async function probeMedia(file: string): Promise<MediaProbe> {
+export async function probeMedia(file: string): Promise<MediaProbe> {
   const ffprobe = process.env.FFPROBE_PATH || 'ffprobe';
   const raw = await runCapture(ffprobe, ['-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', file]);
   const parsed = JSON.parse(raw || '{}');
@@ -141,7 +141,7 @@ export function targetDimensions(probe: MediaProbe) {
   return { width, height };
 }
 
-async function normalizeShot(input: string, output: string, probe: MediaProbe, width: number, height: number) {
+export async function normalizeShot(input: string, output: string, probe: MediaProbe, width: number, height: number) {
   const ffmpeg = process.env.FFMPEG_PATH || 'ffmpeg';
   const videoCodec = process.env.COMIC_COMPOSITION_VIDEO_CODEC || 'libx264';
   const preset = process.env.COMIC_COMPOSITION_PRESET || 'medium';
