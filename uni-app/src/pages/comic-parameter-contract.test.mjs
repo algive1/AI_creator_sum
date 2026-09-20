@@ -59,3 +59,13 @@ test('comic shots can be generated and regenerated independently', () => {
   assert.match(comicSource, /openShotResult/);
   assert.match(comicSource, /shotDuration/);
 });
+
+test('comic studio restores shot task status and outputs in batch', () => {
+  assert.match(comicSource, /getTasksByIds/);
+  assert.match(comicSource, /async function syncShotTasks/);
+  assert.match(comicSource, /taskOutputList/);
+  assert.match(comicSource, /taskThumbnailOf/);
+  assert.match(comicSource, /isTaskCompleted/);
+  assert.match(comicSource, /isTaskFailed/);
+  assert.match(comicSource, /syncShotTasks\(\)/);
+});
