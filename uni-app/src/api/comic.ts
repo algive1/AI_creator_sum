@@ -28,14 +28,14 @@ export function createComicTask<T = Record<string, unknown>>(payload: VideoTaskP
   });
 }
 
-export interface ComicScriptPayload {
+export interface ComicScriptPayload extends Record<string, unknown> {
   topic: string;
   style?: string;
   duration?: string;
   characters?: string;
 }
 
-export interface ComicStoryboardPayload {
+export interface ComicStoryboardPayload extends Record<string, unknown> {
   script: string;
   style?: string;
   ratio?: string;
@@ -49,7 +49,7 @@ export function generateComicStoryboard<T = Record<string, unknown>>(payload: Co
   return post<T>('/tasks/storyboard', payload, { loading: '正在拆分分镜' });
 }
 
-export interface ComicCompositionPayload {
+export interface ComicCompositionPayload extends Record<string, unknown> {
   shots: Array<{ index: number; title?: string; taskId: number }>;
 }
 export function createComicComposition<T = Record<string, unknown>>(payload: ComicCompositionPayload) {
