@@ -434,6 +434,7 @@ type ComicShot = {
   taskId?: number;
   outputUrl?: string;
   thumbnail?: string;
+  generationFingerprint?: string;
 };
 const storyboardShots = ref<ComicShot[]>([]);
 const pipelineBusy = ref(false);
@@ -629,7 +630,8 @@ onShow(async () => {
   });
 });
 
-watch(() => selectedModel.value?.tierKey, normalizeComicParams);
+watch(() => selectedModel.value?.tierKey, () => { normalizeComicParams(); invalidateStaleShotAssets(); });
+watch([selectedStyle, selectedRatio, characterLibrary, sceneLibrary, storyboardShots], invalidateStaleShotAssets, { deep: true });
 watch([story, character, selectedGenre, selectedStyle, selectedRatio, selectedDuration, generatedScript, storyboardShots], saveComicDraft, { deep: true });
 
 onShareAppMessage(() => createShareMessage({
@@ -884,6 +886,26 @@ function normalizeStoryboard(result: Record<string, unknown>) {
 
 
 
+
+function shotFingerprint(shot: ComicShot) {
+  return JSON.stringify({
+    description: shot.description, dialogue: shot.dialogue, character: shot.character, scene: shot.scene,
+    shotSize: shot.shotSize, camera: shot.camera, characterBible: shotCharacterBible(shot),
+    sceneBible: matchedScene(shot)?.description || '', style: selectedStyle.value, ratio: selectedRatio.value,
+    model: selectedModel.value?.tierKey || '', references: shotReferenceFileIds(shot)
+  });
+}
+function invalidateStaleShotAssets() {
+  let changed = false;
+  for (const shot of storyboardShots.value) {
+    if (!shot.taskId || shot.status === 'generating') continue;
+    if (shot.generationFingerprint && shot.generationFingerprint !== shotFingerprint(shot)) {
+      shot.status = 'draft'; shot.taskId = undefined; shot.outputUrl = ''; shot.thumbnail = ''; shot.generationFingerprint = ''; changed = true;
+    }
+  }
+  if (changed) saveComicDraft();
+}
+
 async function syncShotTasks() {
   const taskIds = storyboardShots.value.map((shot) => Number(shot.taskId || 0)).filter((id) => id > 0);
   if (!taskIds.length) return;
@@ -936,7 +958,7 @@ async function generateShot(index: number) {
     });
     const id = Number(result.id || result.taskId);
     if (!Number.isInteger(id) || id <= 0) throw new Error('invalid task');
-    shot.taskId = id; shot.status = 'generating'; saveComicDraft();
+    shot.taskId = id; shot.status = 'generating'; shot.generationFingerprint = shotFingerprint(shot); saveComicDraft();
     uni.showToast({ title: '镜头已提交，可继续编辑其他镜头', icon: 'none' });
   } catch {
     shot.status = 'failed'; saveComicDraft();
@@ -964,7 +986,7 @@ function addShot() {
 function removeShot(index: number) { storyboardShots.value.splice(index, 1); }
 function duplicateShot(index: number) {
   const source = storyboardShots.value[index]; if (!source) return;
-  storyboardShots.value.splice(index + 1, 0, { ...source, id: 'shot-' + Date.now(), title: source.title + ' 副本', status: 'draft', taskId: undefined, outputUrl: '', thumbnail: '' });
+  storyboardShots.value.splice(index + 1, 0, { ...source, id: 'shot-' + Date.now(), title: source.title + ' 副本', status: 'draft', taskId: undefined, outputUrl: '', thumbnail: '', generationFingerprint: '' });
 }
 function moveShot(index: number, delta: number) {
   const target = index + delta; if (target < 0 || target >= storyboardShots.value.length) return;
@@ -987,7 +1009,7 @@ function restoreComicDraft() {
     scene: String(shot.scene || ''), shotSize: String(shot.shotSize || ''), camera: String(shot.camera || ''),
     status: ['draft','ready','generating','done','failed'].includes(String(shot.status)) ? String(shot.status) as ComicShot['status'] : 'ready',
     taskId: Number(shot.taskId) || undefined,
-    outputUrl: String(shot.outputUrl || ''), thumbnail: String(shot.thumbnail || '')
+    outputUrl: String(shot.outputUrl || ''), thumbnail: String(shot.thumbnail || ''), generationFingerprint: String(shot.generationFingerprint || '')
   })) : [];
   const step = String(draft.step || 'idea'); if (['idea','script','storyboard','generate'].includes(step)) pipelineStep.value = step as 'idea'|'script'|'storyboard'|'generate';
 }
